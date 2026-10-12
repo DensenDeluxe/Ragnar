@@ -4,6 +4,13 @@
 
 ### 2026-10-13
 
+#### fix(perf): remove the 1-second CPU-sample stall that made clicks feel laggy
+*branch `fix/status-cpu-nonblocking`*
+
+- **The UI no longer hangs ~1–2 s when you click around.** `GET /api/system/status` — which the dashboard fetches on load and navigation — called `psutil.cpu_percent(interval=1)`, and that **sleeps the request thread for a full second** to measure CPU over that window. Every click that hit it paid the full second; `resource_monitor.get_system_status()` was worse (an `interval=0.5` sample **plus** an `is_system_healthy()` call that sampled another full second), so mesh/health paths could stall ~1.5 s.
+- **Fix: one shared, non-blocking CPU sampler.** New `resource_monitor.cpu_percent_nonblocking()` uses psutil's compute-since-last-call mode (`interval=None`, returns instantly), caches the value and re-samples at most once per second, so every caller gets a live rolling average without ever sleeping. `get_cpu_usage()`, `get_system_status()`, `is_system_healthy()` and the `/api/system/status` endpoint all route through it.
+- **Measured on a Pi 5 dev box:** `/api/system/status` **1.06 s → 0.063 s** (~17×); `resource_monitor.get_system_status()` **~1.5 s → ~1.3 ms**. CPU reading verified live (0 % idle → ~20 % under load). No API shape change — same JSON, same fields.
+
 #### feat(sdr): Signal Analyzer — whole-capture Spectrum Survey
 *branch `feature/signal-analyzer-sdr-survey`*
 

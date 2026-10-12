@@ -26689,8 +26689,11 @@ def get_system_status_api():
         if not psutil_available:
             return jsonify({'error': 'System monitoring not available'}), 503
             
-        # CPU Information
-        cpu_percent = psutil.cpu_percent(interval=1)
+        # CPU Information — non-blocking cached sample (psutil.cpu_percent with a
+        # 1s interval would sleep the request thread for a full second, which is
+        # what made every click that hit this endpoint feel like a 1-2s hang).
+        import resource_monitor as _rm
+        cpu_percent = _rm.cpu_percent_nonblocking()
         cpu_count = psutil.cpu_count()
         cpu_freq = psutil.cpu_freq()
         
