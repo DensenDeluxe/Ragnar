@@ -5,6 +5,7 @@
     "frames": 14,
     "expect": [
       "CFM-080",
+      "CFM-093",
       "CFM-160",
       "CFM-161",
       "CFM-162",
@@ -117,6 +118,29 @@
       "CFM-085",
       "CFM-086",
       "CFM-087",
+      "CFM-093",
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "elps",
+    "pcap": "elps.pcap",
+    "frames": 10,
+    "expect": [
+      "CFM-080",
+      "CFM-084",
+      "CFM-085",
+      "CFM-086",
+      "CFM-088",
+      "CFM-089",
+      "CFM-090",
+      "CFM-091",
+      "CFM-092",
+      "CFM-093",
       "CFM-160",
       "CFM-161",
       "CFM-162",
@@ -155,5 +179,209 @@
       "CFM-163"
     ],
     "args": []
+  },
+  {
+    "name": "raps_baseline",
+    "pcap": "raps_baseline.pcap",
+    "frames": 15,
+    "expect": [
+      "CFM-060",
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-185",
+      "CFM-201"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "raps_forged",
+    "pcap": "raps_forged.pcap",
+    "frames": 12,
+    "expect": [
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-185",
+      "CFM-186",
+      "CFM-187",
+      "CFM-188",
+      "CFM-191",
+      "CFM-192",
+      "CFM-193",
+      "CFM-195",
+      "CFM-197",
+      "CFM-201"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "raps_structural",
+    "pcap": "raps_structural.pcap",
+    "frames": 9,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-181",
+      "CFM-182",
+      "CFM-183",
+      "CFM-184",
+      "CFM-185",
+      "CFM-189",
+      "CFM-190",
+      "CFM-191",
+      "CFM-197",
+      "CFM-200",
+      "CFM-201"
+    ],
+    "args": []
+  },
+  {
+    "name": "raps_ring_open",
+    "pcap": "raps_ring_open.pcap",
+    "frames": 7,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-194",
+      "CFM-201"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "raps_offvlan",
+    "pcap": "raps_offvlan.pcap",
+    "frames": 3,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-196",
+      "CFM-201"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "raps_revision",
+    "pcap": "raps_revision.pcap",
+    "frames": 5,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-182",
+      "CFM-187",
+      "CFM-188",
+      "CFM-189",
+      "CFM-197",
+      "CFM-201",
+      "CFM-202",
+      "CFM-203",
+      "CFM-204"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "subring",
+    "pcap": "subring.pcap",
+    "frames": 6,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-185",
+      "CFM-195",
+      "CFM-201",
+      "CFM-205",
+      "CFM-207",
+      "CFM-208",
+      "CFM-209"
+    ],
+    "args": [
+      "--ring",
+      "500,role=major,rpl=00:11:22:aa:00:01,interconnect=00:11:22:aa:00:01/00:11:22:bb:00:02,nodes=00:11:22:aa:00:01/00:11:22:bb:00:02,name=major-500",
+      "--ring",
+      "600,role=sub,parent=major-500,vc=no,interconnect=00:11:22:aa:00:01/00:11:22:bb:00:02,nodes=00:11:22:cc:00:03/00:de:ad:be:ef:99,name=sub-600"
+    ]
+  },
+  {
+    "name": "raps_withdrawn",
+    "pcap": "raps_withdrawn.pcap",
+    "frames": 10,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-201",
+      "CFM-206"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "raps_flood",
+    "pcap": "raps_flood.pcap",
+    "frames": 60,
+    "expect": [
+      "CFM-120",
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-194",
+      "CFM-198",
+      "CFM-201"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
+  },
+  {
+    "name": "raps_ccm_loss",
+    "pcap": "raps_ccm_loss.pcap",
+    "frames": 7,
+    "expect": [
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163",
+      "CFM-180",
+      "CFM-199",
+      "CFM-201"
+    ],
+    "args": [
+      "--ring",
+      "500,rpl=00:11:22:aa:00:01,nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500"
+    ]
   }
 ]

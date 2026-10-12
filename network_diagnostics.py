@@ -26569,7 +26569,7 @@ def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=F
         if not os.path.isfile(pcap):
             return {'success': False, 'error': 'pcap not found: %s' % pcap}
         seconds = 0
-        engine = cw.Engine(cw.Config(md_ceiling=ceiling))
+        engine = cw.Engine(cw.Config(md_ceiling=ceiling, rings=_cfmw_rings()))
     else:
         iface = interface if _valid_iface(interface or '') else _capture_iface()
         if not iface:
@@ -26599,10 +26599,12 @@ def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=F
     try:
         with _cfmw_lock:
             if engine is None:
+                rings = _cfmw_rings()
                 engine = _cfmw_engines.get(iface)
                 if engine is None:
-                    engine = _cfmw_engines[iface] = cw.Engine(cw.Config())
+                    engine = _cfmw_engines[iface] = cw.Engine(cw.Config(rings=rings))
                 engine.cfg.md_ceiling = ceiling
+                engine.cfg.rings = rings
             rows, frames = _cfmw_analyze(pcap, engine)
             inventory = _cfmw_inventory(engine)
     except Exception as e:
@@ -26663,11 +26665,102 @@ def do_cfm_reset(interface=None):
     return {'success': True, 'reset': interface or 'all'}
 
 
+# --- ERPS / G.8032 ring declaration (Class R) -----------------------------
+# The engine's ring-topology rules (forged RPL owner, two blocks, ring-open,
+# off-VLAN R-APS, revision / sub-ring propagation) are baseline-dependent: on the
+# wire a legitimate protection switch and a forged R-APS are identical without the
+# declared topology — the module's own design, the same declare-or-stay-quiet
+# pattern vrfwatch uses for an interface role. So CFM Watch persists the operator's
+# ring declarations and feeds them to the engine; with none declared it still flags
+# ERPS presence (CFM-200) and structural / forged R-APS, it just cannot judge ring
+# topology. Specs are stored verbatim and re-parsed each scan via cw.parse_ring.
+_CFMW_STORE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           'data', 'cfm_watch.json')
+
+
+def _cfmw_load_ring_specs():
+    try:
+        with open(_CFMW_STORE) as fh:
+            specs = (json.load(fh) or {}).get('rings') or []
+        return [s for s in specs if isinstance(s, str) and s.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def _cfmw_save_ring_specs(specs):
+    try:
+        os.makedirs(os.path.dirname(_CFMW_STORE), exist_ok=True)
+        with open(_CFMW_STORE, 'w') as fh:
+            json.dump({'rings': list(specs)}, fh, indent=2)
+        return True
+    except OSError:
+        return False
+
+
+def _cfmw_rings():
+    """Declared ring specs -> parsed Ring objects (a spec that no longer parses is
+    skipped, never fatal)."""
+    cw = _cfmw_import()
+    out = []
+    for s in _cfmw_load_ring_specs():
+        try:
+            out.append(cw.parse_ring(s))
+        except Exception:
+            continue
+    return tuple(out)
+
+
+def _cfmw_ring_list(specs, cw):
+    out = []
+    for s in specs:
+        try:
+            out.append({'spec': s, 'name': cw.parse_ring(s).name(), 'ok': True})
+        except Exception as e:
+            out.append({'spec': s, 'ok': False, 'error': str(e)})
+    return out
+
+
+def do_cfm_ring(action='list', spec=None):
+    """Declare / list / remove the ERPS (G.8032) rings whose topology CFM Watch should
+    police. A spec is `VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,parent=NAME]
+    [,name=LABEL]` (VLAN may be `untagged` or OUTER/INNER for QinQ). Declaring a ring
+    arms the Class R topology rules (forged RPL owner, two blocks, ring-open, off-VLAN
+    R-APS, revision / sub-ring propagation); with none declared the watcher still
+    reports ERPS presence (CFM-200) and structural / forged R-APS."""
+    cw = _cfmw_import()
+    spec = (str(spec).strip() if spec is not None else '')
+    with _cfmw_lock:
+        specs = _cfmw_load_ring_specs()
+        if action == 'declare':
+            if not spec:
+                return {'success': False, 'error': 'no ring specification given'}
+            try:
+                ring = cw.parse_ring(spec)
+            except Exception as e:
+                return {'success': False, 'error': 'invalid ring specification: %s' % e}
+            if spec not in specs:
+                specs.append(spec)
+                _cfmw_save_ring_specs(specs)
+            _cfmw_engines.clear()        # rebuild engines so the ring arms next scan
+            return {'success': True, 'declared': spec, 'name': ring.name(),
+                    'rings': _cfmw_ring_list(specs, cw)}
+        if action == 'remove':
+            new = [s for s in specs if s != spec]
+            _cfmw_save_ring_specs(new)
+            _cfmw_engines.clear()
+            return {'success': True, 'rings': _cfmw_ring_list(new, cw)}
+        if action == 'clear':
+            _cfmw_save_ring_specs([])
+            _cfmw_engines.clear()
+            return {'success': True, 'rings': []}
+        return {'success': True, 'rings': _cfmw_ring_list(specs, cw)}
+
+
 def _cfmw_selftest():
     """Adapter scenarios over the vendored engine with the upstream fixture corpus
     (offline, no root): every fixture must fire exactly its manifest code set through
     this adapter, plus verdict, CVE tagging and cross-scan persistence. Then the
-    module's own tiers out-of-process: the 54-check conformance harness and, with
+    module's own tiers out-of-process: the 173-check conformance harness and, with
     scapy + tshark present, the dual-dissector cross-check. (The upstream fuzz tier
     scans its own directory's copy of the module and is not run in-app.)"""
     import importlib.util
@@ -26693,16 +26786,19 @@ def _cfmw_selftest():
     split = {}
     for s in cw.SPECS:
         split[s.severity] = split.get(s.severity, 0) + 1
-    check('registry: 54 codes (2 critical / 20 high / 21 medium / 6 low / 5 info)',
-          len(cw.SPECS) == 54 and split == {'CRITICAL': 2, 'HIGH': 20, 'MEDIUM': 21,
-                                            'LOW': 6, 'INFO': 5})
+    check('registry: 90 codes (3 critical / 34 high / 35 medium / 9 low / 9 info)',
+          len(cw.SPECS) == 90 and split == {'CRITICAL': 3, 'HIGH': 34, 'MEDIUM': 35,
+                                            'LOW': 9, 'INFO': 9})
 
     def fixture(name):
         e = next(x for x in manifest if x['name'] == name)
-        ceiling = e['args'][e['args'].index('--md-ceiling') + 1] \
-            if '--md-ceiling' in e['args'] else None
+        args = e['args']
+        ceiling = args[args.index('--md-ceiling') + 1] if '--md-ceiling' in args else None
+        rings = tuple(cw.parse_ring(args[i + 1])
+                      for i, a in enumerate(args) if a == '--ring')
         rows, n = _cfmw_analyze(os.path.join(fdir, e['pcap']),
-                                cw.Engine(cw.Config(md_ceiling=_cfmw_ceiling(ceiling))))
+                                cw.Engine(cw.Config(md_ceiling=_cfmw_ceiling(ceiling),
+                                                    rings=rings)))
         return e, rows, n
 
     def codes(rows):
@@ -26717,7 +26813,7 @@ def _cfmw_selftest():
             bad.append(e['name'])
     check('all %d fixtures fire exactly their manifest codes through the adapter%s'
           % (len(manifest), (' (bad: %s)' % ', '.join(bad)) if bad else ''), not bad)
-    check('the fixture corpus covers all 54 codes', len(fired) == 54)
+    check('the fixture corpus covers all 90 codes', len(fired) == 90)
 
     _e, rows, n = fixture('baseline')
     check('baseline (settled CCMs, APS No Request, LMM): inventory only -> clean',
@@ -26780,6 +26876,30 @@ def _cfmw_selftest():
           and 3 in inv['levels'] and any(v['tags'] == [100] for v in inv['vlans']))
     r = do_cfm_reset('selftest0')
     check('reset clears per-interface state', r.get('success'))
+
+    # ERPS ring-declaration store (Class R): a declared ring arms the topology
+    # rules; with none declared R-APS still surfaces as the CFM-200 posture. Snapshot
+    # and restore the real store so a self-test run never clobbers operator config.
+    _saved_rings = _cfmw_load_ring_specs()
+    try:
+        _rspec = ('500,rpl=00:11:22:aa:00:01,'
+                  'nodes=00:11:22:bb:00:02/00:11:22:cc:00:03,name=ring-500')
+        _rd = do_cfm_ring('declare', _rspec)
+        _parsed = _cfmw_rings()
+        check('do_cfm_ring declare persists + parses a ring spec',
+              _rd.get('success') and len(_parsed) == 1 and _parsed[0].name() == 'ring-500')
+        rows, _n = _cfmw_analyze(os.path.join(fdir, 'raps_forged.pcap'),
+                                 cw.Engine(cw.Config(rings=_cfmw_rings())))
+        check('declared ring (loaded from store) arms Class R topology codes',
+              bool({'CFM-192', 'CFM-195'} & codes(rows)))
+        do_cfm_ring('clear')
+        rows, _n = _cfmw_analyze(os.path.join(fdir, 'raps_baseline.pcap'),
+                                 cw.Engine(cw.Config(rings=_cfmw_rings())))
+        check('undeclared R-APS -> CFM-200 (declare-your-ring posture)',
+              'CFM-200' in codes(rows))
+    finally:
+        _cfmw_save_ring_specs(_saved_rings)
+        _cfmw_engines.clear()
 
     # Out-of-process tiers: the upstream harnesses import cfmwatch from their own
     # directory, so run them with python/ on the path.
@@ -29054,6 +29174,20 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Invalid interface')
         _log(f"net/cfm-reset {iface or 'all'}")
         return jsonify(do_cfm_reset(iface))
+
+    @app.route('/api/net/cfm-ring', methods=['GET', 'POST'])
+    def net_cfm_ring():
+        if request.method == 'GET':
+            return jsonify(do_cfm_ring('list'))
+        data = request.get_json(silent=True) or {}
+        action = (data.get('action') or 'list').strip()
+        if action not in ('declare', 'remove', 'clear', 'list'):
+            return _bad('Invalid action')
+        spec = data.get('spec')
+        if spec is not None and len(str(spec)) > 300:
+            return _bad('Ring specification too long')
+        _log(f"net/cfm-ring {action}")
+        return jsonify(do_cfm_ring(action, spec))
 
     @app.route('/api/net/ble-watch', methods=['GET'])
     def net_ble_watch():
@@ -31850,6 +31984,15 @@ def _cli(argv=None):
                      help='highest legitimate MD level at this tap (0-7); arms CFM-021')
     cw_.add_argument('--json', action='store_true', help='emit JSON')
 
+    cr_ = sub.add_parser('cfm-ring',
+                         help='declare / list / remove ERPS (G.8032) rings so CFM Watch '
+                              'can police ring topology (Class R, CFM-192..209)')
+    cr_.add_argument('action', nargs='?', default='list',
+                     choices=['list', 'declare', 'remove', 'clear'])
+    cr_.add_argument('spec', nargs='?', default=None,
+                     help='VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,name=LABEL]')
+    cr_.add_argument('--json', action='store_true', help='emit JSON')
+
     lw_ = sub.add_parser('lldp-watch',
                          help='passive LLDP (802.1AB) scan: malformed-TLV CVE shapes, '
                               'vulnerable-family screening, flood / forged neighbour')
@@ -32580,6 +32723,24 @@ def _cli(argv=None):
                 cve = f" {','.join(f['cves'])}" if f['cves'] else ''
                 print(f"  [{f['code']}] {f['severity'].upper():8} {f['name']}{cve} | "
                       f"{f['src'] or f['context']} x{f['count']} | {f['detail']}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'cfm-ring':
+        r = do_cfm_ring(args.action, args.spec)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            rings = r.get('rings') or []
+            if not rings:
+                print('no ERPS rings declared')
+            for rg in rings:
+                if isinstance(rg, dict):
+                    print(f"  {rg.get('name', '?')}: {rg['spec']}"
+                          + ('' if rg.get('ok', True) else f"  (INVALID: {rg.get('error')})"))
+                else:
+                    print(f"  {rg}")
         return 0 if r.get('success') else 1
 
     if args.cmd == 'lldp-watch':

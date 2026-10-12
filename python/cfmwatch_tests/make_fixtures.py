@@ -120,9 +120,48 @@ def lmm(level: int) -> bytes:
 
 
 def aps(level: int, request: int, ptype: int = 0x1, req_sig: int = 1,
-        br_sig: int = 1) -> bytes:
+        br_sig: int = 1, octet4: int = 0x00) -> bytes:
+    """G.8031 linear APS. ptype is the A/B/D/R nibble; octet4's top bit is
+    the bridge type and the remaining seven bits are reserved."""
     o1 = ((request & 0x0F) << 4) | (ptype & 0x0F)
-    return cfm(level, 39, 0, 4, bytes([o1, req_sig, br_sig, 0x00]), END)
+    return cfm(level, 39, 0, 4, bytes([o1, req_sig, br_sig, octet4]), END)
+
+
+# ---- G.8032 R-APS (opcode 40) --------------------------------------------
+# Body is 32 octets: req/state 4b + sub-code 4b, status octet, 6-octet
+# Node ID, 24 reserved. First TLV Offset is 32.
+
+RB = 0x80
+DNF = 0x40
+BPR = 0x20
+
+NODE_A = MAC_A
+NODE_B = MAC_B
+NODE_C = MAC_C
+RING_VLAN = ((0x8100, 500),)
+
+
+def raps(level: int, request: int, sub_code: int = 0, status: int = 0,
+         node_id: bytes | None = None, resv: bytes | None = None,
+         flags: int = 0, version: int = 1) -> bytes:
+    """Build an R-APS. version 1 is G.8032v2, version 0 is G.8032v1.
+
+    The default is 1 (G.8032v2) because that is what every current
+    deployment speaks; v1 is exercised deliberately by the revision
+    fixture.
+    """
+    body = bytes([((request & 0x0F) << 4) | (sub_code & 0x0F), status])
+    body += (node_id if node_id is not None else MAC_A)
+    body += (resv if resv is not None else b"\x00" * 24)
+    return cfm(level, 40, flags, 32, body, END, version=version)
+
+
+def eth_ring(src: bytes, payload: bytes, dst: bytes | None = None) -> bytes:
+    # The R-APS destination is vendor-configurable and ring-ID dependent,
+    # so the fixtures use the CFM group for the level and the ring rules
+    # key on the control VLAN instead of a hardcoded address.
+    return eth(dst if dst is not None else cfm_group(3), src, payload,
+               vlans=RING_VLAN)
 
 
 def write_pcap(path: str, frames: List[Tuple[float, bytes]]) -> None:
@@ -163,8 +202,8 @@ D3L = cfm_group(3, klass=2)
 D5 = cfm_group(5)
 
 
-@scenario("baseline", ["CFM-080", "CFM-160", "CFM-161", "CFM-162",
-                       "CFM-163"])
+@scenario("baseline", ["CFM-080", "CFM-093", "CFM-160", "CFM-161",
+                       "CFM-162", "CFM-163"])
 def _baseline():
     f = []
     t = 0.0
@@ -310,7 +349,7 @@ def _y1731():
 
 @scenario("aps",
           ["CFM-080", "CFM-081", "CFM-082", "CFM-083", "CFM-084", "CFM-085",
-           "CFM-086", "CFM-087", "CFM-160", "CFM-161", "CFM-162",
+           "CFM-086", "CFM-087", "CFM-093", "CFM-160", "CFM-161", "CFM-162",
            "CFM-163"])
 def _aps():
     f = []
@@ -331,6 +370,46 @@ def _aps():
     f.append((t, eth(D3, MAC_A, aps(3, 3))))      # CFM-086 reserved code
     t += 0.4
     f.append((t, eth(D3, MAC_X, aps(3, 0))))      # CFM-084 new source MAC
+    return f
+
+
+@scenario("elps",
+          ["CFM-080", "CFM-084", "CFM-085", "CFM-086", "CFM-088", "CFM-089",
+           "CFM-090", "CFM-091", "CFM-092", "CFM-093", "CFM-160", "CFM-161",
+           "CFM-162", "CFM-163"])
+def _elps():
+    """G.8031 / ELPS linear protection.
+
+    Also the regression guard for the SF-P semantics: SF-P reports that
+    the PROTECTION path failed, so the working path is still carrying
+    traffic and its CCMs stay healthy. Running SF-P through the
+    uncorroborated-fault test raises a CRITICAL forged-switch alarm on
+    every genuine protection failure, so CFM-083 must NOT fire here.
+    """
+    f = []
+    t = 0.0
+    # working path healthy and settled, which arms CFM-083 if it were wrong
+    for i in range(3):
+        f.append((t, eth(D3, MAC_A, ccm(3, 10, seq=i + 1))))
+        t += 0.4
+    f.append((t, eth(D3, MAC_A, aps(3, 0x0, ptype=0xF))))      # NR, ABDR
+    t += 0.4
+    # CFM-088: SF-P. CFM-083 must stay silent.
+    f.append((t, eth(D3, MAC_A, aps(3, 0xE, ptype=0xF))))
+    t += 0.4
+    f.append((t, eth(D3, MAC_A, aps(3, 0x9, ptype=0xF))))      # CFM-089 SD
+    t += 0.4
+    # CFM-090: the far end advertises a different protection type
+    f.append((t, eth(D3, MAC_B, aps(3, 0x0, ptype=0x5))))
+    t += 0.4
+    # CFM-091: requests normal while bridging null
+    f.append((t, eth(D3, MAC_A, aps(3, 0x0, ptype=0xF, br_sig=0))))
+    t += 0.4
+    # CFM-092: reserved bits set in the body's last octet
+    f.append((t, eth(D3, MAC_A, aps(3, 0x0, ptype=0xF, octet4=0x40))))
+    t += 0.4
+    # CFM-086: the deprecated request code
+    f.append((t, eth(D3, MAC_A, aps(3, 0x6, ptype=0xF))))
     return f
 
 
@@ -368,6 +447,284 @@ def _rate():
     for i in range(120):
         f.append((t, eth(D3, MAC_X, lbm(3, tid=i + 1))))
         t += 0.01
+    return f
+
+
+SUB_VLAN = ((0x8100, 600),)
+
+
+def eth_sub(src: bytes, payload: bytes, dst: bytes | None = None) -> bytes:
+    return eth(dst if dst is not None else cfm_group(3), src, payload,
+               vlans=SUB_VLAN)
+
+
+# A G.8032v2 interconnected topology: major ring 500 with sub-ring 600
+# attached at interconnection nodes A and B, no virtual channel.
+SUBRING_DECL = [
+    "--ring", "500,role=major,rpl=%s,interconnect=%s/%s,nodes=%s/%s,"
+              "name=major-500" % (MAC_A.hex(":"), MAC_A.hex(":"),
+                                  MAC_B.hex(":"), MAC_A.hex(":"),
+                                  MAC_B.hex(":")),
+    "--ring", "600,role=sub,parent=major-500,vc=no,interconnect=%s/%s,"
+              "nodes=%s/%s,name=sub-600" % (MAC_A.hex(":"), MAC_B.hex(":"),
+                                            MAC_C.hex(":"), MAC_X.hex(":")),
+]
+
+RING_DECL = ["--ring",
+             "500,rpl=%s,nodes=%s/%s,name=ring-500"
+             % (MAC_A.hex(":"), MAC_B.hex(":"), MAC_C.hex(":"))]
+
+
+@scenario("raps_baseline",
+          ["CFM-060", "CFM-160", "CFM-161", "CFM-162", "CFM-163",
+           "CFM-180", "CFM-185", "CFM-201"],
+          args=RING_DECL)
+def _raps_baseline():
+    """A healthy declared ring: RPL owner announces NR,RB, then a real
+    failure arrives WITH an AIS corroborating it, so CFM-186 must stay
+    silent. That is the negative control for the forged-switch rule."""
+    f = []
+    t = 0.0
+    # Both ring nodes source CCMs on the control VLAN, which is what a real
+    # ring looks like. A fixture where only the RPL owner sends CCMs makes
+    # the other node's AIS look injected (CFM-061) for a reason that is an
+    # artefact of the fixture rather than of the ring.
+    for i in range(4):
+        f.append((t, eth_ring(MAC_A, ccm(3, 10, seq=i + 1))))
+        f.append((t + 0.02, eth_ring(MAC_B, ccm(3, 20, seq=i + 1))))
+        f.append((t + 0.05, eth_ring(MAC_A, raps(3, 0, status=RB))))
+        t += 1.0
+    # a genuine fault: AIS first, then SF. CFM-186 must not fire.
+    f.append((t, eth_ring(MAC_B, ais(3, period=4))))
+    t += 0.2
+    f.append((t, eth_ring(MAC_B, raps(3, 0xB, node_id=MAC_B))))
+    t += 0.2
+    f.append((t, eth_ring(MAC_B, raps(3, 0xB, node_id=MAC_B))))
+    return f
+
+
+@scenario("raps_forged",
+          ["CFM-160", "CFM-161", "CFM-163", "CFM-180", "CFM-185", "CFM-186",
+           "CFM-187", "CFM-188", "CFM-191", "CFM-192", "CFM-193", "CFM-195",
+           "CFM-197", "CFM-201", "CFM-162"],
+          args=RING_DECL)
+def _raps_forged():
+    """Forgery against a declared ring."""
+    f = []
+    t = 0.0
+    # settle the ring: owner MAC_A holds the block, CCMs healthy
+    for i in range(3):
+        f.append((t, eth_ring(MAC_A, ccm(3, 10, seq=i + 1))))
+        f.append((t + 0.05, eth_ring(MAC_A, raps(3, 0, status=RB))))
+        t += 0.5
+    # CFM-185 + CFM-186: SF while CCMs are live and no AIS was seen
+    f.append((t, eth_ring(MAC_B, raps(3, 0xB, node_id=MAC_B))))
+    t += 0.3
+    # CFM-187 Forced Switch, CFM-188 Manual Switch
+    f.append((t, eth_ring(MAC_B, raps(3, 0xD, node_id=MAC_B))))
+    t += 0.3
+    f.append((t, eth_ring(MAC_B, raps(3, 0x7, node_id=MAC_B))))
+    t += 0.3
+    # CFM-191: DNF set on an SF, suppressing the flush
+    f.append((t, eth_ring(MAC_B, raps(3, 0xB, status=DNF, node_id=MAC_B))))
+    t += 0.3
+    # CFM-192 + CFM-193: MAC_C claims RB while the owner still holds it
+    f.append((t, eth_ring(MAC_C, raps(3, 0, status=RB, node_id=MAC_C))))
+    t += 0.3
+    # CFM-195: off-ring node injects
+    f.append((t, eth_ring(MAC_X, raps(3, 0xB, node_id=MAC_X))))
+    return f
+
+
+@scenario("raps_structural",
+          ["CFM-160", "CFM-163", "CFM-180", "CFM-181", "CFM-182", "CFM-183",
+           "CFM-184", "CFM-185", "CFM-189", "CFM-190", "CFM-191", "CFM-197",
+           "CFM-200", "CFM-201", "CFM-162"])
+def _raps_structural():
+    """Structural conformance plus the flush primitive, with NO ring
+    declared - so CFM-200 fires and the topology rules stay inert."""
+    f = []
+    t = 0.0
+
+    def add(frame):
+        nonlocal t
+        f.append((t, frame))
+        t += 0.3
+
+    # CFM-181: reserved request/state
+    add(eth_ring(MAC_X, raps(3, 0x5, node_id=MAC_X)))
+    # CFM-182: non-zero Flags, status reserved bits and reserved octets
+    add(eth_ring(MAC_X, raps(3, 0, status=0x05, node_id=MAC_X, flags=0x7F,
+                             resv=b"\x00" * 20 + b"LEAK")))
+    # CFM-183: Node ID disagrees with the source MAC
+    add(eth_ring(MAC_X, raps(3, 0, node_id=MAC_B)))
+    # CFM-184: sub-code on a request that defines none
+    add(eth_ring(MAC_X, raps(3, 0xB, sub_code=3, node_id=MAC_X)))
+    # CFM-189 + CFM-190: Event/Flush burst
+    for _ in range(4):
+        add(eth_ring(MAC_X, raps(3, 0xE, sub_code=0, node_id=MAC_X)))
+    # CFM-191 via Event with DNF
+    add(eth_ring(MAC_X, raps(3, 0xE, sub_code=0, status=DNF,
+                             node_id=MAC_X)))
+    return f
+
+
+@scenario("raps_ring_open",
+          ["CFM-160", "CFM-163", "CFM-180", "CFM-194", "CFM-201", "CFM-162"],
+          args=RING_DECL)
+def _raps_ring_open():
+    """A declared ring whose R-APS(NR) stream never asserts RB: either no
+    node holds the block (a ring loop) or the tap cannot see the owner."""
+    f = []
+    t = 0.0
+    for i in range(7):
+        f.append((t, eth_ring(MAC_B, raps(3, 0, node_id=MAC_B))))
+        t += 0.5
+    return f
+
+
+@scenario("raps_offvlan",
+          ["CFM-160", "CFM-163", "CFM-180", "CFM-196", "CFM-201", "CFM-162"],
+          args=RING_DECL)
+def _raps_offvlan():
+    """Ring 500 is declared; R-APS turns up on VLAN 900 instead. Either an
+    undeclared ring exists, or R-APS is being injected where no ring
+    runs."""
+    f = []
+    t = 0.0
+    for i in range(3):
+        f.append((t, eth(cfm_group(3), MAC_B,
+                         raps(3, 0, node_id=MAC_B),
+                         vlans=((0x8100, 900),))))
+        t += 0.5
+    return f
+
+
+@scenario("raps_revision",
+          ["CFM-160", "CFM-162", "CFM-163", "CFM-180", "CFM-182", "CFM-187",
+           "CFM-188", "CFM-189", "CFM-197", "CFM-201", "CFM-202", "CFM-203",
+           "CFM-204"],
+          args=RING_DECL)
+def _raps_revision():
+    """G.8032 revision handling.
+
+    The revision is carried in the CFM common-header Version field: 0 is
+    G.8032v1, 1 is G.8032v2. A v1 frame using a v2-only request or the BPR
+    bit is non-conforming (CFM-202); both revisions on one ring is a
+    convergence fault (CFM-203); and two R-APS destinations on one control
+    VLAN means two ring instances share it (CFM-204), since the ring ID
+    lives in that address.
+
+    Also the regression guard for the version rule: a conforming v2 frame
+    must NOT raise CFM-008, or every frame of every modern ERPS deployment
+    would be reported as structurally malformed.
+    """
+    f = []
+    t = 0.0
+    # conforming G.8032v2 - must stay structurally clean
+    for i in range(2):
+        f.append((t, eth_ring(MAC_A, raps(3, 0, status=RB, version=1))))
+        t += 0.4
+    # CFM-202, both arms: a v1 frame using FS, and one setting BPR
+    f.append((t, eth_ring(MAC_B, raps(3, 0xD, node_id=MAC_B, version=0))))
+    t += 0.4
+    f.append((t, eth_ring(MAC_B, raps(3, 0x7, status=BPR, node_id=MAC_B,
+                                      version=0))))
+    t += 0.4
+    # CFM-204: a second ring instance on the same control VLAN, reached at
+    # a different R-APS destination
+    f.append((t, eth_ring(MAC_C, raps(3, 0xE, sub_code=0, node_id=MAC_C,
+                                      version=1),
+                          dst=cfm_group(3, klass=2))))
+    return f
+
+
+@scenario("subring",
+          ["CFM-160", "CFM-162", "CFM-163", "CFM-180", "CFM-185", "CFM-195",
+           "CFM-201", "CFM-205", "CFM-207", "CFM-208", "CFM-209"],
+          args=SUBRING_DECL)
+def _subring():
+    """G.8032v2 interconnected topology.
+
+    The point of the fixture is the NEGATIVE control: a legitimate
+    topology-change propagation from an interconnection node must NOT
+    raise CFM-189 or CFM-190, which is what cfmwatch did before sub-rings
+    were modelled. It is recorded as CFM-209 instead.
+    """
+    f = []
+    t = 0.0
+    # sub-ring 600 changes state, which is what a propagation follows
+    f.append((t, eth_sub(MAC_C, raps(3, 0, node_id=MAC_C))))
+    t += 0.4
+    f.append((t, eth_sub(MAC_C, raps(3, 0xB, node_id=MAC_C))))
+    t += 0.4
+    # CFM-209: interconnection node A propagates onto the major ring.
+    # CFM-189/190 must stay silent.
+    f.append((t, eth_ring(MAC_A, raps(3, 0xE, sub_code=0))))
+    t += 0.4
+    # CFM-205: a flush on the major ring from a non-interconnection node
+    f.append((t, eth_ring(MAC_X, raps(3, 0xE, sub_code=0, node_id=MAC_X))))
+    t += 0.4
+    # CFM-207: a flush INTO the sub-ring from the parent's interconnect
+    f.append((t, eth_sub(MAC_B, raps(3, 0xE, sub_code=0, node_id=MAC_B))))
+    t += 0.4
+    # CFM-208: a declared sub-ring node on the parent with no virtual
+    # channel
+    f.append((t, eth_ring(MAC_C, raps(3, 0, node_id=MAC_C))))
+    return f
+
+
+@scenario("raps_withdrawn",
+          ["CFM-160", "CFM-162", "CFM-163", "CFM-180", "CFM-201", "CFM-206"],
+          args=RING_DECL)
+def _raps_withdrawn():
+    """The RPL block was observed and then vanished.
+
+    Stronger than CFM-194: having seen the block removes the tap-vantage
+    explanation. Timed at a realistic 5s R-APS interval so the block goes
+    stale.
+    """
+    f = []
+    t = 0.0
+    for i in range(3):
+        f.append((t, eth_ring(MAC_A, raps(3, 0, status=RB))))
+        t += 5.0
+    for i in range(7):
+        f.append((t, eth_ring(MAC_B, raps(3, 0, node_id=MAC_B))))
+        t += 5.0
+    return f
+
+
+@scenario("raps_flood",
+          ["CFM-120", "CFM-160", "CFM-163", "CFM-180", "CFM-194", "CFM-198",
+           "CFM-201", "CFM-162"],
+          args=RING_DECL)
+def _raps_flood():
+    f = []
+    t = 0.0
+    for i in range(60):
+        f.append((t, eth_ring(MAC_B, raps(3, 0, node_id=MAC_B))))
+        t += 0.02
+    return f
+
+
+@scenario("raps_ccm_loss",
+          ["CFM-160", "CFM-161", "CFM-163", "CFM-180", "CFM-199", "CFM-201",
+           "CFM-162"],
+          args=RING_DECL)
+def _raps_ccm_loss():
+    """MEP 10 declares a 1s interval, then goes quiet past the G.8032
+    three-miss threshold. On a ring that is the protection trigger."""
+    f = []
+    t = 0.0
+    for i in range(4):
+        f.append((t, eth_ring(MAC_A, ccm(3, 10, seq=i + 1))))
+        t += 1.0
+    # silence, broken only by R-APS keepalives, well past 3 x 1s
+    t += 4.0
+    for i in range(3):
+        f.append((t, eth_ring(MAC_A, raps(3, 0, status=RB))))
+        t += 0.5
     return f
 
 

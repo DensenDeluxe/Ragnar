@@ -3078,8 +3078,8 @@
                         <!-- CFM Watch (IEEE 802.1ag CFM / ITU-T Y.1731 service OAM) -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                             <h3 class="text-lg font-semibold mb-1">CFM Watch <span class="text-xs font-normal text-gray-500">(IEEE 802.1ag CFM · ITU-T Y.1731 · service OAM · passive)</span></h3>
-                            <p class="text-xs text-amber-300/90 mb-2">Passive carrier-Ethernet service-OAM monitor — <strong>detection-only</strong>, never sends an LBM, LTM or CCM. CFM (EtherType <span class="font-mono">0x8902</span>, inside the service VLAN; 802.1Q and QinQ parsed) runs maintenance domains at levels 0–7, continuity checks between MEPs and the Y.1731 overlay — and all of it is cleartext and <strong>unauthenticated</strong>. A forged <strong>APS</strong> frame moves production traffic onto the protection path or <strong>locks protection out</strong>; a forged <strong>AIS</strong> hides a real fault; a forged <strong>CCM</strong> raises a cross-connect or unexpected-MEP defect that takes a service down; a <strong>linktrace sweep</strong> maps the provider's MIP chain. Also flags MD-level hierarchy violations, duplicate / moved MEPs, LBM floods and malformed CFM — the <span class="font-mono">CVE-2020-1639</span> shape (Junos cfmd core) — plus the <span class="font-mono">CVE-2025-52961</span> load pattern (low confidence: the trigger is valid traffic).</p>
-                            <p class="text-sm text-gray-400 mb-3">CFM normally only appears on a <strong>carrier / metro Ethernet service handoff</strong>; elsewhere this stays silent. MEP, association and protection-group state is kept across scans, so a MEP moving to a new MAC between scans is still caught; "Reset" forgets it after a legitimate change. Set the <strong>MD ceiling</strong> to the highest maintenance level that is legitimate at this tap to catch cross-domain injection.</p>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive carrier-Ethernet service-OAM monitor — <strong>detection-only</strong>, never sends an LBM, LTM or CCM. CFM (EtherType <span class="font-mono">0x8902</span>, inside the service VLAN; 802.1Q and QinQ parsed) runs maintenance domains at levels 0–7, continuity checks between MEPs and the Y.1731 overlay — and all of it is cleartext and <strong>unauthenticated</strong>. A forged <strong>APS</strong> frame moves production traffic onto the protection path or <strong>locks protection out</strong>; a forged <strong>AIS</strong> hides a real fault; a forged <strong>CCM</strong> raises a cross-connect or unexpected-MEP defect that takes a service down; a <strong>linktrace sweep</strong> maps the provider's MIP chain. Also flags MD-level hierarchy violations, duplicate / moved MEPs, LBM floods and malformed CFM — the <span class="font-mono">CVE-2020-1639</span> shape (Junos cfmd core) — plus the <span class="font-mono">CVE-2025-52961</span> load pattern (low confidence: the trigger is valid traffic). On <strong>ERPS / G.8032</strong> rings (R-APS, opcode 40) it flags a forged <strong>RPL owner</strong>, two ring blocks, a ring left open, off-VLAN R-APS, flush storms and revision downgrades — <strong>90 finding codes</strong> across ten classes.</p>
+                            <p class="text-sm text-gray-400 mb-3">CFM normally only appears on a <strong>carrier / metro Ethernet service handoff</strong>; elsewhere this stays silent. MEP, association and protection-group state is kept across scans, so a MEP moving to a new MAC between scans is still caught; "Reset" forgets it after a legitimate change. Set the <strong>MD ceiling</strong> to the highest maintenance level that is legitimate at this tap to catch cross-domain injection. To police <strong>ERPS ring topology</strong>, <strong>declare the ring</strong> below (VLAN + RPL owner + node set); with none declared, R-APS is still reported as present (CFM-200) but topology can't be judged from one tap.</p>
                             <div class="flex flex-wrap items-center gap-2">
                                 <select id="cfm-iface" title="Interface for the CFM capture — the handoff / EVC trunk NIC" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
                                     <option value="">Auto (wired first)</option>
@@ -3093,6 +3093,12 @@
                                 <button onclick="runCfmWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan CFM</button>
                                 <button onclick="cfmReset()" class="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-gray-400 px-4 py-2 rounded text-sm whitespace-nowrap" title="Forget the learned CFM state">Reset</button>
                             </div>
+                            <div class="flex flex-wrap items-center gap-2 mt-2">
+                                <input id="cfm-ring-spec" type="text" placeholder="ERPS ring e.g. 100,rpl=aa:bb:cc:00:00:01,nodes=…/…,name=ring-a" title="Declare a G.8032 ring to arm the ring-topology rules (Class R). VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,name=LABEL]" class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm font-mono">
+                                <button onclick="cfmDeclareRing()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Declare this ERPS ring (persists across scans)">Declare ring</button>
+                                <button onclick="cfmClearRings()" class="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-gray-400 px-4 py-2 rounded text-sm whitespace-nowrap" title="Forget all declared ERPS rings">Clear rings</button>
+                            </div>
+                            <div id="cfm-rings" class="hidden mt-2 text-xs"></div>
                             <div id="cfm-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
@@ -9520,7 +9526,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261011-cdp-watch-v4"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261012-cfm-watch-v4"></script>
 
 
 

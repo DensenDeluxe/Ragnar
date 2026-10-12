@@ -22,6 +22,8 @@ sys.path.insert(0, HERE)
 import cfmwatch as cw                                           # noqa: E402
 import make_fixtures as mk                                      # noqa: E402
 
+RING_ARGS = mk.RING_DECL
+
 PASS, FAIL = [], []
 
 
@@ -150,6 +152,202 @@ check("TLV walk is bounded", frame is not None and
       str(frame.structural[:2]))
 
 # --------------------------------------------------------------------------
+print("\n[2b] R-APS parser units and ring declaration")
+
+# Body layout, asserted against the figures in the ITU-T G.8032 liaison
+# overview and scapy's G.8032/Y.1344 (02/2022) implementation.
+raw = mk.eth_ring(mk.MAC_A, mk.raps(3, 0xB, status=mk.RB | mk.DNF,
+                                    node_id=mk.MAC_B))
+frame = cw.parse_cfm(raw, 0, 0.0)
+check("R-APS parses at opcode 40",
+      frame is not None and frame.opcode == cw.OP_RAPS)
+check("R-APS request/state decodes", frame.body["request"] == cw.RAPS_SF)
+check("R-APS RB decodes", frame.body["rb"] is True)
+check("R-APS DNF decodes", frame.body["dnf"] is True)
+check("R-APS BPR decodes false when clear", frame.body["bpr"] is False)
+check("R-APS Node ID decodes", frame.body["node_id"] == mk.MAC_B)
+check("R-APS body is 32 octets per spec",
+      cw.OPCODE_BODY[cw.OP_RAPS] == cw.RAPS_BODY_LEN == 32)
+check("conforming R-APS raises no structural defect",
+      not cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0)), 0,
+                       0.0).structural)
+check("R-APS First TLV Offset 32 agrees with the opcode table",
+      not any(c == "CFM-010" for c, _ in frame.structural),
+      str(frame.structural))
+check("sub-code splits from request/state",
+      cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0xE, sub_code=0)), 0,
+                   0.0).body["sub_code"] == 0)
+check("reserved request/state values are the complement of the named set",
+      cw.RAPS_RESERVED_REQUESTS ==
+      frozenset(set(range(16)) - set(cw.RAPS_REQUEST_NAMES)))
+check("G.8032 named requests are NR/MS/SF/FS/Event",
+      sorted(cw.RAPS_REQUEST_NAMES.values()) ==
+      ["Event", "FS", "MS", "NR", "SF"])
+# Body truncation on R-APS is detectable only when the frame is NOT
+# padded to the Ethernet minimum. CFM's common header carries no body
+# length, and a 32-octet R-APS body fits inside a 60-octet frame, so a
+# truncated R-APS padded with zeros is byte-identical to a conforming one
+# whose fields are all zero. CCM escapes this because its 70-octet body
+# exceeds the padded minimum. Asserted in both directions so the limit is
+# pinned rather than discovered later as a surprise.
+short = cw.struct.pack("!BBBB", 0x60, 40, 0, 32) + b"\x00" * 8
+unpadded = cw.parse_cfm(mk.eth(mk.cfm_group(3), mk.MAC_A, short,
+                               vlans=mk.RING_VLAN, minlen=0), 0, 0.0)
+check("unpadded truncated R-APS raises CFM-006",
+      not unpadded.body and
+      any(c == "CFM-006" for c, _ in unpadded.structural),
+      str(unpadded.structural))
+padded = cw.parse_cfm(mk.eth_ring(mk.MAC_A, short), 0, 0.0)
+check("padded truncated R-APS is indistinguishable from an all-zero body "
+      "(documented limit, not a defect)",
+      bool(padded.body) and not padded.structural,
+      str(padded.structural))
+
+# ---- G.8031 / ELPS linear APS -------------------------------------------
+# Field widths confirmed empirically against Wireshark: the protection
+# type bits are A=0x08, B=0x04, D=0x02, R=0x01, and the bridge type is the
+# single top bit of the body's last octet with the rest reserved.
+a = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A, mk.aps(3, 0xB, ptype=0xF),
+                        vlans=((0x8100, 100),)), 0, 0.0)
+check("APS protection type decodes all four bits",
+      a.body["protection_bits"] == "ABDR", a.body["protection_bits"])
+for bit, mask in (("A", 0x08), ("B", 0x04), ("D", 0x02), ("R", 0x01)):
+    one = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A, mk.aps(3, 0, ptype=mask),
+                              vlans=((0x8100, 100),)), 0, 0.0)
+    check("APS protection bit %s is 0x%02x" % (bit, mask),
+          one.body["protection_bits"] == bit,
+          one.body["protection_bits"])
+# Bridge type is ONE bit. Reading two would report 0x40 as 1 and 0xC0 as 3.
+for octet4, want_bt, want_resv in ((0x00, 0, 0x00), (0x40, 0, 0x40),
+                                   (0x80, 1, 0x00), (0xC0, 1, 0x40),
+                                   (0xFF, 1, 0x7F)):
+    b = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                            mk.aps(3, 0, octet4=octet4),
+                            vlans=((0x8100, 100),)), 0, 0.0)
+    check("APS octet4 0x%02x -> bridge_type %d, reserved 0x%02x"
+          % (octet4, want_bt, want_resv),
+          b.body["bridge_type"] == want_bt and
+          b.body["octet4_reserved"] == want_resv,
+          "got bt=%s resv=0x%02x" % (b.body["bridge_type"],
+                                     b.body["octet4_reserved"]))
+check("APS signal octets name null and normal",
+      cw.APS_SIGNAL_NAMES[0] == "null" and cw.APS_SIGNAL_NAMES[1] == "normal")
+check("APS request table matches G.8031",
+      cw.APS_REQUEST_NAMES == {0: "NR", 1: "DNR", 2: "RR", 4: "EXER",
+                               5: "WTR", 7: "MS", 9: "SD", 11: "SF",
+                               13: "FS", 14: "SF-P", 15: "LO"},
+      str(cw.APS_REQUEST_NAMES))
+check("APS code 6 is deprecated, not reserved",
+      6 in cw.APS_DEPRECATED_REQUESTS and
+      6 not in cw.APS_RESERVED_REQUESTS)
+check("APS reserved codes are 3, 8, 10 and 12",
+      cw.APS_RESERVED_REQUESTS == frozenset({3, 8, 10, 12}))
+check("G.8031 APS is version 0, so version 1 is still a defect",
+      any(c == "CFM-008" for c, _ in cw.parse_cfm(
+          mk.eth(mk.D3, mk.MAC_A,
+                 mk.cfm(3, 39, 0, 4, bytes([0xB0, 1, 1, 0]), mk.END,
+                        version=1), vlans=((0x8100, 100),)),
+          0, 0.0).structural),
+      "the version exemption must stay scoped to R-APS only")
+
+# ---- G.8032 revision handling -------------------------------------------
+# The revision is carried in the CFM common-header Version field: 0 is
+# G.8032v1, 1 is G.8032v2. Wireshark corroborates the split by selecting
+# the status-octet layout from it - reserved_v1 masks 0x3F, reserved_v2
+# masks 0x1F with bit 5 decoded as BPR.
+v2 = cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0xB, status=mk.RB,
+                                                version=1)), 0, 0.0)
+v1 = cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0xB, status=mk.RB,
+                                                version=0)), 0, 0.0)
+check("version 1 is read as G.8032v2",
+      v2.body["revision_name"] == "G.8032v2")
+check("version 0 is read as G.8032v1",
+      v1.body["revision_name"] == "G.8032v1")
+check("a conforming G.8032v2 R-APS raises NO structural defect",
+      not v2.structural,
+      "CFM-008 here would fire on every frame of every modern ERPS "
+      "deployment: " + str(v2.structural))
+# The version exemption is scoped to R-APS only: a version-1 CCM is still
+# a structural defect, because 802.1ag defines no version but 0.
+ccm_v1 = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                             mk.cfm(3, 1, 0x04, 70,
+                                    mk.ccm_body(1, 10, mk.maid()),
+                                    mk.END, version=1)), 0, 0.0)
+check("version 1 on a non-R-APS opcode still raises CFM-008",
+      any(c == "CFM-008" for c, _ in ccm_v1.structural),
+      str(ccm_v1.structural))
+check("version 2 on an R-APS still raises CFM-008 (no such revision)",
+      any(c == "CFM-008" for c, _ in cw.parse_cfm(
+          mk.eth_ring(mk.MAC_A, mk.raps(3, 0, version=2)), 0, 0.0
+      ).structural))
+
+# bit 5 of the status octet: BPR from v2, reserved in v1
+bpr_v2 = cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0, status=mk.BPR,
+                                                    version=1)), 0, 0.0)
+bpr_v1 = cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0, status=mk.BPR,
+                                                    version=0)), 0, 0.0)
+check("bit 5 decodes as BPR on a v2 frame", bpr_v2.body["bpr"] is True)
+check("bit 5 is NOT read as BPR on a v1 frame, where it is reserved",
+      bpr_v1.body["bpr"] is False)
+check("v1 reserved mask is 0x3F, so bit 5 counts as a reserved violation",
+      bpr_v1.body["status_reserved"] == 0x20,
+      str(bpr_v1.body["status_reserved"]))
+check("v2 reserved mask is 0x1F, so bit 5 is not a reserved violation",
+      bpr_v2.body["status_reserved"] == 0x00,
+      str(bpr_v2.body["status_reserved"]))
+check("reserved masks match the widths Wireshark uses per revision",
+      cw.RAPS_STATUS_RESERVED_BY_VERSION == {0: 0x3F, 1: 0x1F})
+check("v2-only requests are MS, FS and Event",
+      cw.RAPS_V2_ONLY_REQUESTS == frozenset({cw.RAPS_MS, cw.RAPS_FS,
+                                             cw.RAPS_EVENT}))
+
+# Linux receive VLAN offload strips the outer 802.1Q tag out of the frame
+# data and into socket aux data. The live path recovers it; these pin that
+# behaviour, because a regression makes every VLAN-keyed rule in the
+# module - the ring class and Class C's MA/MEP keying alike - silently
+# report untagged. The offline pcap path cannot catch this.
+tagged = mk.eth_ring(mk.MAC_A, mk.raps(3, 0, status=mk.RB))
+stripped = tagged[:12] + tagged[16:]
+check("a stripped tag loses the VLAN key",
+      cw.parse_cfm(stripped, 0, 0.0).vlan_key == ())
+check("reinsert_vlan restores the frame byte for byte",
+      cw.reinsert_vlan(stripped, 500, 0x8100) == tagged)
+check("reinsert_vlan restores the VLAN key",
+      cw.parse_cfm(cw.reinsert_vlan(stripped, 500, 0x8100),
+                   0, 0.0).vlan_key == (500,))
+check("reinsert_vlan honours a QinQ service TPID",
+      cw.parse_cfm(cw.reinsert_vlan(stripped, 300, 0x88A8),
+                   0, 0.0).vlans[0].tpid == 0x88A8)
+check("reinsert_vlan defaults a zero TPID to 0x8100",
+      cw.parse_cfm(cw.reinsert_vlan(stripped, 500, 0),
+                   0, 0.0).vlans[0].tpid == 0x8100)
+check("reinsert_vlan leaves a runt frame alone",
+      cw.reinsert_vlan(b"\x00" * 8, 500, 0x8100) == b"\x00" * 8)
+check("aux-data struct is the kernel's 20-octet tpacket_auxdata",
+      cw._AUXDATA_LEN == 20, str(cw._AUXDATA_LEN))
+
+ring = cw.parse_ring("500,rpl=00:11:22:aa:00:01,"
+                     "nodes=00:11:22:bb:00:02,name=r5")
+check("--ring parses VLAN, RPL owner, nodes and label",
+      ring.vlan == (500,) and ring.rpl_owner == mk.MAC_A and
+      ring.label == "r5", str(ring))
+check("declared RPL owner is added to the node set",
+      mk.MAC_A in ring.nodes,
+      "otherwise CFM-195 fires on the owner's own R-APS")
+check("--ring accepts untagged", cw.parse_ring("untagged").vlan == ())
+check("--ring accepts a QinQ outer/inner pair",
+      cw.parse_ring("300/101").vlan == (300, 101))
+for bad_spec, why in (("abc", "non-numeric VLAN"),
+                      ("500,9999", "option without key=value"),
+                      ("500,bogus=1", "unknown option"),
+                      ("5000", "VLAN out of range"),
+                      ("500,rpl=zz:zz", "malformed MAC")):
+    try:
+        cw.parse_ring(bad_spec)
+        check("--ring rejects %s" % why, False, bad_spec)
+    except ValueError:
+        check("--ring rejects %s" % why, True)
+
 print("\n[3] fixture corpus, exact match")
 
 manifest = json.load(open(os.path.join(mk.FIXDIR, "manifest.json")))
@@ -170,12 +368,132 @@ missing = sorted(set(cw.REGISTRY) - claimed)
 check("every registry code is claimed by a fixture", not missing, str(missing))
 
 # --------------------------------------------------------------------------
-print("\n[4] baseline quiet")
+print("\n[4] baseline quiet and negative controls")
 
 eng = run_pcap(os.path.join(mk.FIXDIR, "baseline.pcap"))
 noisy = [f.code for f in eng.results()
          if cw.REGISTRY[f.code].severity not in (cw.SEV_INFO, cw.SEV_LOW)]
 check("healthy traffic raises nothing above LOW", not noisy, str(noisy))
+
+# The ring negative control. raps_baseline carries a REAL protection
+# switch: an AIS arrives first, then R-APS(SF). CFM-186 claims a forged
+# switch and must stay silent when the fault is corroborated, or the whole
+# rule is worthless on a live ring.
+eng = run_pcap(os.path.join(mk.FIXDIR, "raps_baseline.pcap"), RING_ARGS)
+fired = {f.code for f in eng.results()}
+check("CFM-186 stays silent on an AIS-corroborated protection switch",
+      "CFM-186" not in fired)
+check("CFM-185 still records the SF itself", "CFM-185" in fired)
+check("a declared ring does not raise the undeclared-ring finding",
+      "CFM-200" not in fired)
+check("a correctly declared RPL owner raises no impersonation finding",
+      "CFM-192" not in fired)
+check("declared ring nodes raise no off-ring finding",
+      "CFM-195" not in fired)
+noisy = [f.code for f in eng.results()
+         if cw.REGISTRY[f.code].severity in (cw.SEV_CRITICAL, cw.SEV_HIGH)]
+check("a healthy declared ring raises nothing at HIGH or above", not noisy,
+      str(noisy))
+
+# The ELPS negative control. SF-P reports that the PROTECTION path
+# failed, so the working path keeps carrying traffic and its CCMs stay
+# healthy. That is what SF-P implies, not evidence against it - running it
+# through CFM-083's uncorroborated test raises a CRITICAL forged-switch
+# alarm on every genuine protection-path failure.
+eng = run_pcap(os.path.join(mk.FIXDIR, "elps.pcap"))
+fired = {f.code for f in eng.results()}
+check("CFM-083 stays silent on SF-P with a healthy working path",
+      "CFM-083" not in fired)
+check("CFM-088 reports the protection path failure instead",
+      "CFM-088" in fired)
+check("protection-type mismatch between ends is reported",
+      "CFM-090" in fired)
+check("requested/bridged signal disagreement is reported",
+      "CFM-091" in fired)
+
+# ---- G.8032v2 sub-rings: the negative control that closes the gap -------
+# A legitimate topology-change propagation from an interconnection node is
+# normal operation. Before sub-rings were modelled, cfmwatch reported it
+# as a bare flush primitive (CFM-189/190) and so alarmed continuously on
+# every interconnected topology.
+eng = run_pcap(os.path.join(mk.FIXDIR, "subring.pcap"), mk.SUBRING_DECL)
+fired = {f.code for f in eng.results()}
+check("CFM-189 stays silent on legitimate interconnection-node propagation",
+      "CFM-189" not in fired)
+check("CFM-190 stays silent on legitimate propagation",
+      "CFM-190" not in fired)
+check("CFM-209 records the propagation instead", "CFM-209" in fired)
+check("a flush from a non-interconnection node is still caught (CFM-205)",
+      "CFM-205" in fired)
+check("a flush INTO a sub-ring is caught (CFM-207)", "CFM-207" in fired)
+check("a non-VC sub-ring node on the parent is caught (CFM-208)",
+      "CFM-208" in fired)
+
+# Without the declaration the same capture cannot be told apart, so the
+# original behaviour must still stand - no silent regression into
+# under-reporting.
+eng = run_pcap(os.path.join(mk.FIXDIR, "subring.pcap"))
+undeclared = {f.code for f in eng.results()}
+check("without a declaration the flush still raises CFM-189",
+      "CFM-189" in undeclared)
+for code in ("CFM-205", "CFM-207", "CFM-208", "CFM-209"):
+    check("%s stays inert without a declared topology" % code,
+          code not in undeclared)
+
+# Ring role parsing and its invariants.
+sub = cw.parse_ring("600,role=sub,parent=major-500,vc=no,"
+                    "interconnect=00:11:22:aa:00:01,nodes=00:11:22:cc:00:03")
+check("role=sub parses with parent, vc and interconnect",
+      sub.is_sub() and sub.parent == "major-500" and
+      sub.virtual_channel is False and mk.MAC_A in sub.interconnect,
+      str(sub))
+check("interconnection nodes are added to the node set",
+      mk.MAC_A in sub.nodes,
+      "otherwise CFM-195 fires on an interconnection node's own R-APS")
+check("revertive defaults to yes", cw.parse_ring("500").revertive is True)
+check("revertive=no parses",
+      cw.parse_ring("500,revertive=no").revertive is False)
+for bad_spec, why in (("600,role=sub", "role=sub without a parent"),
+                      ("500,parent=x", "parent without role=sub"),
+                      ("500,role=bogus", "an unknown role"),
+                      ("500,vc=maybe", "a non-boolean vc"),
+                      ("500,revertive=sometimes", "a non-boolean revertive"),
+                      ("500,interconnect=zz", "a malformed interconnect")):
+    try:
+        cw.parse_ring(bad_spec)
+        check("--ring rejects %s" % why, False, bad_spec)
+    except ValueError:
+        check("--ring rejects %s" % why, True)
+
+# Revertive operation is configuration only in G.8032, so a declared
+# non-revertive ring must not raise the no-block findings at all.
+eng = run_pcap(os.path.join(mk.FIXDIR, "raps_withdrawn.pcap"), mk.RING_DECL)
+fired = {f.code for f in eng.results()}
+check("an observed-then-vanished block raises CFM-206", "CFM-206" in fired)
+check("CFM-194 yields to CFM-206 when the block was actually seen",
+      "CFM-194" not in fired)
+norev = list(mk.RING_DECL)
+norev[-1] = norev[-1] + ",revertive=no"
+eng = run_pcap(os.path.join(mk.FIXDIR, "raps_withdrawn.pcap"), norev)
+fired = {f.code for f in eng.results()}
+check("a declared non-revertive ring raises neither CFM-194 nor CFM-206",
+      not ({"CFM-194", "CFM-206"} & fired), str(sorted(fired)))
+check("the RB staleness window is tunable apart from the CFM-193 "
+      "concurrency window",
+      cw.Config().rb_stale is not None and
+      "rb_stale" in cw.Config.__dataclass_fields__ and
+      "rb_window" in cw.Config.__dataclass_fields__)
+
+# Undeclared rings must fail loud rather than look clean.
+eng = run_pcap(os.path.join(mk.FIXDIR, "raps_structural.pcap"))
+fired = {f.code for f in eng.results()}
+check("an undeclared ring fails loud with CFM-200", "CFM-200" in fired)
+for code in ("CFM-192", "CFM-194", "CFM-195", "CFM-199"):
+    check("%s stays inert without a ring declaration" % code,
+          code not in fired)
+check("structural R-APS rules stay armed without a declaration",
+      {"CFM-181", "CFM-182", "CFM-183", "CFM-184"} <= fired,
+      str(sorted(fired)))
 
 # --------------------------------------------------------------------------
 print("\n[5] output renderers")

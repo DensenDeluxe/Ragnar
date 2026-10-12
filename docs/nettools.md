@@ -107,7 +107,7 @@ matrix to zoom (`/web/images/osi/`).
 | [PTP Timing Detection](#ptp-timing-detection) | Diagnostics · L2 | `POST /api/net/ptp` |
 | [LACP Watch](#lacp-watch) | Diagnostics · L2 | `GET /api/net/lacp-watch` |
 | [OAM Watch](#oam-watch) | Diagnostics · L2 | `GET /api/net/oam-watch`, `POST /api/net/oam-reset` |
-| [CFM Watch](#cfm-watch) | Diagnostics · L2 | `GET /api/net/cfm-watch`, `POST /api/net/cfm-reset` |
+| [CFM Watch](#cfm-watch) | Diagnostics · L2 | `GET /api/net/cfm-watch`, `POST /api/net/cfm-reset`, `GET|POST /api/net/cfm-ring` |
 | [L2 Link Health](#l2-link-health) | Diagnostics · L2 | `POST /api/net/l2-health` |
 | [ARP Scan](#arp-scan) | Diagnostics · L2 | `GET /api/net/arp-scan` |
 | [Locate Port](#locate-port) | Diagnostics · L1 | `POST /api/net/locate-port` |
@@ -2670,7 +2670,7 @@ suppresses the alarm for a fault that is really happening. A forged **CCM** rais
 cross-connect or unexpected-MEP defect that takes a service down. A **linktrace sweep** maps
 a provider's MIP chain hop by hop.
 
-**54 codes in nine classes:**
+**90 codes in ten classes:**
 
 - **A, structural `CFM-001`..`010`**: First TLV Offset past the end, TLV overrun or
   truncation, a missing End TLV, inconsistent MAID name lengths, a short opcode body, a
@@ -2703,13 +2703,27 @@ a provider's MIP chain hop by hop.
 - **P, posture `160`..`163`**: inventory of MD levels, MEPs, Y.1731 opcodes and service
   VLANs. There is deliberately no "CFM is enabled" finding. Service OAM on a carrier handoff
   is by design.
+- **R, ERPS / G.8032 ring protection `180`..`209`**: R-APS is opcode 40 carried in the same
+  CFM common header, so ring protection rides this parser. These rules are
+  **baseline-dependent** — on the wire a legitimate protection switch and a forged R-APS are
+  identical without the declared topology — so most arm only once you **declare the ring**
+  (`cfm-ring`, below). They cover a **forged RPL owner** / two ring blocks / a ring left open,
+  **off-VLAN R-APS**, R-APS from a node not in the declared set, an R-APS(SF) uncorroborated by
+  CCM loss (the forged ring-fault signal), DNF-flag and flush storms, revision downgrades and
+  G.8032v2 sub-ring interconnect propagation, plus the structural R-APS checks that need no
+  ring. With **no ring declared**, R-APS presence is still reported as `CFM-200` (ERPS active,
+  topology undeclared) and malformed R-APS still fires.
 
 **State is kept per interface across scans** (in memory). That covers MA / MEP tables, APS
 group ownership and the CCM history that disarms `CFM-061`. Each scan reports only the
 findings it added. **Reset** (`POST /api/net/cfm-reset`) forgets the state after a
 legitimate MEP or protection change. Set the card's **MD ceiling** to the highest
 maintenance level that is legitimate at the tap. Without it, cross-domain injection is
-caught only when it also violates the destination group address.
+caught only when it also violates the destination group address. To police **ERPS ring
+topology**, **declare the ring** (`POST /api/net/cfm-ring` or the card's ring field):
+`VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,parent=NAME][,name=LABEL]`. Declarations
+persist (`data/cfm_watch.json`) and arm the Class R topology rules; with none declared,
+R-APS is still reported present (`CFM-200`) but topology cannot be judged from one tap.
 
 **Vantage.** CFM normally only appears on a carrier / metro Ethernet service handoff or an
 EVC trunk. Everywhere else the card reports `no-traffic`. Capture is `tcpdump`
@@ -2734,16 +2748,20 @@ except the posture inventory, at MEDIUM and above, feeds [Watchtower](watchtower
 VLAN, interval).
 
 - Endpoint: `GET /api/net/cfm-watch` `{interface, seconds, md_ceiling?}` ·
-  `POST /api/net/cfm-reset` `{interface?}` · binary: `tcpdump`
+  `POST /api/net/cfm-reset` `{interface?}` · `GET|POST /api/net/cfm-ring`
+  `{action: list|declare|remove|clear, spec?}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cfm-watch [--iface I] [--seconds N] [--md-ceiling L]
   [--pcap FILE] [--json]`. `--pcap` replays a file through a fresh engine.
-- Self-test: suite `cfm`, 18 scenarios. All 9 upstream fixtures must fire **exactly**
-  their manifest code sets through the adapter, and together they cover all 54 codes. The
-  suite also checks the clean baseline, the CVE tagging, the APS lockout, the MD-ceiling
-  arming, that Link OAM is not parsed as CFM, a MEP moved between two scans (caught only by
-  the persistent engine), and per-scan deltas. It then runs the module's own **54-check
-  conformance** tier and the **2155-comparison Wireshark + scapy cross-check** tier, both
-  out of process.
+  `python3 network_diagnostics.py cfm-ring [list|declare|remove|clear] [SPEC]` manages the
+  ERPS ring declarations.
+- Self-test: suite `cfm`. All **20** upstream fixtures must fire **exactly** their manifest
+  code sets through the adapter (the ERPS fixtures with their `--ring` declarations), and
+  together they cover all **90** codes. The suite also checks the clean baseline, the CVE
+  tagging, the APS lockout, the MD-ceiling arming, that Link OAM is not parsed as CFM, a MEP
+  moved between two scans (caught only by the persistent engine), per-scan deltas, and the
+  **ring-declaration store** (a declared ring arms the Class R topology rules; undeclared
+  R-APS stays at `CFM-200`). It then runs the module's own **173-check conformance** tier and
+  the Wireshark + scapy dual-dissector cross-check tier, both out of process.
 - Vendored engine (Solarflere): `python/cfmwatch.py`, unmodified. Its fixtures and tiers
   live in `python/cfmwatch_tests/`. **Validated live:** the fixture corpus was replayed with
   `tcpreplay` over a veth pair in a sealed netns, including VLAN-tagged frames, and **54/54
