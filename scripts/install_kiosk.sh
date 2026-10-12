@@ -89,9 +89,15 @@ detect_desktop_mode() {
        || systemctl is-active --quiet display-manager 2>/dev/null; then
         return 0
     fi
+    # A real desktop is caught by its display manager (above) or its Wayland
+    # compositor (labwc/wayfire) / Xwayland below. A bare Xorg is deliberately
+    # NOT a desktop signal: on a Pi OS Lite image the only Xorg running is
+    # usually our OWN service-mode kiosk, so counting it would make a re-run of
+    # the installer (on update, or web-UI Reinstall) flip a working service
+    # kiosk into autostart mode — which has no session to launch into on Lite,
+    # blanking the screen. An X11 desktop is covered by its display manager.
     if pgrep -x labwc >/dev/null 2>&1 \
        || pgrep -x Xwayland >/dev/null 2>&1 \
-       || pgrep -x Xorg >/dev/null 2>&1 \
        || pgrep -x wayfire >/dev/null 2>&1; then
         return 0
     fi
@@ -159,10 +165,15 @@ detect_kiosk_user_bare() {
     getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1; exit}'
 }
 
-# Browser detection (both modes need this)
+# Browser detection (both modes need this). The kiosk wrapper launches the
+# browser with Chromium-only flags (--kiosk, --app, etc.), so only Chromium
+# counts — a pre-installed firefox-esr is deliberately NOT treated as "a
+# browser" here (it would be handed Chromium flags and exit, ending the X
+# session). Prefer the native 'chromium' (Debian 13/trixie); 'chromium-browser'
+# is the older Raspberry Pi OS name.
 HAS_BROWSER=0
 BROWSER_BIN=""
-for bin in chromium-browser chromium firefox-esr; do
+for bin in chromium chromium-browser; do
     if command -v "$bin" >/dev/null 2>&1; then
         HAS_BROWSER=1
         BROWSER_BIN="$bin"
@@ -193,8 +204,15 @@ fi
 # Package installation depends on mode.
 PKGS_TO_INSTALL=()
 if [[ "$HAS_BROWSER" -eq 0 ]]; then
-    echo "[kiosk-install] no browser detected — adding chromium-browser"
-    PKGS_TO_INSTALL+=(chromium-browser)
+    # Install Chromium in its own apt call (not the batch below) so the package
+    # name can be tried release-aware: Debian 13/trixie ships it as 'chromium',
+    # older Raspberry Pi OS as 'chromium-browser'. Keeping it out of the batch
+    # also means a Chromium hiccup can't take the whole X-stack install down.
+    echo "[kiosk-install] no Chromium detected — installing it"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium \
+        || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium-browser \
+        || echo "[kiosk-install] WARN: could not install Chromium — the on-screen kiosk needs it"
 fi
 # unclutter: hides X cursor. Only useful in service mode where we own X.
 if [[ "$MODE" == "service" ]] && ! command -v unclutter >/dev/null 2>&1; then
@@ -218,6 +236,12 @@ if [[ "$MODE" == "service" ]]; then
     fi
     if ! command -v xauth >/dev/null 2>&1; then
         PKGS_TO_INSTALL+=(xauth)
+    fi
+    # chvt (from kbd) lets the service make its VT the ACTIVE console before X
+    # starts, so logind hands Xorg an active (not paused) DRM master. Usually
+    # present on Pi OS Lite; pull it in if missing.
+    if ! command -v chvt >/dev/null 2>&1; then
+        PKGS_TO_INSTALL+=(kbd)
     fi
 fi
 # Autostart mode: wlr-randr rotates the Wayland output (labwc/wlroots).
@@ -266,7 +290,7 @@ fi
 
 # Re-detect browser after install
 if [[ -z "$BROWSER_BIN" ]]; then
-    for bin in chromium-browser chromium firefox-esr; do
+    for bin in chromium chromium-browser; do
         if command -v "$bin" >/dev/null 2>&1; then
             BROWSER_BIN="$bin"
             break
@@ -379,6 +403,11 @@ Environment=RAGNAR_BROWSER=$BROWSER_BIN
 # and socket of a live desktop session would disrupt that session while still
 # leaving our own X unable to bind :0.
 ExecStartPre=+/bin/sh -c 'pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1 || { rm -f /tmp/.X0-lock; rm -rf /tmp/.X11-unix/X0; }'
+# Make the kiosk's VT (tty7, where the wrapper starts Xorg) the ACTIVE console
+# first. The tty1 autologin getty otherwise holds the active VT, so logind hands
+# our Xorg a PAUSED drm fd, modesetting can't master KMS, Xorg falls back to the
+# fbdev driver on the vc4 framebuffer and aborts. Best-effort (|| true).
+ExecStartPre=+/bin/sh -c 'chvt 7 2>/dev/null || true'
 ExecStart=$WRAPPER_DST
 Restart=on-failure
 # 10s (not 5) so a dying Xorg releases the VT/DRM master before the next start.
@@ -429,6 +458,29 @@ else
     echo "[kiosk-install] Xwrapper.config updated"
 fi
 
+# Pin the KMS display as the PRIMARY GPU (Pi 5 and other dual-DRM boards). The
+# board exposes two DRM devices: vc4 (KMS, drives HDMI/DSI — has the outputs)
+# and v3d (render only, no outputs). Xorg autoconfig sometimes makes v3d primary
+# and then reports "no screens found"; it can also co-load the legacy fbdev
+# driver, which collides with modesetting and aborts the server
+# (dixRegisterPrivateKey assertion / FBIOPUTCMAP on vc4drmfb). An OutputClass —
+# unlike an explicit Device section, which forces the old probe that fails here
+# — keeps Xorg's working platform/KMS probe while forcing vc4 + modesetting as
+# the primary GPU. Harmless on boards with a single DRM device.
+mkdir -p /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/99-ragnar-kiosk.conf <<'XORGCONF'
+# Managed by Ragnar install_kiosk.sh — forces the KMS (vc4) device to be the
+# primary GPU so the kiosk's Xorg finds the HDMI/DSI output. Safe to delete if
+# you are not running the Ragnar on-screen kiosk.
+Section "OutputClass"
+    Identifier "Ragnar vc4 primary"
+    MatchDriver "vc4"
+    Driver "modesetting"
+    Option "PrimaryGPU" "true"
+EndSection
+XORGCONF
+echo "[kiosk-install] xorg.conf.d/99-ragnar-kiosk.conf written (vc4 = primary GPU)"
+
 # Graphics / input / console group membership. A non-root Xorg (our Xwrapper
 # setup above) still has to OPEN the GPU, the VT and the input devices itself,
 # so the kiosk user must be in:
@@ -475,6 +527,19 @@ fi
 # Pre-create Xorg log dir for the kiosk user
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 \
     "$KIOSK_HOME/.local" "$KIOSK_HOME/.local/share" "$KIOSK_HOME/.local/share/xorg"
+
+# The kiosk user must own its HOME and be able to write .Xauthority, the openbox
+# cache and the Chromium profile. Some images create /home/<user> root-owned
+# (the home existed before the user did), which makes Chromium's zygote abort
+# and openbox fail to create its cache — the session then dies on every start.
+# Fix it (idempotent; only re-chown the top dir when it isn't already correct so
+# a large home is not needlessly walked).
+if [[ "$(stat -c %U "$KIOSK_HOME" 2>/dev/null)" != "$KIOSK_USER" ]]; then
+    chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME" 2>/dev/null \
+        && echo "[kiosk-install] fixed ownership of $KIOSK_HOME -> $KIOSK_USER" || true
+fi
+install -d -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 \
+    "$KIOSK_HOME/.cache" "$KIOSK_HOME/.config"
 
 # If the kiosk is already enabled (re-run to heal a broken install), clear any
 # crash-loop backoff and restart so the new group membership takes effect — a

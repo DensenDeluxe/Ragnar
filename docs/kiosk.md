@@ -297,3 +297,29 @@ does not, so Xorg dies with *"no screens found"* and the unit crash-loops.
 `kiosk_doctor.sh` reports any that are missing). To heal an existing install,
 re-run `sudo scripts/install_kiosk.sh`, then
 `sudo systemctl reset-failed ragnar-kiosk && sudo systemctl restart ragnar-kiosk`.
+
+**Pi 5 (Lite): `no screens found`, or the Xorg log shows `modeset(G0)` /
+`FBIOPUTCMAP` / a `dixRegisterPrivateKey` abort.** A Pi 5 exposes two DRM
+devices — **vc4** (KMS, drives HDMI/DSI, has the outputs) and **v3d** (render
+only, no outputs). Bare Xorg on a Lite image hit three things that a desktop
+image (which runs the kiosk under its own Wayland session) never does:
+
+- Xorg picked **v3d as the primary GPU** → `modeset(G0)` and `no screens found`.
+- The legacy **fbdev** driver got co-loaded and collided with modesetting,
+  aborting the server (`FBIOPUTCMAP` on `vc4drmfb` / `dixRegisterPrivateKey`).
+- The service started Xorg on **tty7 while the tty1 autologin held the active
+  VT**, so logind handed Xorg a *paused* DRM fd and KMS never came up.
+
+`install_kiosk.sh` now fixes all three: it writes
+`/etc/X11/xorg.conf.d/99-ragnar-kiosk.conf` forcing **vc4 + modesetting as the
+primary GPU**, adds `chvt` to the unit so the kiosk's VT is the active console
+before Xorg starts, and (separately) installs **Chromium specifically** — the
+wrapper's flags are Chromium-only, so a box that only had `firefox-esr` used to
+launch it, get bad flags and exit. A plain update re-runs the installer for
+already-installed kiosks, so these reach existing boxes too.
+
+**Blank screen, Chromium exits immediately, `.Xauthority` / `.cache/openbox`
+"Permission denied" in the wrapper log.** The kiosk user could not write its own
+home — some images create `/home/<user>` root-owned. `install_kiosk.sh` and
+`ragnar-firstboot.sh` now `chown` the home to the user; to fix by hand:
+`sudo chown -R <user>:<user> /home/<user>`.

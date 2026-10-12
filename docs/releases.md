@@ -2,6 +2,20 @@
 
 ## Releases
 
+### 2026-10-12
+
+#### [#943](https://github.com/PierreGode/Ragnar/pull/943) — fix(kiosk): on-screen kiosk works on Ragnar OS (Pi 5 / Lite bare-Xorg)
+*branch `feature/kiosk-pi5-xorg`*
+
+- **The on-screen kiosk now comes up on the Ragnar OS image.** It already worked on a full Pi OS desktop (the kiosk runs inside the existing Wayland/labwc session) but crash-looped on the Lite image, where it starts its own Xorg — a stack of Pi 5 + trixie issues that `install_kiosk.sh` now fixes.
+- **vc4 forced as the primary GPU.** A Pi 5 exposes two DRM devices (vc4 = KMS/HDMI/DSI, has the outputs; v3d = render only). Xorg sometimes made v3d primary → `modeset(G0)` and *"no screens found"*, and could co-load the legacy `fbdev` driver, which collides with modesetting and aborts the server (`FBIOPUTCMAP` on `vc4drmfb` / `dixRegisterPrivateKey`). The installer writes `/etc/X11/xorg.conf.d/99-ragnar-kiosk.conf` with an `OutputClass` pinning **vc4 + modesetting** as PrimaryGPU (an `OutputClass` keeps Xorg's working platform probe; an explicit `Device` forces the old probe that fails here).
+- **VT activation.** The tty1 autologin held the active console while the kiosk started Xorg on tty7, so logind handed it a **paused** DRM fd and KMS never came up. The unit now `chvt`s to its VT before X starts.
+- **Chromium specifically.** The kiosk wrapper drives the browser with Chromium-only flags, so a box that only had `firefox-esr` launched it, got bad flags and exited — ending the X session. The installer now installs/selects **Chromium** (`chromium` on Debian 13/trixie, `chromium-browser` on older Raspberry Pi OS) and no longer treats Firefox as a usable kiosk browser.
+- **Home ownership.** The image could leave `/home/ragnar` root-owned, so Chromium/openbox/X couldn't create `.Xauthority`, caches or a browser profile and the session died on every start. `install_kiosk.sh` and `ragnar-firstboot.sh` now ensure the kiosk user owns its home.
+- **Reaches existing boxes on update.** `update_ragnar.sh` re-runs the idempotent installer for already-installed service-mode kiosks, so a plain `git pull` + update heals them — not only fresh or web-UI installs.
+- **Validated live** on a Pi 5 Ragnar OS device: kiosk service `active`, `NRestarts 0`, with Xorg + openbox + Chromium rendering the dashboard on HDMI.
+- **Docs:** [kiosk.md › Troubleshooting](kiosk.md#troubleshooting).
+
 ### 2026-10-11
 
 #### [#942](https://github.com/PierreGode/Ragnar/pull/942) — feat(net): CDP Watch v4 — LCDPwn expansion (+20 CVEs, cross-vendor screening, address-record attack shapes)
