@@ -3552,7 +3552,7 @@ end-to-end leg) aggregated into the Detector Self-Test panel.
 Cisco IOS / IOS-XE / NX-OS routers, switches and edge/core devices. Firewalls
 (ASA/Firepower/FTD/FMC) are **screened out of scope** (`CG-009`), not misclassified.
 Capture surface: SNMP (161/162), Telnet (23), HTTP UIs (80/8080/8443), IKEv2
-(500/4500), DHCPv6 (546/547), CAPWAP (5246/5247). The port clauses match **both IPv4 and IPv6** (libpcap's
+(500/4500), DHCPv6 (546/547), CAPWAP (5246/5247), LISP (4341/4342). The port clauses match **both IPv4 and IPv6** (libpcap's
 `port` primitive is family-agnostic, so plain v6 was never blind); the only real v6
 gap is a packet **behind an extension header**, where the next-header byte is no
 longer the transport — admitted by a narrow **`ip6[6]` next-header clause** (hop-by-hop
@@ -3587,8 +3587,21 @@ version, an undefined header type, an HLEN below the 2-word minimum or overrunni
 datagram, or reserved bits set — including a datagram too short to hold a header), the
 unauthenticated remote-reload shape on IOS XE. The related **`CG-222`**
 (`ETHERNET_LENGTH_FIELD_LIE`, CVE-2025-20311) is **not** ported in-app: it reads the
-802.3 frame length field, an L2 datum tcpdump's IP-onward hex does not carry. Plus
-IOS-XE / NX-OS version-in-range postures.
+802.3 frame length field, an L2 datum tcpdump's IP-onward hex does not carry. **LISP
+(CVE-2024-20311):** **`CG-107`** LISP on the segment (control UDP/4342, data UDP/4341 —
+the precondition) and the attack shapes **`CG-240`** a **malformed LISP control header**
+(runt, reserved message type, implausible record count) and **`CG-241`** a **source-EID
+AFI that overruns the datagram** (the allocation/copy-size mismatch), parsed from the
+UDP/4342 payload. **Cisco Small Business switch web UI (`CG-113`):** the May 2023 web-UI
+cluster — **four 9.8 RCEs** (CVE-2023-20159/20160/20161/20189), **four 8.6 DoS**
+(CVE-2023-20024/20156/20157/20158) and an info-disclosure (CVE-2023-20162) — screened
+from the SB switch model (SG/CBS 250/350/550X, and the no-fix SB 200/300/500 branch) in
+the HTTP response banner; the **220 Series is excluded** (Cisco states it is not
+affected). **Version posture (`CG-004`/`CG-005`):** the observed IOS-XE / NX-OS train is
+screened against the tracked CVE trains (a NOTE to verify THIS device, never a verdict) —
+IOS-XE now names the **August 2026 advisory wave** (CVE-2026-20267…20273, incl. the 9.8
+RCE CVE-2026-20272) and NX-OS adds **CVE-2025-20111**; a patched train stays quiet, and an
+untracked train is reported as unscreenable (silence is not evidence of patching).
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 

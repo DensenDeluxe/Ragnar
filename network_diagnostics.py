@@ -19822,6 +19822,7 @@ _CISCO_VXLAN_TRILL_BPF = ('(udp port 4789 and '
 _CISCO_GUARD_BPF = (
     'udp port 161 or udp port 162 or udp port 546 or udp port 547 or '
     'udp port 500 or udp port 4500 or udp port 5246 or udp port 5247 or '
+    'udp port 4341 or udp port 4342 or '
     'tcp port 23 or tcp port 80 or '
     'tcp port 8080 or tcp port 8443 or ' + _CISCO_VXLAN_TRILL_BPF + ' or '
     + _GUARD_IP6_EXTHDR_BPF)
@@ -20147,6 +20148,46 @@ _CISCO_NXOS_VER_RE = re.compile(r'NX-OS.{0,40}?[Vv]ersion\s+(\d+\.\d+\([^)]+\))'
 # Telnet CLI shell-escape / command-injection metacharacters (CVE-2024-20399 shape).
 _CISCO_SHELL_ESCAPE_RE = re.compile(rb'[;`|]|\$\(|&&|\|\||>\s*/|run\s+bash|feature\s')
 
+# --- Version screening (CG-004/005): train -> first-fixed (maj, min) band. A
+# train below its fixed release is flagged as a POSTURE NOTE ("verify THIS
+# device"), never a verdict — the cdpwatch discipline. A train absent from the
+# table is treated as unscreenable, not clean. Advisory-sourced; ported from
+# ciscoguard v6's IOSXE_CVE_TRAINS / NXOS_CVE_TRAINS. None = branch affected,
+# no fixed release listed.
+_CISCO_IOSXE_CVE_TRAINS = {(17, 9): (17, 9, 7), (17, 12): (17, 12, 5),
+                           (17, 15): (17, 15, 4), (17, 18): (17, 18, 2),
+                           (26, 1): None}
+_CISCO_NXOS_CVE_TRAINS = {(9, 3): (9, 3, 13), (10, 2): (10, 2, 8),
+                          (10, 3): (10, 3, 5), (10, 4): (10, 4, 3)}
+# The advisory bundles each version-screen cites (the August 2026 IOS XE wave +
+# the SNMP CVE for IOS XE; the NX-OS trio for NX-OS).
+_CISCO_IOSXE_CVES = ('CVE-2026-20272', 'CVE-2026-20267', 'CVE-2026-20268',
+                     'CVE-2026-20269', 'CVE-2026-20270', 'CVE-2026-20271',
+                     'CVE-2026-20273', 'CVE-2025-20352')
+_CISCO_NXOS_CVES = ('CVE-2025-20241', 'CVE-2025-20111', 'CVE-2024-20399')
+
+# --- Cisco Small Business switch web-UI cluster (CG-113, the May 2023 cluster).
+# Model families matched in an HTTP Server header / banner; the 220 Series is
+# CONFIRMED NOT VULNERABLE by Cisco and gated out (an in-scope-but-clean switch,
+# not an out-of-scope platform). Ported from ciscoguard v6.
+_CISCO_SMB_MODEL_RE = re.compile(
+    r'\b(?:CBS|Business)\s*-?\s*(?:250|350)\b'
+    r'|\b(?:SF|SG)\s*-?\s*(?:200|300|302|500|500X)\b'
+    r'|\bSmall\s+Business\s+(?:200|300|500)\b'
+    r'|\b(?:SF|SG)\s*-?\s*(?:250|350|350X|355|550X)\b'
+    r'|\b(?:250|350|350X|550X)\s+Series\b', re.I)
+_CISCO_SMB_NOT_VULN_RE = re.compile(
+    r'\b(?:SF|SG|CBS)\s*-?\s*220\b|\b220\s+Series\b|\bBusiness\s+220\b', re.I)
+# RCE (4×9.8) + DoS (4×8.6) + info-disclosure — the full CG-113 cluster.
+_CISCO_SMB_CVES = ('CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
+                   'CVE-2023-20189', 'CVE-2023-20024', 'CVE-2023-20156',
+                   'CVE-2023-20157', 'CVE-2023-20158', 'CVE-2023-20162')
+
+# --- LISP (CG-107/240/241, CVE-2024-20311): control UDP/4342, data UDP/4341.
+_CISCO_LISP_PORTS = (4341, 4342)
+_LISP_TYPES = frozenset((1, 2, 3, 4, 6, 8))   # map-request .. encapsulated-control
+_LISP_AFI_LEN = {0: 0, 1: 4, 2: 16}           # 0=none, 1=IPv4, 2=IPv6
+
 _CISCO_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  'data', 'cisco_guard.json')
 _cisco_guard_lock = threading.Lock()
@@ -20235,24 +20276,93 @@ def _guard_emit_jsonl(module, result):
         pass
 
 
+def _cisco_ver_tuple(ver):
+    """A free-text Cisco version -> (maj, min, patch). Handles IOS-XE dotted
+    (17.12.3) and NX-OS a.b(c) (10.2(5)); returns None when unparseable."""
+    if not ver:
+        return None
+    m = re.match(r'(\d+)\.(\d+)(?:\.(\d+)|\((\d+)\))?', ver.strip())
+    if not m:
+        return None
+    patch = m.group(3) or m.group(4) or '0'
+    try:
+        return (int(m.group(1)), int(m.group(2)), int(patch))
+    except ValueError:
+        return None
+
+
+def _cisco_screen_train(ver, trains):
+    """Screen a parsed version against a {(maj,min): first_fixed} train table.
+    Returns (in_range, reason). A train absent from the table is UNSCREENABLE
+    (inferred from silence, not confirmed patched) — reported as not-in-range
+    with that caveat. in_range True also when the train's fixed release is None
+    (branch affected, no fix listed)."""
+    t = _cisco_ver_tuple(ver)
+    if not t:
+        return (False, 'version %r unparseable' % ver)
+    train = (t[0], t[1])
+    if train not in trains:
+        return (False, 'train %d.%d absent from the tracked advisory — inferred '
+                'from silence, NOT confirmed patched' % train)
+    fixed = trains[train]
+    if fixed is None:
+        return (True, 'branch %d.%d is affected with no fixed release listed' % train)
+    return (t < fixed, '%s is %s the fixed release %s'
+            % ('.'.join(map(str, t)), 'below' if t < fixed else 'at or above',
+               '.'.join(map(str, fixed))))
+
+
+def _cisco_smb_screen(text):
+    """(train_or_None, matched_model) for a Cisco Small Business switch banner.
+    The 220 Series is confirmed-not-vulnerable and returns (None, '220')."""
+    if _CISCO_SMB_NOT_VULN_RE.search(text):
+        return (None, '220')
+    m = _CISCO_SMB_MODEL_RE.search(text)
+    return (('smb', m.group(0)) if m else (None, None))
+
+
+def _lisp_anomaly(payload):
+    """Malformed LISP control message (CVE-2024-20311 shape): runt, reserved
+    type, or an implausible record count. Returns a reason or None."""
+    p = payload or b''
+    if len(p) < 8:
+        return 'runt LISP control message (%d bytes)' % len(p)
+    t = (p[0] >> 4) & 0x0F
+    if t not in _LISP_TYPES:
+        return 'reserved/undefined LISP type %d' % t
+    if t in (1, 2) and p[3] > 64:
+        return 'LISP record count %d implausible' % p[3]
+    return None
+
+
+def _lisp_afi_anomaly(payload):
+    """A Map-Request whose source-EID AFI names more address bytes than are
+    present (the allocation/copy mismatch class of CVE-2024-20311). None if OK."""
+    p = payload or b''
+    if len(p) < 14 or ((p[0] >> 4) & 0x0F) != 1:
+        return None
+    afi = int.from_bytes(p[12:14], 'big')       # after 4B header + 8B nonce
+    if afi not in _LISP_AFI_LEN:
+        return 'unknown LISP source-EID AFI %d' % afi
+    need = 14 + _LISP_AFI_LEN[afi]
+    if len(p) < need:
+        fam = 'IPv6' if afi == 2 else 'IPv4'
+        return ('LISP source-EID declares AFI %d (%s, %d bytes) but only %d '
+                'byte(s) follow' % (afi, fam, _LISP_AFI_LEN[afi], len(p) - 14))
+    return None
+
+
 def _cisco_screen_version(iosxe=None, nxos=None):
-    """Return the list of CVEs whose fixed release the observed train sits below.
-    Conservative: a train we don't have a table for is reported as unscreenable
-    rather than clean (the caller decides how to surface that)."""
-    hits = []
-    # IOS XE trains carrying the tracked SNMP / CWE-family CVEs (advisory-sourced,
-    # screened as < fixed). Kept compact: the point is "verify THIS device", so a
-    # coarse major.minor band below the fixed release is the trigger.
+    """Screen observed IOS-XE / NX-OS versions against the tracked CVE trains.
+    Returns (iosxe_hit, iosxe_reason, nxos_hit, nxos_reason) — each *_hit True
+    when the version sits below (or on an unfixed) affected train. A POSTURE
+    NOTE, never a verdict."""
+    ix_hit = ix_why = nx_hit = nx_why = None
     if iosxe:
-        try:
-            maj = tuple(int(x) for x in re.split(r'[.\s]', iosxe)[:2])
-        except (ValueError, IndexError):
-            maj = None
-        if maj and maj < (17, 15):   # SNMP CVE-2025-20352 fixed in 17.15.x line
-            hits.append('CVE-2025-20352')
+        ix_hit, ix_why = _cisco_screen_train(iosxe, _CISCO_IOSXE_CVE_TRAINS)
     if nxos:
-        hits.append('CVE-2025-20241')  # tracked NX-OS trains — verify on box
-    return hits
+        nx_hit, nx_why = _cisco_screen_train(nxos, _CISCO_NXOS_CVE_TRAINS)
+    return ix_hit, ix_why, nx_hit, nx_why
 
 
 def do_cisco_guard(interface=None, seconds=20, learn=True, quick=False):
@@ -20563,6 +20673,22 @@ def _cisco_analyze(records):
                         ['CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
                          'CVE-2023-20189'], {'request_line_len': len(line)})
 
+        # --- Cisco Small Business switch web UI exposed (May 2023 cluster) ---
+        # The switch's model appears in the HTTP response banner (Server header /
+        # title), so look at either direction on 80/8080. The 220 Series is gated
+        # out — Cisco states it is not affected.
+        if r['proto'] == 'TCP' and (r['dport'] in (80, 8080)
+                                    or r['sport'] in (80, 8080)):
+            _http_txt = (r['payload'] or b'')[:2048].decode('latin-1', 'replace')
+            _smb_train, _smb_model = _cisco_smb_screen(_http_txt)
+            if _smb_train:
+                _dev = src if r['sport'] in (80, 8080) else (dst or src)
+                add('CG-113', 'SMB_WEB_UI_EXPOSED', 'HIGH', 'EXPOSURE', _dev,
+                    list(_CISCO_SMB_CVES),
+                    {'model': _smb_model, 'note': 'Cisco Small Business switch web '
+                     'UI on the segment — verify against the May 2023 web-UI '
+                     'cluster (SB 200/300/500 has no fix; 220 Series excluded)'})
+
         # --- Telnet to infrastructure ---
         if r['proto'] == 'TCP' and (r['dport'] == 23 or r['sport'] == 23):
             add('CG-104', 'TELNET_TO_INFRASTRUCTURE', 'HIGH', 'EXPOSURE', src,
@@ -20580,6 +20706,25 @@ def _cisco_analyze(records):
             if why:
                 add('CG-250', 'IKEV2_MALFORMED_PAYLOAD', 'HIGH', 'ATTACK', src,
                     ['CVE-2024-20307', 'CVE-2024-20308'], {'reason': why})
+
+        # --- LISP control/data plane (CVE-2024-20311 crafted-packet DoS) ---
+        # Control is UDP/4342, data UDP/4341. The malformed-header and AFI-length
+        # shapes ride the control plane; presence alone is the exposure.
+        if r['proto'] == 'UDP' and (r['dport'] in _CISCO_LISP_PORTS
+                                    or r['sport'] in _CISCO_LISP_PORTS):
+            add('CG-107', 'LISP_ENABLED_ON_SEGMENT', 'LOW', 'EXPOSURE', src or dst,
+                ['CVE-2024-20311'],
+                {'note': 'LISP here is the precondition for CVE-2024-20311'})
+            _lport = r['dport'] if r['dport'] in _CISCO_LISP_PORTS else r['sport']
+            if _lport == 4342:
+                _lwhy = _lisp_anomaly(r['payload'])
+                if _lwhy:
+                    add('CG-240', 'LISP_MALFORMED_HEADER', 'HIGH', 'ATTACK',
+                        src or dst, ['CVE-2024-20311'], {'reason': _lwhy})
+                _lafi = _lisp_afi_anomaly(r['payload'])
+                if _lafi:
+                    add('CG-241', 'LISP_AFI_LENGTH_MISMATCH', 'HIGH', 'ATTACK',
+                        src or dst, ['CVE-2024-20311'], {'reason': _lafi})
 
         # --- DHCPv6 malformed option (CVE-2024-20259 shape, IPv6 side) ---
         if r['proto'] == 'UDP' and (r['dport'] in (546, 547) or r['sport'] in (546, 547)):
@@ -20650,15 +20795,17 @@ def _cisco_analyze(records):
                 ['CVE-2024-20434'], {'vlan_tags': r['vlan_tags'],
                                      'threshold': _CISCO_MAX_VLAN_TAGS})
 
-    # POSTURE version screening → CG-004 / CG-005.
-    screened = _cisco_screen_version(iosxe_ver, nxos_ver)
-    if iosxe_ver and 'CVE-2025-20352' in screened:
+    # POSTURE version screening → CG-004 / CG-005 (tracked CVE trains; a NOTE,
+    # never a verdict — verify THIS device). A train below its fixed release, or
+    # on an affected branch with no fix, fires; an unknown train stays quiet.
+    ix_hit, ix_why, nx_hit, nx_why = _cisco_screen_version(iosxe_ver, nxos_ver)
+    if iosxe_ver and ix_hit:
         add('CG-004', 'IOS_XE_VERSION_IN_CVE_RANGE', 'MEDIUM', 'POSTURE', None,
-            ['CVE-2025-20352'], {'version': iosxe_ver,
-                                 'note': 'verify THIS device against the advisory'})
-    if nxos_ver:
+            list(_CISCO_IOSXE_CVES), {'version': iosxe_ver, 'reason': ix_why,
+             'note': 'verify THIS device against the advisory'})
+    if nxos_ver and nx_hit:
         add('CG-005', 'NXOS_VERSION_IN_CVE_RANGE', 'MEDIUM', 'POSTURE', None,
-            ['CVE-2025-20241', 'CVE-2024-20399'], {'version': nxos_ver,
+            list(_CISCO_NXOS_CVES), {'version': nxos_ver, 'reason': nx_why,
              'note': 'verify THIS device; CVE-2024-20399 is an in-the-wild 0-day'})
 
     return _guard_finish('cisco_guard', None, None, findings, records)
@@ -23659,9 +23806,9 @@ def _cisco_selftest():
     # observed: a Cisco device sighting, no CVE-relevant finding.
     check('cisco-observed', [_guard_rec(dissect='Cisco IOS Software ...')],
           'observed', ['CG-001'])
-    # posture: an IOS XE version that screens into the CVE range.
+    # posture: an IOS XE version in a tracked affected train (17.12 < 17.12.5).
     check('cisco-posture', [_guard_rec(
-        dissect='Cisco IOS-XE Software, Version 17.6.3')], 'posture', ['CG-004'])
+        dissect='Cisco IOS-XE Software, Version 17.12.3')], 'posture', ['CG-004'])
     # exposure: cleartext SNMPv2c with a default community.
     check('cisco-snmp-default', [_guard_rec(
         proto='UDP', dport=161, payload=_snmp_v2c_get(b'public'))],
@@ -23684,6 +23831,44 @@ def _cisco_selftest():
     # out-of-scope firewall is screened, not misclassified as a router.
     check('cisco-oos', [_guard_rec(dissect='Cisco Adaptive Security Appliance (ASA)')],
           'observed', ['CG-009'])
+
+    # v6: NX-OS version in a tracked affected train -> CG-005 (names CVE-2025-20111).
+    _r_nx = check('cisco-nxos-posture', [_guard_rec(
+        dissect='Cisco Nexus Operating System (NX-OS) Software, Version 10.2(5)')],
+        'posture', ['CG-005'])
+    scenarios.append({'name': 'cisco-nxos-cve-named', 'expect': 'CVE-2025-20111',
+                      'got': str([f['cves'] for f in _r_nx['findings'] if f['code'] == 'CG-005']),
+                      'pass': any('CVE-2025-20111' in f['cves'] for f in _r_nx['findings']
+                                  if f['code'] == 'CG-005')})
+    # v6: a patched IOS-XE train (17.12.5 == fixed) must NOT flag CG-004.
+    _r_patched = _cisco_analyze([_guard_rec(
+        dissect='Cisco IOS-XE Software, Version 17.12.5')])
+    scenarios.append({'name': 'cisco-iosxe-patched-clean', 'expect': 'no CG-004',
+                      'got': str(sorted({f['code'] for f in _r_patched['findings']})),
+                      'pass': 'CG-004' not in {f['code'] for f in _r_patched['findings']}})
+    # v6: IOS-XE CG-004 names the August 2026 advisory wave.
+    scenarios.append({'name': 'cisco-iosxe-2026-wave-named', 'expect': 'CVE-2026-20272',
+                      'got': '', 'pass': any('CVE-2026-20272' in f['cves']
+                      for f in _cisco_analyze([_guard_rec(
+                          dissect='Cisco IOS-XE Software, Version 17.12.3')])['findings']
+                      if f['code'] == 'CG-004')})
+    # v6: Cisco Small Business switch web UI (CG-113). A vulnerable SG350 model in
+    # the HTTP response banner -> exposure; the 220 Series is excluded.
+    _smb_resp = b'HTTP/1.1 200 OK\r\nServer: Cisco SG350-28P Managed Switch\r\n\r\n'
+    check('cisco-smb-webui', [_guard_rec(proto='TCP', src='10.0.0.5', sport=80,
+          dst='10.0.0.9', dport=51000, payload=_smb_resp)], 'exposure', ['CG-113'])
+    _smb220 = b'HTTP/1.1 200 OK\r\nServer: Cisco SG220-26 Smart Switch\r\n\r\n'
+    _r_220 = _cisco_analyze([_guard_rec(proto='TCP', src='10.0.0.6', sport=80,
+             dst='10.0.0.9', dport=51001, payload=_smb220)])
+    scenarios.append({'name': 'cisco-smb-220-not-vulnerable', 'expect': 'no CG-113',
+                      'got': str(sorted({f['code'] for f in _r_220['findings']})),
+                      'pass': 'CG-113' not in {f['code'] for f in _r_220['findings']}})
+    # v6: LISP malformed control (CVE-2024-20311). Reserved LISP type on UDP/4342.
+    check('cisco-lisp-malformed', [_guard_rec(proto='UDP', sport=4342, dport=4342,
+          payload=b'\xf0\x00\x00\x02' + b'\x00' * 16)], 'attack', ['CG-240'])
+    # v6: LISP Map-Request whose source-EID AFI overruns the datagram -> CG-241.
+    check('cisco-lisp-afi', [_guard_rec(proto='UDP', sport=4342, dport=4342,
+          payload=b'\x10\x00\x00\x02' + b'\x00' * 8 + b'\x00\x02')], 'attack', ['CG-241'])
 
     # attack: IKEv2 message whose declared Length overruns the datagram
     # (CVE-2024-20307/20308 malformed-input shape). 28-byte header, Length=9999.

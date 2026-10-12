@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **328** distinct CVE IDs
-- **285** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **342** distinct CVE IDs
+- **299** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **34** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -37,10 +37,10 @@ detector works is in [nettools.md](nettools.md).
 | 2020 | 30 |
 | 2021 | 34 |
 | 2022 | 29 |
-| 2023 | 40 |
-| 2024 | 50 |
-| 2025 | 36 |
-| 2026 | 38 |
+| 2023 | 45 |
+| 2024 | 51 |
+| 2025 | 37 |
+| 2026 | 45 |
 
 ## By detector
 
@@ -55,7 +55,7 @@ detector works is in [nettools.md](nettools.md).
 | BLE Pentest (active) | 6 |
 | CDP Watch | 25 |
 | CFM Watch | 4 |
-| Cisco Guard | 15 |
+| Cisco Guard | 29 |
 | Comware Guard | 2 |
 | Dell Guard | 2 |
 | DHCP Guardian | 2 |
@@ -258,11 +258,16 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-40735](https://nvd.nist.gov/vuln/detail/CVE-2022-40735) | D(HE)at | detected | IPsec / IKE Watch, SSH Watch, TLS Watch | — |
 | [CVE-2022-43681](https://nvd.nist.gov/vuln/detail/CVE-2022-43681) |  | context only | BGP Path Watch | — |
 | [CVE-2022-45313](https://nvd.nist.gov/vuln/detail/CVE-2022-45313) |  | detected | MikroTik Guard | — |
+| [CVE-2023-20024](https://nvd.nist.gov/vuln/detail/CVE-2023-20024) | Cisco SB switch web-UI DoS | detected | Cisco Guard | — |
 | [CVE-2023-20049](https://nvd.nist.gov/vuln/detail/CVE-2023-20049) |  | detected | BFD Watch | — |
 | [CVE-2023-20089](https://nvd.nist.gov/vuln/detail/CVE-2023-20089) |  | detected | LLDP Watch | — |
+| [CVE-2023-20156](https://nvd.nist.gov/vuln/detail/CVE-2023-20156) | Cisco SB switch web-UI DoS | detected | Cisco Guard | — |
+| [CVE-2023-20157](https://nvd.nist.gov/vuln/detail/CVE-2023-20157) | Cisco SB switch web-UI DoS | detected | Cisco Guard | — |
+| [CVE-2023-20158](https://nvd.nist.gov/vuln/detail/CVE-2023-20158) | Cisco SB switch web-UI DoS | detected | Cisco Guard | — |
 | [CVE-2023-20159](https://nvd.nist.gov/vuln/detail/CVE-2023-20159) |  | detected | Cisco Guard | — |
 | [CVE-2023-20160](https://nvd.nist.gov/vuln/detail/CVE-2023-20160) |  | detected | Cisco Guard | — |
 | [CVE-2023-20161](https://nvd.nist.gov/vuln/detail/CVE-2023-20161) |  | detected | Cisco Guard | — |
+| [CVE-2023-20162](https://nvd.nist.gov/vuln/detail/CVE-2023-20162) | Cisco SB switch web-UI info disclosure | detected | Cisco Guard | — |
 | [CVE-2023-20189](https://nvd.nist.gov/vuln/detail/CVE-2023-20189) |  | detected | Cisco Guard | — |
 | [CVE-2023-20233](https://nvd.nist.gov/vuln/detail/CVE-2023-20233) |  | context only | CFM Watch | — |
 | [CVE-2023-22747](https://nvd.nist.gov/vuln/detail/CVE-2023-22747) |  | detected | Aruba Guard | — |
@@ -308,6 +313,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2024-20294](https://nvd.nist.gov/vuln/detail/CVE-2024-20294) |  | detected | LLDP Watch | — |
 | [CVE-2024-20307](https://nvd.nist.gov/vuln/detail/CVE-2024-20307) |  | detected | Cisco Guard | — |
 | [CVE-2024-20308](https://nvd.nist.gov/vuln/detail/CVE-2024-20308) |  | detected | Cisco Guard | — |
+| [CVE-2024-20311](https://nvd.nist.gov/vuln/detail/CVE-2024-20311) | IOS/IOS-XE LISP crafted-packet DoS | detected | Cisco Guard | — |
 | [CVE-2024-20399](https://nvd.nist.gov/vuln/detail/CVE-2024-20399) |  | detected | Cisco Guard | — |
 | [CVE-2024-20406](https://nvd.nist.gov/vuln/detail/CVE-2024-20406) |  | detected | IS-IS Watch | — |
 | [CVE-2024-20434](https://nvd.nist.gov/vuln/detail/CVE-2024-20434) |  | detected | Cisco Guard | — |
@@ -355,6 +361,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-5089](https://nvd.nist.gov/vuln/detail/CVE-2025-5089) |  | detected | Arista Guard | — |
 | [CVE-2025-8677](https://nvd.nist.gov/vuln/detail/CVE-2025-8677) |  | detected | DNS Watch | — |
 | [CVE-2025-10948](https://nvd.nist.gov/vuln/detail/CVE-2025-10948) |  | detected | MikroTik Guard | — |
+| [CVE-2025-20111](https://nvd.nist.gov/vuln/detail/CVE-2025-20111) | NX-OS health-monitor frame DoS | detected | Cisco Guard | — |
 | [CVE-2025-20164](https://nvd.nist.gov/vuln/detail/CVE-2025-20164) |  | detected | Cisco Guard | — |
 | [CVE-2025-20241](https://nvd.nist.gov/vuln/detail/CVE-2025-20241) |  | detected | Cisco Guard | — |
 | [CVE-2025-20312](https://nvd.nist.gov/vuln/detail/CVE-2025-20312) |  | detected | Cisco Guard | — |
@@ -399,6 +406,13 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-20010](https://nvd.nist.gov/vuln/detail/CVE-2026-20010) |  | detected | LLDP Watch | — |
 | [CVE-2026-20074](https://nvd.nist.gov/vuln/detail/CVE-2026-20074) | IS-IS multi-instance exposure | detected | IS-IS Watch | — |
 | [CVE-2026-20222](https://nvd.nist.gov/vuln/detail/CVE-2026-20222) | EIGRP update flood | detected | EIGRP Watch | — |
+| [CVE-2026-20267](https://nvd.nist.gov/vuln/detail/CVE-2026-20267) | IOS XE access control (Aug-2026 wave) | detected | Cisco Guard | — |
+| [CVE-2026-20268](https://nvd.nist.gov/vuln/detail/CVE-2026-20268) | IOS XE buffer restriction (Aug-2026 wave) | detected | Cisco Guard | — |
+| [CVE-2026-20269](https://nvd.nist.gov/vuln/detail/CVE-2026-20269) | IOS XE resource lifetime (Aug-2026 wave) | detected | Cisco Guard | — |
+| [CVE-2026-20270](https://nvd.nist.gov/vuln/detail/CVE-2026-20270) | IOS XE calc error (Aug-2026 wave) | detected | Cisco Guard | — |
+| [CVE-2026-20271](https://nvd.nist.gov/vuln/detail/CVE-2026-20271) | IOS XE input validation (Aug-2026 wave) | detected | Cisco Guard | — |
+| [CVE-2026-20272](https://nvd.nist.gov/vuln/detail/CVE-2026-20272) | IOS XE RCE (Aug-2026 wave, 9.8) | detected | Cisco Guard | — |
+| [CVE-2026-20273](https://nvd.nist.gov/vuln/detail/CVE-2026-20273) | IOS XE input validation (Aug-2026 wave) | detected | Cisco Guard | — |
 | [CVE-2026-21902](https://nvd.nist.gov/vuln/detail/CVE-2026-21902) |  | detected | Juniper Guard | — |
 | [CVE-2026-22627](https://nvd.nist.gov/vuln/detail/CVE-2026-22627) |  | detected | LLDP Watch | — |
 | [CVE-2026-24061](https://nvd.nist.gov/vuln/detail/CVE-2026-24061) | inetutils telnetd auth bypass | detected | Telnet Watch | — |

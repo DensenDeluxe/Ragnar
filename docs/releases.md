@@ -4,6 +4,17 @@
 
 ### 2026-10-12
 
+#### [#945](https://github.com/PierreGode/Ragnar/pull/945) — feat(net): Cisco Guard v6 — LISP, Small Business switch web UI, 2026 version wave (+14 CVEs)
+*branch `feature/cisco-guard-v6`*
+
+- **Ported the feasible v6 (LCDPwn-era) additions into the in-app `do_cisco_guard`** (tcpdump-text/hex model; byte-level L2 codes stay deferred). CVE index **328 → 342 named, 285 → 299 detected** (+14). Cisco Guard now names 29 CVEs.
+- **LISP (CVE-2024-20311):** `CG-107` LISP on the segment (control UDP/4342, data UDP/4341) and the attack shapes `CG-240` malformed LISP control header (runt / reserved type / implausible record count) and `CG-241` a source-EID AFI that overruns the datagram. Added `udp port 4341 or udp port 4342` to the capture BPF.
+- **Cisco Small Business switch web UI (`CG-113`):** the May 2023 cluster — four 9.8 RCEs (CVE-2023-20159/20160/20161/20189), four 8.6 DoS (CVE-2023-20024/20156/20157/20158) and info-disclosure (CVE-2023-20162) — screened from the SG/CBS switch model in the HTTP response banner. The **220 Series is excluded** (Cisco states it is not affected); the no-fix SB 200/300/500 branch is matched too.
+- **Version posture now uses the tracked CVE trains (`CG-004`/`CG-005`).** IOS-XE names the **August 2026 advisory wave** (CVE-2026-20267…20273, incl. the 9.8 RCE CVE-2026-20272) and NX-OS adds **CVE-2025-20111**; a patched train stays quiet and an untracked train is reported unscreenable (silence ≠ patched) — a NOTE to verify THIS device, never a verdict.
+- **Deferred, with reasons** (not reconstructable from tcpdump's IP-onward hex): the IS-IS malformed-TLV codes (`CG-210`–`212`, L2 LLC), `CG-221`/`CG-222` (VLAN/802.3-length L2 bytes; `CG-222` was already skipped in v5), and CVE-2024-20271 (crafted-IPv4 reload — no packet signature).
+- **Self-test:** the `cisco` suite grows to **35 scenarios** (CG-113 + the 220-not-vulnerable gate, CG-240/241 LISP, the 2026 wave naming, a patched-train-clean check). **Live-validated** in a sealed netns: crafted SG350 HTTP banner + malformed LISP frames replayed with `tcpreplay` fire `CG-113`/`CG-240`/`CG-241` through the real `tcpdump` capture path, verdict `attack`.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard) (LISP, SMB web UI, version trains), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the LISP helpers (`_lisp`) under Cisco Guard and labels the new IDs.
+
 #### [#943](https://github.com/PierreGode/Ragnar/pull/943) — fix(kiosk): on-screen kiosk works on Ragnar OS (Pi 5 / Lite bare-Xorg)
 *branch `feature/kiosk-pi5-xorg`*
 
