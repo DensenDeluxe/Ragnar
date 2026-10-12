@@ -1531,6 +1531,146 @@ def signals(name, t0=None, t1=None, snr_db=12.0, nfft=512, max_signals=40):
             "n_signals": len(tracks), "signals": tracks}
 
 
+def _count_bursts(frame_mask, gap_frames=3):
+    """How many separate on-periods a per-frame boolean has, bridging gaps of
+    up to ``gap_frames`` dead frames (so one bursty carrier isn't counted once
+    per pulse). Reuses the burst-merge logic. Pure."""
+    import numpy as np
+    m = np.asarray(frame_mask, dtype=bool)
+    if not m.any():
+        return 0
+    return len(_merge_runs(m, gap=int(gap_frames) + 1, min_len=1))
+
+
+def survey(name, snr_db=12.0, nfft=1024, max_carriers=200,
+           heat_w=480, heat_h=240, spec_n=900):
+    """Whole-capture spectrum survey for expert triage. One STFT over the entire
+    recording yields:
+
+    * an **occupancy heatmap** (frequency x time) for the page's palette LUT,
+    * **max-hold / mean / %-occupancy** spectra across the whole span, and
+    * **every carrier measured** — centre, 99%-edge bandwidth, peak & mean level,
+      SNR over the noise floor, duty cycle (% of the record it is on), burst
+      count, and first/last time.
+
+    Levels are the tool's consistent *relative* dB (not absolute dBm), matching
+    the spectrogram, PSD and measure box. Pure-ish (numpy); bounded so a small
+    board stays within memory.
+    """
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    n = len(iq)
+    nfft = int(max(128, min(4096, nfft)))
+    if n < nfft * 2:
+        return {"ok": False, "error": "capture too short for a survey at this FFT size"}
+    snr_db = float(snr_db)
+    # one STFT, non-overlapping frames, bounded so frames*nfft stays modest
+    frame_cap = max(16, int(1_500_000 // nfft))
+    ncol = max(2, min(frame_cap, (n - nfft) // nfft + 1))
+    starts = np.linspace(0, max(0, n - nfft), ncol).astype(np.int64)
+    win = np.hanning(nfft).astype(np.float32)
+    wsum = float(np.sum(win ** 2))
+    frames = np.stack([iq[s:s + nfft] for s in starts]) * win        # (T, nfft)
+    SS = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
+    P = ((SS.real ** 2 + SS.imag ** 2) / (nfft * wsum)).astype(np.float32)   # (T, bins)
+    db = 10.0 * np.log10(P + 1e-12)                                  # (T, bins)
+    bins = nfft
+    fbins = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs)) + fc     # absolute Hz
+    bin_hz = fs / nfft
+    frame_dt = (starts[-1] - starts[0]) / max(1, ncol - 1) / fs if ncol > 1 else nfft / fs
+    total_t = n / fs
+
+    floors = np.percentile(db, 40.0, axis=1, keepdims=True)         # per-frame floor (T,1)
+    occ = db > (floors + snr_db)                                    # (T, bins) bool
+    noise_db = float(np.percentile(db, 30.0))
+
+    # ---- spectra across the whole record (per frequency bin) ----
+    maxhold = db.max(axis=0)
+    meanlin = P.mean(axis=0)
+    occ_pct = occ.mean(axis=0) * 100.0
+    spn = int(max(64, min(1600, spec_n)))
+    if bins > spn:
+        edges = np.linspace(0, bins, spn + 1).astype(int)
+        st = edges[:-1]; cnt = np.diff(edges).astype(np.float64)
+        out_max = np.maximum.reduceat(maxhold, st)
+        out_mean = 10.0 * np.log10(np.add.reduceat(meanlin, st) / cnt + 1e-12)
+        out_occ = np.maximum.reduceat(occ_pct, st)
+        ctr = np.clip((edges[:-1] + edges[1:] - 1) // 2, 0, bins - 1)
+        out_fr = fbins[ctr] / 1e6
+    else:
+        out_max, out_mean, out_occ = maxhold, 10.0 * np.log10(meanlin + 1e-12), occ_pct
+        out_fr = fbins / 1e6
+
+    # ---- occupancy heatmap (freq rows top=high, time cols), 0..255 for the LUT ----
+    H = db.T                                                        # (bins, T)
+    if H.shape[0] != heat_h:
+        H = np.apply_along_axis(lambda col: _pool_max(col, heat_h), 0, H)
+    if H.shape[1] != heat_w:
+        H = np.apply_along_axis(lambda row: _pool_max(row, heat_w), 1, H)
+    H = H[::-1, :]
+    hfloor = float(np.percentile(H, 25)) - 4.0
+    hceil = float(np.percentile(H, 99.9)) + 2.0
+    if hceil - hfloor < 12:
+        hceil = hfloor + 12
+    grid = (np.clip((H - hfloor) / (hceil - hfloor), 0, 1) * 255).astype(np.uint8)
+
+    # ---- carrier inventory --------------------------------------------------
+    # The tracker finds every (freq,time) carrier burst; for a whole-capture
+    # survey we want ONE row per distinct frequency band (a keyed remote that
+    # fires 100× is one carrier at 18% duty, not 100 carriers). Union the
+    # tracked frequency edges into distinct bands, then measure each band over
+    # the entire record: duty, burst count, first/last time, peak & mean level.
+    tracks, _fl = _detect_signals(iq, fs, fc, nfft=nfft, snr_db=snr_db,
+                                  max_signals=int(max_carriers) * 4)
+    tol = 2.0 * bin_hz
+    bands = sorted([[t["f_lo_hz"], t["f_hi_hz"]] for t in tracks])
+    merged_bands = []
+    for lo, hi in bands:
+        if merged_bands and lo <= merged_bands[-1][1] + tol:
+            merged_bands[-1][1] = max(merged_bands[-1][1], hi)
+        else:
+            merged_bands.append([lo, hi])
+    floor_row = floors.ravel()
+    carriers = []
+    for lo, hi in merged_bands:
+        lo_i = max(0, min(int(np.searchsorted(fbins, lo)), bins - 1))
+        hi_i = max(lo_i, min(int(np.searchsorted(fbins, hi)), bins - 1))
+        band = db[:, lo_i:hi_i + 1].max(axis=1)                     # per-frame band level
+        bmask = band > (floor_row + snr_db)
+        if not bmask.any():
+            continue
+        act = np.where(bmask)[0]
+        carriers.append({
+            "f_center_hz": round((lo + hi) / 2.0, 1),
+            "f_lo_hz": round(lo - bin_hz / 2, 1), "f_hi_hz": round(hi + bin_hz / 2, 1),
+            "bw_hz": round((hi - lo) + bin_hz, 1),
+            "t0_s": round(float(act[0]) * frame_dt, 4),
+            "t1_s": round(float(act[-1] + 1) * frame_dt, 4),
+            "peak_db": round(float(band.max()), 1),
+            "mean_db": round(float(band[bmask].mean()), 1),
+            "snr_db": round(float(band.max()) - noise_db, 1),
+            "duty_pct": round(float(bmask.mean()) * 100.0, 1),
+            "hits": _count_bursts(bmask)})
+    carriers.sort(key=lambda s: s["peak_db"], reverse=True)
+    carriers = carriers[:int(max_carriers)]
+
+    return {"ok": True, "name": name, "sr_hz": round(fs, 1), "center_hz": fc,
+            "span_hz": round(fs, 1), "duration_s": round(total_t, 4),
+            "nfft": nfft, "snr_db": snr_db, "bin_hz": round(bin_hz, 2),
+            "noise_db": round(noise_db, 1), "frames": int(ncol),
+            "frame_dt_ms": round(frame_dt * 1000.0, 4),
+            "freqs_mhz": [round(float(x), 5) for x in out_fr],
+            "maxhold_db": [round(float(x), 1) for x in out_max],
+            "mean_db": [round(float(x), 1) for x in out_mean],
+            "occ_pct": [round(float(x), 1) for x in out_occ],
+            "heat": {"w": int(grid.shape[1]), "h": int(grid.shape[0]),
+                     "t0": 0.0, "t1": round(total_t, 4),
+                     "f0": round(float(fbins[0]), 1), "f1": round(float(fbins[-1]), 1),
+                     "floor_db": round(hfloor, 1), "ceil_db": round(hceil, 1),
+                     "data": base64.b64encode(grid.tobytes()).decode("ascii")},
+            "n_carriers": len(carriers), "carriers": carriers}
+
+
 # --------------------------------------------------------------------------
 # Segment 7 — advanced DSP: apply a band-pass / notch filter to a selection and
 # show the spectrum before vs after (isolate one signal, or reject an
@@ -2955,6 +3095,23 @@ def selftest():
               str(d.get("n_bits")))
         e = envelope("synth", n=300)
         check("envelope: returns matched t/db arrays", len(e["t"]) == len(e["db"]) > 0)
+        # --- whole-capture spectrum survey ---
+        sv = survey("synth", nfft=512)
+        check("survey: runs and returns carriers", sv["ok"] and sv["n_carriers"] >= 1, str(sv.get("n_carriers")))
+        check("survey: spectra arrays are aligned",
+              len(sv["freqs_mhz"]) == len(sv["maxhold_db"]) == len(sv["mean_db"]) == len(sv["occ_pct"]) > 0)
+        check("survey: heatmap is h*w uint8 bytes",
+              len(base64.b64decode(sv["heat"]["data"])) == sv["heat"]["w"] * sv["heat"]["h"] and sv["heat"]["w"] > 0)
+        check("survey: heatmap has dynamic range (floor<ceil)", sv["heat"]["ceil_db"] > sv["heat"]["floor_db"])
+        _top = sv["carriers"][0]
+        check("survey: the 150 kHz CW carrier is found (near 434.05 MHz)",
+              abs(_top["f_center_hz"] - (433_900_000 + 150_000)) < 20_000, str(_top["f_center_hz"]))
+        check("survey: the continuous carrier reads a high duty cycle",
+              _top["duty_pct"] >= 70.0, str(_top["duty_pct"]))
+        check("survey: carriers carry mean level, SNR, duty and burst count",
+              all(k in _top for k in ("mean_db", "snr_db", "duty_pct", "hits")))
+        check("survey: max-hold sits at/above the mean everywhere",
+              all(mx >= mn - 0.6 for mx, mn in zip(sv["maxhold_db"], sv["mean_db"])))
         # --- modulation classification on synthetic baseband signals ---
         import numpy as np
         _nfs = 100000.0; _N = 40000; _t = np.arange(_N) / _nfs

@@ -1009,6 +1009,18 @@ Measured on a 60 MB capture: Ragnar's memory peaked at 1.1 GB instead of 2.8 GB,
 cyclostationary detection over the whole capture takes 5 s instead of several
 minutes, and whole-capture classify / demodulate take about half a second.
 
+- **Spectrum Survey** — a whole-capture workspace at the top of the page (one
+  STFT over the **entire recording**, not just the shown window). It shows a
+  **frequency × time occupancy heatmap**, a combined **max-hold / mean /
+  %-occupied spectrum**, and a **measured carrier inventory**: one row per
+  distinct frequency band (bursts of the same carrier are consolidated), each
+  with centre + offset, occupied bandwidth, peak & mean level, SNR over the noise
+  floor, **duty cycle** (fraction of the record it is on), **burst count**, and
+  first/last time. Columns sort; a row click zooms the spectrogram to that
+  carrier. Expert knobs: **min SNR** and **FFT size** (256–4096). Export the
+  table as **CSV**, or **Annotate all** to write every carrier into the SigMF
+  file as a labelled annotation. Runs automatically when a capture loads. Route
+  `/analyze/survey`; levels are the tool's consistent *relative* dB.
 - **Summary** — center/rate/duration, measured noise floor, peak frequency, SNR,
   occupied bandwidth, burst count.
 - **Zoomable spectrogram** — a time × frequency image for any window; drag a box

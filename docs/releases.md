@@ -2,6 +2,13 @@
 
 ## Releases
 
+### 2026-10-13
+
+#### feat(sdr): Signal Analyzer — whole-capture Spectrum Survey
+*branch `feature/signal-analyzer-sdr-survey`*
+
+- New **Spectrum Survey** workspace at the top of the **Signal Analyzer** (Signal Intelligence → Signal Analyzer). One STFT over the **entire recording** gives a **frequency × time occupancy heatmap**, a **max-hold / mean / %-occupied spectrum**, and a **measured carrier inventory** — one row per distinct carrier (repeated bursts of the same frequency are consolidated), each with centre + offset, occupied bandwidth, peak & mean level, SNR, **duty cycle**, **burst count**, and first/last time. Columns sort; a row click zooms the spectrogram to that carrier. Expert knobs: **min SNR** and **FFT size** (256–4096). **Export CSV** and **Annotate all** (writes every carrier into the SigMF file). Runs automatically on capture load. Backend `sigmf_analyzer.survey()` + route `GET /api/net/rtl/analyze/survey`; levels are the tool's consistent relative dB. `sigmf_analyzer --selftest` 145/145 (8 new survey checks). Validated on 31 on-box captures. Docs: [RF Waterfall → Signal Analyzer](rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis).
+
 ### 2026-10-12
 
 #### [#945](https://github.com/PierreGode/Ragnar/pull/945) — feat(net): Cisco Guard v6 — LISP, Small Business switch web UI, 2026 version wave (+14 CVEs)

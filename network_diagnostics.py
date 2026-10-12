@@ -30574,6 +30574,14 @@ def register_network_diagnostics(app, logger=None):
                         snr_db=_fl(a.get('snr_db')) or 12.0,
                         nfft=int(_fl(a.get('nfft')) or 512))
 
+    @app.route('/api/net/rtl/analyze/survey', methods=['GET'])
+    def net_rtl_analyze_survey():
+        a = request.args
+        return _analyze(sigmf_analyzer.survey, name=a.get('name', ''),
+                        snr_db=_fl(a.get('snr_db')) or 12.0,
+                        nfft=int(_fl(a.get('nfft')) or 1024),
+                        max_carriers=int(_fl(a.get('max_carriers')) or 200))
+
     @app.route('/api/net/rtl/analyze/constellation_demod', methods=['GET'])
     def net_rtl_analyze_constellation_demod():
         a = request.args
