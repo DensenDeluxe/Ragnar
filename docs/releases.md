@@ -4,6 +4,16 @@
 
 ### 2026-10-12
 
+#### [#944](https://github.com/PierreGode/Ragnar/pull/944) — feat(net): CFM Watch v4 — ERPS / G.8032 ring protection (+36 codes, Class R) + ring declaration
+*branch `feature/cfm-watch-v4`*
+
+- **Re-vendored the Solarflere `cfmwatch` engine to v4** (`python/cfmwatch.py`, 1940 → 3205 lines) with its updated tests and fixtures (`python/cfmwatch_tests/`; eleven new `raps_*` / `elps` / `subring` pcaps). The in-app `do_cfm_watch` adapter is generic over `engine.findings`, so the new codes flow through unchanged.
+- **90 finding codes now (was 54), across ten classes** — new **Class R: ERPS / G.8032 ring protection** (R-APS, opcode 40, same CFM common header). **No new CVEs** (still CVE-2020-1639 / CVE-2025-52961 detected, CVE-2014-3223 / CVE-2023-20233 context), so the CVE index is unchanged at **328 named / 285 detected**.
+- **ERPS ring declaration.** The ring-topology rules are baseline-dependent (a legitimate protection switch and a forged R-APS are identical on the wire without the declared topology), so CFM Watch gains a persisted ring store (`data/cfm_watch.json`) and a `do_cfm_ring` action (declare / list / remove / clear). A declared ring arms the Class R rules — forged RPL owner (`CFM-192`), two blocks, ring-open, off-VLAN / undeclared-node R-APS (`CFM-195/196`), uncorroborated forged R-APS(SF), flush storms, revision downgrade, sub-ring interconnect propagation. With none declared, R-APS presence is still reported (`CFM-200`) and structural R-APS still fires. New API `GET|POST /api/net/cfm-ring`, CLI `cfm-ring`, and a ring-declaration control on the CFM card.
+- **Self-test:** the `cfm` suite now drives all **20** upstream fixtures (ERPS fixtures with their `--ring` declarations) exactly to their manifest codes, covering all **90** codes, plus the ring-declaration store path, then runs the module's own **173-check conformance** and the Wireshark + scapy dual-dissector cross-check out of process.
+- **Validated live:** the forged-RPL fixture replayed with `tcpreplay` over a sealed-netns veth fires `CFM-192`/`CFM-195` through the real `tcpdump` capture path with a declared ring, verdict `attack`.
+- **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch) (Class R, ring declaration, 90 codes, 173-check conformance), [CREDITS.md](CREDITS.md). The L2 visibility-matrix tile still shows the old CFM count — the matrix is a baked image and no updated source was supplied with this drop.
+
 #### [#943](https://github.com/PierreGode/Ragnar/pull/943) — fix(kiosk): on-screen kiosk works on Ragnar OS (Pi 5 / Lite bare-Xorg)
 *branch `feature/kiosk-pi5-xorg`*
 

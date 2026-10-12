@@ -62,7 +62,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-__version__ = "0.1.0-dev"
+__version__ = "1.0.0"
 MODULE_NAME = "cfmwatch"
 
 # --------------------------------------------------------------------------
@@ -155,14 +155,173 @@ CCM_INTERVAL_NAMES: Dict[int, str] = {
     6: "1min", 7: "10min",
 }
 
+# ---- G.8032 ERPS / R-APS (opcode 40) --------------------------------------
+#
+# Body layout, confirmed from two independent sources rather than inferred:
+# the ITU-T liaison overview of G.8032 (IEEE 802.1 public docs, 2008) and
+# scapy.contrib.oam, which cites ITU-T G.8032/Y.1344 (02/2022).
+#
+#   Request/State  4 bits
+#   Sub-code       4 bits   (Reserved1 in the 2008 text; Sub-code later,
+#                            used by the Event request to mean Flush)
+#   Status         1 octet  RB bit 7, DNF bit 6, BPR bit 5, rest reserved
+#                            (the 2008 text has RB + DNF + 6 reserved bits;
+#                             BPR was added by a later revision)
+#   Node ID        6 octets source node MAC, informational per spec
+#   Reserved       24 octets
+#                           -> 32 octets, matching First TLV Offset 32.
+#
+# Both sources agree the common header carries version 0 and all-zero
+# Flags, and that an ERP receiver ignores the Flags field entirely.
+RAPS_BODY_LEN = 32
+
+RAPS_NR = 0x0
+RAPS_MS = 0x7
+RAPS_SF = 0xB
+RAPS_FS = 0xD
+RAPS_EVENT = 0xE
+
+RAPS_REQUEST_NAMES: Dict[int, str] = {
+    RAPS_NR: "NR", RAPS_MS: "MS", RAPS_SF: "SF", RAPS_FS: "FS",
+    RAPS_EVENT: "Event",
+}
+# The 2008 revision defined only NR and SF; MS, FS and Event arrived with
+# later revisions. Everything outside the current set is reserved.
+RAPS_RESERVED_REQUESTS = frozenset(
+    set(range(16)) - set(RAPS_REQUEST_NAMES))
+# Operator-intent switches: these move ring traffic on command.
+RAPS_COMMAND_REQUESTS = frozenset({RAPS_MS, RAPS_FS})
+# Requests that cause receivers to flush the FDB unless DNF is set.
+RAPS_FLUSH_REQUESTS = frozenset({RAPS_SF, RAPS_NR})
+# Sub-code is only defined for Event, where 0 means Flush.
+RAPS_SUBCODE_FLUSH = 0x0
+
+RAPS_STATUS_RB = 0x80          # RPL is blocked
+RAPS_STATUS_DNF = 0x40         # do not flush the FDB
+RAPS_STATUS_BPR = 0x20         # blocked port reference - G.8032v2 ONLY
+
+# The G.8032 revision is carried in the CFM common-header Version field,
+# so v1 and v2 ARE distinguishable frame by frame:
+#
+#   version 0 -> G.8032v1. Bit 5 of the status octet is RESERVED; there is
+#               no BPR field, and only NR and SF are defined requests.
+#   version 1 -> G.8032v2. Bit 5 is BPR, and MS, FS and Event (with its
+#               Flush sub-code) are defined.
+#
+# Confirmed against Wireshark, which selects the status layout from this
+# field - it populates cfm.raps.status.reserved_v1 with a 0x3F mask for
+# version 0 and reserved_v2 with 0x1F plus a decoded BPR for version 1 -
+# and against vendor documentation stating that an R-APS version of 1
+# corresponds to G.8032 version 2.
+RAPS_VERSION_V1 = 0
+RAPS_VERSION_V2 = 1
+RAPS_REVISION_NAMES: Dict[int, str] = {0: "G.8032v1", 1: "G.8032v2"}
+RAPS_STATUS_RESERVED_BY_VERSION: Dict[int, int] = {0: 0x3F, 1: 0x1F}
+# Requests and fields that exist only from G.8032v2 onward.
+RAPS_V2_ONLY_REQUESTS = frozenset({RAPS_MS, RAPS_FS, RAPS_EVENT})
+
+
+RING_ROLE_MAJOR = "major"
+RING_ROLE_SUB = "sub"
+RING_ROLES = (RING_ROLE_MAJOR, RING_ROLE_SUB)
+
+
+@dataclass(frozen=True)
+class Ring:
+    """An operator-declared ERPS ring.
+
+    Baseline dependence is the central problem for ring rules: a
+    legitimate protection switch and a forged R-APS are identical on the
+    wire without the declared topology. This follows the pattern already
+    proven in vrfwatch's interface-role declaration - the operator
+    declares, an undeclared plane fails loud and raises its own finding,
+    presence rules stay quiet while structural rules remain armed.
+
+    G.8032v2 interconnected topologies need three more declared facts,
+    because each one decides whether an observed event is normal:
+
+      role/parent   a sub-ring attaches to a parent ring at
+                    interconnection nodes.
+      interconnect  ONLY an interconnection node legitimately propagates
+                    a topology change, and propagation runs one way:
+                    toward the ring the sub-ring connects to, never into
+                    a sub-ring.
+      vc            with a virtual channel the sub-ring's R-APS travels
+                    over the parent between the interconnection nodes;
+                    without one it must not appear there at all.
+      revertive     revertive operation is CONFIGURATION ONLY in G.8032 -
+                    it is not carried in R-APS - so a non-revertive ring
+                    can only be known by declaration.
+    """
+    vlan: Tuple[int, ...]
+    rpl_owner: Optional[bytes] = None
+    nodes: Tuple[bytes, ...] = ()
+    label: str = ""
+    role: str = RING_ROLE_MAJOR
+    parent: str = ""
+    interconnect: Tuple[bytes, ...] = ()
+    virtual_channel: Optional[bool] = None
+    revertive: bool = True
+
+    def name(self) -> str:
+        return self.label or ("vlan%s" % "/".join(str(v) for v in self.vlan)
+                              if self.vlan else "untagged")
+
+    def is_sub(self) -> bool:
+        return self.role == RING_ROLE_SUB
+
+
 # G.8031 / G.8032 APS request-state codes (high nibble of octet 1).
 APS_REQUEST_NAMES: Dict[int, str] = {
     0: "NR", 1: "DNR", 2: "RR", 4: "EXER", 5: "WTR", 7: "MS", 9: "SD",
     11: "SF", 13: "FS", 14: "SF-P", 15: "LO",
 }
-APS_RESERVED_REQUESTS = frozenset({3, 6, 8, 10, 12})
+APS_RESERVED_REQUESTS = frozenset({3, 8, 10, 12})
+# Code 6 was assigned by an earlier revision and is deprecated rather than
+# reserved. Reported, but named for what it is.
+APS_DEPRECATED_REQUESTS = frozenset({6})
 # Operator-intent switches: these move production traffic on demand.
 APS_COMMAND_REQUESTS = frozenset({7, 13, 15})
+
+APS_NR = 0x0
+APS_DNR = 0x1
+APS_RR = 0x2
+APS_EXER = 0x4
+APS_WTR = 0x5
+APS_MS = 0x7
+APS_SD = 0x9
+APS_SF = 0xB            # signal fail on the WORKING entity
+APS_FS = 0xD
+APS_SF_P = 0xE          # signal fail on the PROTECTION entity
+APS_LO = 0xF
+
+# G.8031 protection type, octet 1 low nibble. Bit positions confirmed
+# empirically against Wireshark and scapy.contrib.oam, which agree.
+#
+# The four bits signal, in this order, whether an APS channel is in use,
+# whether the architecture is 1:1 or 1+1, whether switching is uni- or
+# bidirectional, and whether operation is revertive - which the ITU
+# liaison text says is signalled to the far end precisely SO THAT
+# mismatches can be detected.
+#
+# POLARITY IS DELIBERATELY NOT ASSERTED. No primary source consulted here
+# states which value of each bit means which mode, so cfmwatch reports the
+# bits by name and detects DISAGREEMENT between the two ends, which is
+# polarity-independent. It never claims "non-revertive is in use".
+APS_PROT_A = 0x08       # APS channel
+APS_PROT_B = 0x04       # bridge architecture, 1:1 vs 1+1
+APS_PROT_D = 0x02       # directional
+APS_PROT_R = 0x01       # revertive
+APS_PROT_BITS = (("A", APS_PROT_A), ("B", APS_PROT_B),
+                 ("D", APS_PROT_D), ("R", APS_PROT_R))
+
+# Octet 4: bridge type is the single top bit; the rest is reserved.
+APS_BRIDGE_TYPE = 0x80
+APS_OCTET4_RESERVED = 0x7F
+
+# Requested and Bridged Signal octets: 0 is the null signal, 1 is normal
+# traffic. Everything else is unassigned.
+APS_SIGNAL_NAMES: Dict[int, str] = {0: "null", 1: "normal"}
 
 MD_NAME_FORMATS: Dict[int, str] = {
     0: "reserved", 1: "none", 2: "domainName", 3: "macAddressAndUint16",
@@ -376,13 +535,58 @@ SPECS: Tuple[Spec, ...] = (
        "churn window. Sustained churn keeps a service oscillating between "
        "paths.",
        caveat="A genuinely flapping working path looks the same."),
-    _s("CFM-086", "APS request code reserved", SEV_MEDIUM, "E", "HIGH",
-       "The APS request/state nibble is a value G.8031 does not assign."),
+    _s("CFM-086", "APS request code reserved or deprecated", SEV_MEDIUM,
+       "E", "HIGH",
+       "The APS request/state nibble is a value G.8031 reserves, or the "
+       "one code an earlier revision assigned and later deprecated. The "
+       "detail names which."),
     _s("CFM-087", "APS Lockout of protection requested", SEV_CRITICAL, "E",
        "HIGH",
        "Lockout disables the protection path entirely, so the next real "
        "fault on the working path takes the service down with no failover. "
        "Pairs naturally with a subsequent attack on the working path."),
+    _s("CFM-088", "APS Signal Fail on the protection entity (SF-P)",
+       SEV_HIGH, "E", "HIGH",
+       "SF-P reports that the PROTECTION path has failed, not the working "
+       "one. Traffic keeps flowing on the working path, so nothing breaks "
+       "now - but the service is running unprotected, and the next working-"
+       "path fault takes it down. Deliberately NOT subject to the "
+       "uncorroborated-fault test: healthy working-path CCMs are exactly "
+       "what SF-P implies, so treating it like SF produces a false "
+       "forged-switch alarm on every genuine protection failure."),
+    _s("CFM-089", "APS Signal Degrade requested", SEV_MEDIUM, "E", "HIGH",
+       "Signal Degrade asks for a protection switch on degraded rather "
+       "than failed signal quality. It is unauthenticated like every other "
+       "APS request, and it moves production traffic.",
+       caveat="SD is a legitimate request on a path with real bit errors."),
+    _s("CFM-090", "APS protection type disagrees between ends", SEV_HIGH,
+       "E", "HIGH",
+       "The two ends of a protection group advertised different protection "
+       "type bits. G.8031 signals this configuration to the far end "
+       "specifically so a mismatch can be detected: the ends disagree "
+       "about the architecture, the directionality or the revert policy, "
+       "so the group will not protect as designed.",
+       caveat="cfmwatch reports which bits differ. It does not claim which "
+              "mode each value means, because no primary source consulted "
+              "pins the polarity of these bits."),
+    _s("CFM-091", "APS requested and bridged signal disagree", SEV_MEDIUM,
+       "E", "MEDIUM",
+       "The Requested Signal and Bridged Signal octets differ, so the "
+       "sender is asking for one signal on the protection entity while "
+       "bridging another. Transient during a switch; persistent means the "
+       "switch never completed and the group is in an inconsistent state.",
+       caveat="One frame mid-switch is normal. Weight the repeat count."),
+    _s("CFM-092", "APS carries non-zero reserved bits", SEV_LOW, "E",
+       "HIGH",
+       "The reserved bits of the APS body's last octet are not zero. A "
+       "conforming implementation zeroes them, so this identifies the "
+       "sender rather than causing harm.",
+       caveat="No operational impact by itself; value is as a fingerprint "
+              "of a hand-rolled or non-conforming APS source."),
+    _s("CFM-093", "Protection group inventory", SEV_INFO, "E", "HIGH",
+       "Linear protection groups observed, with the nodes driving each, "
+       "the protection type bits they advertise, the bridge type and the "
+       "request states seen."),
 
     # -- Class F: loopback and linktrace -----------------------------------
     _s("CFM-100", "LBM observed", SEV_LOW, "F", "HIGH",
@@ -472,6 +676,225 @@ SPECS: Tuple[Spec, ...] = (
        "OAM layer is in use and not just connectivity checking."),
     _s("CFM-163", "Service VLAN inventory", SEV_INFO, "P", "HIGH",
        "VLAN tags observed carrying CFM, including QinQ outer/inner pairs."),
+
+    # -- Class R: ERPS / G.8032 ring protection ----------------------------
+    # ERPS rides the Y.1731 machinery this module already owns: R-APS is
+    # opcode 40 inside the same 0x8902 frame, and G.8032's primary fault
+    # trigger is missed CCMs, which Class C already tracks. The escalation
+    # that justifies the class is that on a ring, a forged or suppressed
+    # CCM does not merely signal a fault - it causes a protection switch
+    # and an FDB flush.
+    #
+    # ERPS has no CVE of its own. It enters as an abuse and posture tier
+    # on a plane the module already parses, not as a CVE-less standalone.
+    _s("CFM-180", "R-APS observed", SEV_INFO, "R", "HIGH",
+       "G.8032 ring protection is active on this segment. Baseline for the "
+       "rest of the class."),
+    _s("CFM-181", "R-APS request/state reserved", SEV_MEDIUM, "R", "HIGH",
+       "The request/state nibble is not one of NR, MS, SF, FS or Event. "
+       "G.8032 reserves every other value."),
+    _s("CFM-182", "R-APS carries non-zero Flags or reserved bits",
+       SEV_LOW, "R", "HIGH",
+       "G.8032 specifies all-zero Flags in the common header and reserved "
+       "bits in the status octet. A conforming implementation zeroes them "
+       "and a receiver ignores them, so this identifies the sender rather "
+       "than causing harm. The reserved mask is revision-dependent: 0x3F "
+       "for v1, 0x1F for v2, where bit 5 becomes BPR.",
+       caveat="No operational impact by itself; value is as a fingerprint "
+              "of a hand-rolled or non-conforming R-APS source."),
+    _s("CFM-183", "R-APS Node ID does not match Ethernet source",
+       SEV_MEDIUM, "R", "LOW",
+       "The Node ID in the R-APS body differs from the frame's source MAC. "
+       "The spec marks Node ID informational, so it is unauthenticated and "
+       "free to forge.",
+       caveat="R-APS is forwarded around the ring, and an implementation "
+              "that rewrites the source MAC on forwarding decouples the "
+              "two legitimately. Corroborate against the ring topology "
+              "before treating this as forgery."),
+    _s("CFM-184", "R-APS sub-code set on a request that defines none",
+       SEV_MEDIUM, "R", "HIGH",
+       "A non-zero sub-code appeared with a request/state other than "
+       "Event. G.8032 defines the sub-code only for Event, where zero "
+       "means Flush."),
+    _s("CFM-185", "R-APS Signal Fail observed", SEV_LOW, "R", "HIGH",
+       "An R-APS(SF) was seen, so a node is reporting a ring link failure. "
+       "Receivers unblock, stop their own transmission and flush the FDB.",
+       caveat="This is the normal fault signal on a healthy ring."),
+    _s("CFM-186", "R-APS Signal Fail with no corroborating fault",
+       SEV_CRITICAL, "R", "MEDIUM",
+       "R-APS(SF) was asserted while CCMs on the ring control VLAN kept "
+       "arriving on schedule and no AIS was seen. This is the forged ring "
+       "protection switch: it unblocks the RPL, moves live traffic and "
+       "flushes every node's FDB on a fabricated fault.",
+       caveat="A failure on a ring segment the tap cannot see produces the "
+              "same picture. A ring gives one vantage onto a loop."),
+    _s("CFM-187", "R-APS Forced Switch requested", SEV_HIGH, "R", "HIGH",
+       "A Forced Switch moves ring traffic regardless of link condition. "
+       "Unauthenticated on the wire."),
+    _s("CFM-188", "R-APS Manual Switch requested", SEV_MEDIUM, "R", "HIGH",
+       "A Manual Switch moves ring traffic to the alternate path."),
+    _s("CFM-189", "R-APS Event/Flush observed", SEV_MEDIUM, "R", "HIGH",
+       "An R-APS(Event) with sub-code Flush is a bare FDB-flush primitive: "
+       "it clears learned forwarding state across the ring without any "
+       "topology change to justify it.",
+       caveat="Suppressed when the source is a declared interconnection "
+              "node, where the flush is normal G.8032v2 sub-ring "
+              "propagation and is recorded as CFM-209 instead. Without a "
+              "declared topology cfmwatch cannot tell the two apart, so "
+              "this still fires on an undeclared interconnected ring."),
+    _s("CFM-190", "Repeated R-APS Event/Flush", SEV_HIGH, "R", "MEDIUM",
+       "Several Event/Flush messages arrived inside the burst window. "
+       "Each one clears every node's learned forwarding state, so a "
+       "sustained run forces the ring to flood continuously.",
+       caveat="Counts only flushes that were not legitimate "
+              "interconnection-node propagation. Still legitimate during "
+              "repeated genuine topology changes; correlate with whether "
+              "any SF or NR,RB accompanied them."),
+    _s("CFM-191", "DNF set on a flush-triggering R-APS", SEV_HIGH, "R",
+       "MEDIUM",
+       "Do-Not-Flush was set on an R-APS that would otherwise cause an FDB "
+       "flush. Suppressing the flush leaves stale forwarding entries after "
+       "the path has moved, which blackholes or misdelivers traffic rather "
+       "than disrupting it visibly.",
+       caveat="DNF is legitimate where the implementation knows a flush is "
+              "unnecessary; it is the combination with a path change that "
+              "matters."),
+    _s("CFM-192", "RPL-blocked claimed by a node that is not the declared "
+       "RPL owner", SEV_HIGH, "R", "HIGH",
+       "The RB status bit is the RPL owner's announcement that it holds "
+       "the ring's single block. A different node asserting it is "
+       "impersonating the owner.",
+       caveat="Armed only when --ring declares an RPL owner."),
+    _s("CFM-193", "Two nodes concurrently claim RPL-blocked", SEV_HIGH, "R",
+       "HIGH",
+       "More than one node asserted RB inside the correlation window. A "
+       "ring must have exactly one block; two blocks segment it into two "
+       "broken halves."),
+    _s("CFM-194", "Ring idle with no node claiming RPL-blocked",
+       SEV_HIGH, "R", "LOW",
+       "A run of R-APS(NR) was seen on a declared ring with no RB asserted "
+       "by anyone. If no node holds the block, the ring is a closed loop.",
+       caveat="Two benign causes remain. A tap sees one segment of a "
+              "ring, so the RPL owner's R-APS(NR,RB) may simply never "
+              "traverse it, and a capture beginning mid-protection looks "
+              "identical. The third - non-revertive operation, where no "
+              "RB claim is correct - is removed by declaring "
+              "revertive=no, since G.8032 carries no revertive flag on "
+              "the wire. If the block was observed earlier in the capture "
+              "and then vanished, CFM-206 reports that instead."),
+    _s("CFM-195", "R-APS from a node outside the declared ring", SEV_HIGH,
+       "R", "HIGH",
+       "An R-APS was sourced by a MAC that the ring declaration does not "
+       "list as a ring node. Injection into the ring control plane from "
+       "off-ring.",
+       caveat="Armed only when --ring declares a node set."),
+    _s("CFM-196", "R-APS on a VLAN not declared as a ring control VLAN",
+       SEV_MEDIUM, "R", "MEDIUM",
+       "Ring control traffic appeared on a VLAN outside every declared "
+       "ring. Either a ring exists that the declaration omits, or R-APS is "
+       "being injected where no ring runs.",
+       caveat="Armed only when at least one ring is declared."),
+    _s("CFM-197", "Ring protection-state churn", SEV_HIGH, "R", "MEDIUM",
+       "The R-APS request/state for one ring changed repeatedly inside the "
+       "churn window, so the ring is being driven between protected and "
+       "idle. Each transition carries its own FDB flush.",
+       caveat="A genuinely flapping ring link looks the same."),
+    _s("CFM-198", "R-APS flood from one source", SEV_HIGH, "R", "MEDIUM",
+       "One source exceeded the R-APS burst threshold. R-APS is processed "
+       "by the ring state machine, so volume translates into state churn "
+       "and control-plane load.",
+       caveat="Thresholds are deployment-specific; tune with "
+              "--raps-rate-max."),
+    _s("CFM-199", "CCM loss on a declared ring control VLAN", SEV_HIGH,
+       "R", "MEDIUM",
+       "A MEP on a ring control VLAN went quiet for longer than the "
+       "G.8032 fault threshold of three missed CCMs at its own declared "
+       "interval. On a ring this is not merely a fault indication: it is "
+       "the primary protection trigger, so it moves traffic and flushes "
+       "forwarding state.",
+       caveat="A lost or filtered capture produces the same gap. The "
+              "hold-off timer means a brief gap may not trigger the ring."),
+    _s("CFM-200", "Ring protection seen with no ring declared",
+       SEV_MEDIUM, "R", "HIGH",
+       "R-APS was observed but no --ring declaration covers it, so every "
+       "rule that needs the ring topology, RPL owner or node set is "
+       "inert. Structural rules still apply. This finding exists so an "
+       "undeclared ring fails loudly instead of looking clean."),
+    _s("CFM-201", "Ring inventory", SEV_INFO, "R", "HIGH",
+       "Rings observed, with the nodes that sourced R-APS on each, which "
+       "of them asserted RPL-blocked, the request states seen, and the "
+       "G.8032 revision each node speaks."),
+    _s("CFM-202", "G.8032v2-only field used in a v1 R-APS", SEV_MEDIUM,
+       "R", "HIGH",
+       "An R-APS declaring G.8032v1 (version 0) carried a request or "
+       "field that only exists from v2: Manual Switch, Forced Switch, "
+       "Event/Flush, or the BPR status bit. A conforming v1 node cannot "
+       "emit this, so it is either forged or a node misreporting its own "
+       "revision."),
+    _s("CFM-203", "Mixed G.8032 revisions on one ring", SEV_MEDIUM, "R",
+       "HIGH",
+       "Both v1 and v2 R-APS were seen on the same ring control VLAN. The "
+       "revisions differ in the status-octet layout and in which requests "
+       "exist, so a mixed ring does not converge consistently - nodes "
+       "disagree about what they were told. Some implementations reject "
+       "v1 outright as a protocol failure.",
+       caveat="Also produced by a partially completed upgrade, which is a "
+              "real risk window rather than a false positive."),
+    _s("CFM-204", "Several R-APS destinations on one ring control VLAN",
+       SEV_MEDIUM, "R", "MEDIUM",
+       "R-APS on this control VLAN arrived at more than one destination "
+       "address. The ring ID is carried in the R-APS destination MAC, and "
+       "sharing a VLAN between adjoining rings requires exactly that - so "
+       "this usually means two ring instances share the VLAN while the "
+       "declaration models one, leaving their state merged.",
+       caveat="Armed only when a ring is declared. Separating the "
+              "instances is out of scope by decision: no primary source "
+              "pins the ring ID's offset within the address, and this "
+              "module does not infer wire formats it cannot cite. This "
+              "finding exists so the condition is visible rather than "
+              "silent, and the operator can split the declaration."),
+    _s("CFM-205", "R-APS Event/Flush from a node that is not an "
+       "interconnection node", SEV_HIGH, "R", "HIGH",
+       "Only an interconnection node legitimately propagates a topology "
+       "change onto a ring, and it does so as an Event/Flush. A flush "
+       "from any other node on a declared topology is a bare FDB-flush "
+       "primitive from a source with no business sending one.",
+       caveat="Armed only when the ring declaration names its "
+              "interconnection nodes."),
+    _s("CFM-206", "RPL block withdrawn", SEV_HIGH, "R", "MEDIUM",
+       "A node asserted RPL-blocked earlier in this capture, and the ring "
+       "is now running a sustained R-APS(NR) stream with nobody asserting "
+       "it. The block this tap had already seen is gone, so the ring is "
+       "closed into a loop.",
+       caveat="Stronger than CFM-194 because the block was observed rather "
+              "than assumed, which removes the tap-vantage explanation. A "
+              "legitimate switch to non-revertive operation mid-capture "
+              "would look the same."),
+    _s("CFM-207", "R-APS Event/Flush propagated into a sub-ring",
+       SEV_MEDIUM, "R", "HIGH",
+       "A flush arrived on a declared sub-ring from its parent's "
+       "interconnection node. G.8032 propagation runs one way - a "
+       "sub-ring sends flushes toward the ring it connects to, and rings "
+       "never send flushes into their sub-rings - so this direction is "
+       "never legitimate.",
+       caveat="Armed only when the ring is declared role=sub with a "
+              "parent."),
+    _s("CFM-208", "Sub-ring R-APS on its parent with no virtual channel",
+       SEV_MEDIUM, "R", "MEDIUM",
+       "A declared sub-ring node that is not an interconnection node "
+       "sourced R-APS on the parent ring's control VLAN while the "
+       "sub-ring is declared without a virtual channel. Without one the "
+       "sub-ring's R-APS must not reach the parent at all, so either the "
+       "declaration is wrong or control traffic is leaking between rings.",
+       caveat="Armed only when the sub-ring declares vc=no. Interconnection "
+              "nodes sit on both rings legitimately and are excluded."),
+    _s("CFM-209", "Sub-ring topology-change propagation observed",
+       SEV_INFO, "R", "HIGH",
+       "An interconnection node propagated a topology change onto the "
+       "ring as an Event/Flush. This is normal G.8032v2 operation on an "
+       "interconnected topology and is recorded rather than alarmed - it "
+       "is what CFM-189 and CFM-190 would otherwise report as a bare "
+       "flush primitive."),
 )
 
 REGISTRY: Dict[str, Spec] = {s.code: s for s in SPECS}
@@ -486,6 +909,7 @@ CLASS_NAMES: Dict[str, str] = {
     "G": "Rate and volume",
     "H": "CVE triggers",
     "P": "Posture inventory",
+    "R": "ERPS / G.8032 ring protection",
 }
 
 
@@ -722,7 +1146,12 @@ def parse_cfm(raw: bytes, index: int, ts: float,
         md_level=(b0 >> 5) & 0x7, version=b0 & 0x1F, opcode=payload[1],
         flags=payload[2], first_tlv_offset=payload[3], payload=payload,
     )
-    if frame.version != 0:
+    # Version 0 is the only value 802.1ag defines - EXCEPT for R-APS,
+    # where G.8032 carries its own revision here and version 1 means
+    # G.8032v2. Firing on that would raise a structural defect on every
+    # frame of every modern ERPS deployment.
+    if frame.version != 0 and not (frame.opcode == OP_RAPS
+                                   and frame.version == RAPS_VERSION_V2):
         frame.note("CFM-008", "version %d" % frame.version)
     if frame.opcode not in OPCODE_NAMES:
         frame.note("CFM-007", "opcode %d unassigned" % frame.opcode)
@@ -798,12 +1227,52 @@ def _parse_body(frame: CfmFrame) -> None:
             return
         o1, o2, o3, o4 = struct.unpack_from("!BBBB", p, 4)
         req = (o1 >> 4) & 0x0F
+        prot = o1 & 0x0F
         frame.body = {
             "request": req,
             "request_name": APS_REQUEST_NAMES.get(req, "reserved(%d)" % req),
-            "protection_type": o1 & 0x0F,
+            "protection_type": prot,
+            "protection_bits": "".join(
+                name for name, mask in APS_PROT_BITS if prot & mask) or "-",
             "requested_signal": o2, "bridged_signal": o3,
-            "bridge_type": (o4 >> 6) & 0x03,
+            "requested_signal_name": APS_SIGNAL_NAMES.get(
+                o2, "unassigned(%d)" % o2),
+            "bridged_signal_name": APS_SIGNAL_NAMES.get(
+                o3, "unassigned(%d)" % o3),
+            # Bridge type is ONE bit. Reading octet 4's top two bits as a
+            # 2-bit field reports 0 as 0 but 0x40 as 1 and 0xC0 as 3, none
+            # of which is the bridge type.
+            "bridge_type": 1 if o4 & APS_BRIDGE_TYPE else 0,
+            "octet4_reserved": o4 & APS_OCTET4_RESERVED,
+        }
+    elif op == OP_RAPS:
+        if avail < RAPS_BODY_LEN:
+            return
+        b0, status = struct.unpack_from("!BB", p, 4)
+        req = (b0 >> 4) & 0x0F
+        sub = b0 & 0x0F
+        # The status octet's layout depends on the G.8032 revision: BPR
+        # only exists from v2, and in v1 that bit is reserved. Reading it
+        # as BPR regardless would both invent a BPR on v1 frames and miss
+        # the reserved-bit violation that setting it actually is.
+        is_v2 = frame.version >= RAPS_VERSION_V2
+        resv_mask = RAPS_STATUS_RESERVED_BY_VERSION.get(
+            frame.version, RAPS_STATUS_RESERVED_BY_VERSION[1])
+        frame.body = {
+            "request": req,
+            "request_name": RAPS_REQUEST_NAMES.get(req,
+                                                   "reserved(%d)" % req),
+            "sub_code": sub,
+            "status": status,
+            "rb": bool(status & RAPS_STATUS_RB),
+            "dnf": bool(status & RAPS_STATUS_DNF),
+            "bpr": bool(status & RAPS_STATUS_BPR) if is_v2 else False,
+            "status_reserved": status & resv_mask,
+            "revision": frame.version,
+            "revision_name": RAPS_REVISION_NAMES.get(
+                frame.version, "unknown(v%d)" % frame.version),
+            "node_id": p[6:12],
+            "reserved": p[12:36],
         }
     elif op in (OP_LMM, OP_LMR):
         if avail < 12:
@@ -877,6 +1346,50 @@ class Config:
     health_window: float = 3.5        # server-layer CCM freshness
     ccm_overrate_factor: float = 2.0
     ccm_overrate_samples: int = 5
+    # ERPS / G.8032
+    rings: Tuple[Ring, ...] = ()
+    raps_rate_max: float = 10.0       # R-APS frames/sec from one source
+    raps_rate_window: float = 2.0
+    raps_churn_min: int = 3           # state changes inside the window
+    raps_churn_window: float = 30.0
+    raps_flush_burst: int = 3         # Event/Flush messages
+    raps_flush_window: float = 10.0
+    raps_idle_min: int = 5            # NR frames with no RB before CFM-194
+    rb_window: float = 20.0           # concurrency window for two RB claims
+    # Separate from rb_window on purpose. That one asks "are two nodes
+    # claiming the block at the same time" (CFM-193); this one asks "is
+    # the block we saw now stale" (CFM-194/206). Same default, different
+    # question, so they must be tunable apart.
+    rb_stale: float = 20.0
+    ccm_loss_misses: float = 3.0      # G.8032 trigger: three missed CCMs
+
+    def ring_for(self, vlan: Tuple[int, ...]) -> Optional[Ring]:
+        for ring in self.rings:
+            if ring.vlan == vlan:
+                return ring
+        return None
+
+    def ring_named(self, label: str) -> Optional[Ring]:
+        for ring in self.rings:
+            if ring.name() == label:
+                return ring
+        return None
+
+    def sub_rings_of(self, ring: Ring) -> Tuple[Ring, ...]:
+        return tuple(r for r in self.rings
+                     if r.is_sub() and r.parent == ring.name())
+
+    def interconnects_for(self, ring: Ring) -> Tuple[bytes, ...]:
+        """Nodes that may legitimately propagate a change onto `ring`.
+
+        For a parent ring that is every attached sub-ring's interconnection
+        node set, plus any declared on the ring itself. For a sub-ring it
+        is its own.
+        """
+        macs = set(ring.interconnect)
+        for sub in self.sub_rings_of(ring):
+            macs |= set(sub.interconnect)
+        return tuple(sorted(macs))
 
 
 # --------------------------------------------------------------------------
@@ -907,11 +1420,18 @@ class Engine:
         self.ccm_health: Dict[Tuple[Any, int], float] = {}
         self.ais_recent: Dict[Any, float] = {}
         self.aps_groups: Dict[Tuple[Any, int], Dict[str, Any]] = {}
+        self.aps_inventory: Dict[Tuple[Any, int], Dict[str, Any]] = {}
         self.lbm_hist: Dict[bytes, deque] = defaultdict(deque)
         self.ltm_hist: Dict[bytes, deque] = defaultdict(deque)
         self.rate_hist: deque = deque()
         self.src_hist: Dict[bytes, deque] = defaultdict(deque)
         self.src_clean: Dict[bytes, int] = defaultdict(int)
+
+        # ERPS / G.8032 ring state
+        self.raps_rings: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+        self.raps_hist: Dict[bytes, deque] = defaultdict(deque)
+        self.flush_hist: Dict[Tuple[int, ...], deque] = defaultdict(deque)
+        self.ring_ccm_quiet: Dict[Tuple[Any, int, str, int], bool] = {}
 
         # posture inventory
         self.inv_levels: Dict[int, set] = defaultdict(set)
@@ -984,7 +1504,10 @@ class Engine:
             self._fault_management(frame)
         elif op == OP_APS:
             self._aps(frame)
+        elif op == OP_RAPS:
+            self._raps(frame)
 
+        self._ring_ccm_watch(frame)
         self._rates(frame)
 
     # -- Class A -----------------------------------------------------------
@@ -1371,7 +1894,36 @@ class Engine:
                   "APS on %s, request %s from %s"
                   % (gname, body["request_name"], mac_str(src)), frame,
                   {"src": mac_str(src), "request": body["request_name"],
+                   "protection_bits": body["protection_bits"],
+                   "bridge_type": body["bridge_type"],
+                   "requested_signal": body["requested_signal_name"],
+                   "bridged_signal": body["bridged_signal_name"],
                    "md_level": frame.md_level, "vlan": list(vkey)})
+
+        inv = self.aps_inventory.get(gkey)
+        if inv is None:
+            inv = {"nodes": {}, "requests": set(), "bridge_types": set()}
+            self.aps_inventory[gkey] = inv
+        inv["nodes"].setdefault(src, set()).add(body["protection_bits"])
+        inv["requests"].add(body["request_name"])
+        inv["bridge_types"].add(body["bridge_type"])
+
+        # G.8031 signals the protection type to the far end precisely so a
+        # mismatch can be detected. Compared as advertised bit sets, which
+        # needs no knowledge of each bit's polarity.
+        advertised = {m: sorted(v) for m, v in inv["nodes"].items()}
+        distinct = {tuple(sorted(v)) for v in advertised.values()}
+        if len(distinct) > 1:
+            self.emit("CFM-090", gname,
+                      "protection type differs across %s: %s"
+                      % (gname,
+                         "; ".join("%s advertises %s"
+                                   % (mac_str(m), "/".join(v) or "-")
+                                   for m, v in sorted(
+                                       advertised.items()))), frame,
+                      {"group": gname,
+                       "advertised": {mac_str(m): v
+                                      for m, v in advertised.items()}})
 
         grp = self.aps_groups.get(gkey)
         if grp is None:
@@ -1404,24 +1956,68 @@ class Engine:
 
         if req in APS_RESERVED_REQUESTS:
             self.emit("CFM-086", gname,
-                      "APS request code %d is unassigned by G.8031" % req,
-                      frame, {"src": mac_str(src), "request": req})
-        if req == 13:
+                      "APS request code %d is reserved by G.8031" % req,
+                      frame, {"src": mac_str(src), "request": req,
+                              "kind": "reserved"})
+        elif req in APS_DEPRECATED_REQUESTS:
+            self.emit("CFM-086", gname,
+                      "APS request code %d was assigned by an earlier "
+                      "G.8031 revision and is deprecated" % req, frame,
+                      {"src": mac_str(src), "request": req,
+                       "kind": "deprecated"})
+
+        # ---- structural conformance ------------------------------------
+        if body["octet4_reserved"]:
+            self.emit("CFM-092", gname,
+                      "APS from %s carries reserved bits 0x%02x in the "
+                      "body's last octet"
+                      % (mac_str(src), body["octet4_reserved"]), frame,
+                      {"src": mac_str(src),
+                       "reserved": body["octet4_reserved"]})
+        if body["requested_signal"] != body["bridged_signal"]:
+            self.emit("CFM-091", gname,
+                      "APS from %s requests the %s signal while bridging "
+                      "the %s signal"
+                      % (mac_str(src), body["requested_signal_name"],
+                         body["bridged_signal_name"]), frame,
+                      {"src": mac_str(src),
+                       "requested": body["requested_signal_name"],
+                       "bridged": body["bridged_signal_name"],
+                       "group": gname})
+
+        if req == APS_FS:
             self.emit("CFM-081", gname,
                       "Forced Switch requested on %s by %s"
                       % (gname, mac_str(src)), frame,
                       {"src": mac_str(src), "group": gname})
-        elif req == 7:
+        elif req == APS_MS:
             self.emit("CFM-082", gname,
                       "Manual Switch requested on %s by %s"
                       % (gname, mac_str(src)), frame,
                       {"src": mac_str(src), "group": gname})
-        elif req == 15:
+        elif req == APS_LO:
             self.emit("CFM-087", gname,
                       "Lockout of protection requested on %s by %s"
                       % (gname, mac_str(src)), frame,
                       {"src": mac_str(src), "group": gname})
-        elif req in (11, 14):
+        elif req == APS_SD:
+            self.emit("CFM-089", gname,
+                      "Signal Degrade requested on %s by %s"
+                      % (gname, mac_str(src)), frame,
+                      {"src": mac_str(src), "group": gname})
+        elif req == APS_SF_P:
+            # SF-P is a failure of the PROTECTION entity. The working path
+            # is still carrying traffic, so healthy working-path CCMs are
+            # what this request implies - not evidence against it. Running
+            # it through the CFM-083 uncorroborated test raises a CRITICAL
+            # forged-switch alarm on every genuine protection failure.
+            self.emit("CFM-088", gname,
+                      "SF-P on %s from %s: the protection path has failed, "
+                      "so the service is running unprotected"
+                      % (gname, mac_str(src)), frame,
+                      {"src": mac_str(src), "group": gname,
+                       "effect": "service unprotected until cleared"})
+        elif req == APS_SF:
             healthy = [(lvl, ts) for (vk, lvl), ts in self.ccm_health.items()
                        if vk == vkey and frame.ts - ts <= self.cfg.health_window]
             ais_ts = self.ais_recent.get(vkey)
@@ -1436,6 +2032,435 @@ class Engine:
                           {"src": mac_str(src), "group": gname,
                            "request": body["request_name"],
                            "healthy_levels": lvls})
+
+    # -- Class R: ERPS / G.8032 --------------------------------------------
+
+    def _raps(self, frame: CfmFrame) -> None:
+        body = frame.body
+        if not body:
+            return
+        vkey = frame.vlan_key
+        src = frame.src
+        ring = self.cfg.ring_for(vkey)
+        rname = ring.name() if ring else ("vlan%s" % "/".join(
+            str(v) for v in vkey) if vkey else "untagged")
+        req = body["request"]
+        req_name = body["request_name"]
+
+        self.emit("CFM-180", rname,
+                  "R-APS(%s%s) from %s on %s"
+                  % (req_name, ",RB" if body["rb"] else "", mac_str(src),
+                     rname), frame,
+                  {"src": mac_str(src), "request": req_name,
+                   "rb": body["rb"], "dnf": body["dnf"],
+                   "bpr": body["bpr"], "revision": body["revision_name"],
+                   "node_id": mac_str(body["node_id"]),
+                   "dst": mac_str(frame.dst), "vlan": list(vkey),
+                   "md_level": frame.md_level})
+
+        # ---- declaration state: fail loud rather than look clean --------
+        if ring is None:
+            if self.cfg.rings:
+                self.emit("CFM-196", rname,
+                          "R-APS on %s, which no declared ring covers "
+                          "(declared: %s)"
+                          % (rname, ", ".join(r.name()
+                                              for r in self.cfg.rings)),
+                          frame, {"src": mac_str(src), "vlan": list(vkey),
+                                  "declared": [r.name()
+                                               for r in self.cfg.rings]})
+            else:
+                self.emit("CFM-200", rname,
+                          "R-APS seen on %s with no ring declared; "
+                          "topology-dependent rules are inert" % rname,
+                          frame, {"src": mac_str(src), "vlan": list(vkey),
+                                  "inert_codes": ["CFM-192", "CFM-194",
+                                                  "CFM-195", "CFM-199"]})
+
+        # ---- structural conformance, no baseline needed ------------------
+        if req in RAPS_RESERVED_REQUESTS:
+            self.emit("CFM-181", rname,
+                      "R-APS request/state %d is reserved by G.8032" % req,
+                      frame, {"src": mac_str(src), "request": req})
+        nonzero = []
+        if frame.flags:
+            nonzero.append("Flags 0x%02x" % frame.flags)
+        if body["status_reserved"]:
+            nonzero.append("status reserved bits 0x%02x"
+                           % body["status_reserved"])
+        if any(body["reserved"]):
+            nonzero.append("%d non-zero octets in the 24 reserved"
+                           % sum(1 for b in body["reserved"] if b))
+        if nonzero:
+            self.emit("CFM-182", rname,
+                      "R-APS from %s carries %s"
+                      % (mac_str(src), "; ".join(nonzero)), frame,
+                      {"src": mac_str(src), "fields": nonzero,
+                       "revision": body["revision_name"]})
+
+        # ---- G.8032 revision: v1 (version 0) vs v2 (version 1) ---------
+        if body["revision"] == RAPS_VERSION_V1:
+            v2only = []
+            if req in RAPS_V2_ONLY_REQUESTS:
+                v2only.append("request %s" % req_name)
+            if body["status"] & RAPS_STATUS_BPR:
+                v2only.append("BPR status bit")
+            if v2only:
+                self.emit("CFM-202", rname,
+                          "R-APS from %s declares G.8032v1 but uses %s, "
+                          "which exists only from v2"
+                          % (mac_str(src), " and ".join(v2only)), frame,
+                          {"src": mac_str(src), "revision": "G.8032v1",
+                           "v2_only": v2only})
+        if body["node_id"] != src:
+            self.emit("CFM-183", rname,
+                      "R-APS Node ID %s does not match source %s"
+                      % (mac_str(body["node_id"]), mac_str(src)), frame,
+                      {"node_id": mac_str(body["node_id"]),
+                       "src": mac_str(src)})
+        if req != RAPS_EVENT and body["sub_code"]:
+            self.emit("CFM-184", rname,
+                      "sub-code %d set on R-APS(%s), which defines none"
+                      % (body["sub_code"], req_name), frame,
+                      {"src": mac_str(src), "sub_code": body["sub_code"],
+                       "request": req_name})
+
+        # ---- request semantics ------------------------------------------
+        if req == RAPS_FS:
+            self.emit("CFM-187", rname,
+                      "Forced Switch requested on %s by %s"
+                      % (rname, mac_str(src)), frame,
+                      {"src": mac_str(src), "ring": rname})
+        elif req == RAPS_MS:
+            self.emit("CFM-188", rname,
+                      "Manual Switch requested on %s by %s"
+                      % (rname, mac_str(src)), frame,
+                      {"src": mac_str(src), "ring": rname})
+        elif req == RAPS_SF:
+            self.emit("CFM-185", rname,
+                      "R-APS(SF) on %s from %s" % (rname, mac_str(src)),
+                      frame, {"src": mac_str(src), "ring": rname})
+            self._raps_forged_sf(frame, ring, rname)
+        elif req == RAPS_EVENT and body["sub_code"] == RAPS_SUBCODE_FLUSH:
+            self._raps_flush(frame, ring, rname)
+
+        # DNF on a message receivers would otherwise flush on.
+        if body["dnf"] and (req in RAPS_FLUSH_REQUESTS or req == RAPS_EVENT):
+            self.emit("CFM-191", rname,
+                      "DNF set on R-APS(%s%s) from %s, suppressing the FDB "
+                      "flush receivers would perform"
+                      % (req_name, ",RB" if body["rb"] else "",
+                         mac_str(src)), frame,
+                      {"src": mac_str(src), "request": req_name,
+                       "rb": body["rb"], "ring": rname})
+
+        st = self.raps_rings.get(vkey)
+        if st is None:
+            st = {"nodes": {}, "rb": {}, "last_req": req,
+                  "changes": deque(), "idle_run": 0, "requests": set(),
+                  "revisions": set(), "dsts": set(), "rb_ever": False,
+                  "last_change": None}
+            self.raps_rings[vkey] = st
+        st["nodes"].setdefault(src, {"node_ids": set(), "rb": False,
+                                     "revisions": set()})
+        st["nodes"][src]["node_ids"].add(body["node_id"])
+        st["nodes"][src]["revisions"].add(body["revision_name"])
+        st["requests"].add(req_name)
+        st["revisions"].add(body["revision"])
+        st["dsts"].add(frame.dst)
+
+        if len(st["revisions"]) > 1:
+            self.emit("CFM-203", rname,
+                      "both %s R-APS seen on %s"
+                      % (" and ".join(
+                          RAPS_REVISION_NAMES.get(v, "v%d" % v)
+                          for v in sorted(st["revisions"])), rname), frame,
+                      {"ring": rname,
+                       "revisions": sorted(
+                           RAPS_REVISION_NAMES.get(v, "v%d" % v)
+                           for v in st["revisions"])})
+
+        # The ring ID lives in the R-APS destination address, so adjoining
+        # rings that share a control VLAN are distinguished only by it.
+        if ring is not None and len(st["dsts"]) > 1:
+            self.emit("CFM-204", rname,
+                      "%d distinct R-APS destinations on %s: %s - the "
+                      "declaration models one ring here"
+                      % (len(st["dsts"]), rname,
+                         ", ".join(sorted(mac_str(d) for d in st["dsts"]))),
+                      frame,
+                      {"ring": rname,
+                       "destinations": sorted(mac_str(d)
+                                              for d in st["dsts"])})
+
+        # ---- RPL block ownership ----------------------------------------
+        if body["rb"]:
+            st["rb"][src] = frame.ts
+            st["rb_ever"] = True
+            st["nodes"][src]["rb"] = True
+            st["idle_run"] = 0
+            if ring is not None and ring.rpl_owner is not None \
+                    and src != ring.rpl_owner:
+                self.emit("CFM-192", rname,
+                          "%s asserts RPL-blocked on %s; the declared RPL "
+                          "owner is %s"
+                          % (mac_str(src), rname, mac_str(ring.rpl_owner)),
+                          frame,
+                          {"src": mac_str(src), "ring": rname,
+                           "declared_owner": mac_str(ring.rpl_owner)})
+            recent = sorted(m for m, ts in st["rb"].items()
+                            if frame.ts - ts <= self.cfg.rb_window)
+            if len(recent) > 1:
+                self.emit("CFM-193", rname,
+                          "%d nodes assert RPL-blocked on %s within %.0fs: "
+                          "%s - a second block segments the ring"
+                          % (len(recent), rname, self.cfg.rb_window,
+                             ", ".join(mac_str(m) for m in recent)), frame,
+                          {"ring": rname,
+                           "claimants": [mac_str(m) for m in recent],
+                           "window_s": self.cfg.rb_window})
+        elif req == RAPS_NR:
+            # A run of NR with nobody holding the block means no block.
+            st["idle_run"] += 1
+            held = any(frame.ts - ts <= self.cfg.rb_stale
+                       for ts in st["rb"].values())
+            # Revertive operation is configuration only in G.8032 - there
+            # is no revertive flag on the wire - so a declared
+            # non-revertive ring legitimately holds no block after a
+            # recovery and neither rule applies.
+            if (ring is not None and ring.revertive and not held
+                    and st["idle_run"] >= self.cfg.raps_idle_min):
+                if st["rb_ever"]:
+                    # The block was OBSERVED and is now gone. That removes
+                    # the tap-vantage explanation entirely.
+                    self.emit("CFM-206", rname,
+                              "%d consecutive R-APS(NR) on %s with no node "
+                              "asserting RPL-blocked, after RB was "
+                              "observed earlier from %s"
+                              % (st["idle_run"], rname,
+                                 ", ".join(sorted(mac_str(m)
+                                                  for m in st["rb"]))),
+                              frame,
+                              {"ring": rname, "nr_run": st["idle_run"],
+                               "previous_rb": sorted(mac_str(m)
+                                                     for m in st["rb"]),
+                               "stale_after_s": self.cfg.rb_stale})
+                else:
+                    self.emit("CFM-194", rname,
+                              "%d consecutive R-APS(NR) on %s with no node "
+                              "asserting RPL-blocked, and none seen at any "
+                              "point in this capture"
+                              % (st["idle_run"], rname), frame,
+                              {"ring": rname, "nr_run": st["idle_run"],
+                               "stale_after_s": self.cfg.rb_stale})
+
+        # ---- sub-ring control traffic on the parent ---------------------
+        # Without a virtual channel a sub-ring's R-APS must not reach the
+        # parent at all. Interconnection nodes sit on both rings
+        # legitimately, so they are excluded.
+        if ring is not None and not ring.is_sub():
+            for sub in self.cfg.sub_rings_of(ring):
+                if sub.virtual_channel is not False:
+                    continue
+                if src in sub.interconnect or not sub.nodes:
+                    continue
+                if src in sub.nodes:
+                    self.emit("CFM-208", rname,
+                              "%s is a declared node of sub-ring %s, which "
+                              "has no virtual channel, yet it sourced "
+                              "R-APS on the parent %s"
+                              % (mac_str(src), sub.name(), rname), frame,
+                              {"src": mac_str(src), "sub_ring": sub.name(),
+                               "parent": rname})
+
+        # ---- ring membership --------------------------------------------
+        if ring is not None and ring.nodes:
+            if src not in ring.nodes:
+                self.emit("CFM-195", rname,
+                          "R-APS from %s, which is not a declared node of "
+                          "%s" % (mac_str(src), rname), frame,
+                          {"src": mac_str(src), "ring": rname,
+                           "declared_nodes": [mac_str(m)
+                                              for m in ring.nodes]})
+
+        # ---- churn and volume -------------------------------------------
+        if req != st["last_req"]:
+            st["changes"].append(frame.ts)
+            st["last_change"] = frame.ts
+            st["last_req"] = req
+            while (st["changes"] and
+                   frame.ts - st["changes"][0] > self.cfg.raps_churn_window):
+                st["changes"].popleft()
+            if len(st["changes"]) >= self.cfg.raps_churn_min:
+                self.emit("CFM-197", rname,
+                          "%d R-APS state changes on %s within %.0fs"
+                          % (len(st["changes"]), rname,
+                             self.cfg.raps_churn_window), frame,
+                          {"ring": rname, "changes": len(st["changes"]),
+                           "window_s": self.cfg.raps_churn_window})
+
+        hist = self.raps_hist[src]
+        hist.append(frame.ts)
+        while hist and frame.ts - hist[0] > self.cfg.raps_rate_window:
+            hist.popleft()
+        if len(hist) > self.cfg.raps_rate_max * self.cfg.raps_rate_window:
+            rate = len(hist) / self.cfg.raps_rate_window
+            self.emit("CFM-198", mac_str(src),
+                      "%s sent %.0f R-APS frames/s over %.0fs"
+                      % (mac_str(src), rate, self.cfg.raps_rate_window),
+                      frame, {"src": mac_str(src), "rate_fps": round(rate, 1),
+                              "ring": rname})
+
+    def _raps_flush(self, frame: CfmFrame, ring: Optional[Ring],
+                    rname: str) -> None:
+        """R-APS(Event/Flush): legitimate propagation, or a bare primitive.
+
+        On a G.8032v2 interconnected topology an interconnection node
+        propagates a sub-ring topology change onto the ring it connects
+        to, as an Event/Flush. That is normal operation. Propagation runs
+        ONE WAY - toward the ring the sub-ring connects to, never into a
+        sub-ring - and only an interconnection node does it.
+
+        So with a declared topology the three cases separate cleanly:
+        normal propagation (recorded, not alarmed), a flush into a
+        sub-ring (never legitimate), and a flush from a node that is not
+        an interconnection node at all (the bare primitive). Without a
+        declaration none of them can be told apart, and the original
+        CFM-189/190 behaviour stands.
+        """
+        src = frame.src
+        vkey = frame.vlan_key
+
+        if ring is not None:
+            parent = (self.cfg.ring_named(ring.parent)
+                      if ring.is_sub() else None)
+            # A flush arriving on a sub-ring from its parent's
+            # interconnection node is the wrong direction.
+            if ring.is_sub() and parent is not None and \
+                    src in self.cfg.interconnects_for(parent):
+                self.emit("CFM-207", rname,
+                          "Event/Flush on sub-ring %s from %s, an "
+                          "interconnection node of parent %s - propagation "
+                          "never runs into a sub-ring"
+                          % (rname, mac_str(src), parent.name()), frame,
+                          {"src": mac_str(src), "sub_ring": rname,
+                           "parent": parent.name()})
+                return
+
+            allowed = self.cfg.interconnects_for(ring)
+            if allowed:
+                if src in allowed:
+                    # Normal propagation. Record the correlating sub-ring
+                    # change when this tap happened to see it; its absence
+                    # is not evidence, because a tap sees one segment.
+                    changed = []
+                    for sub in self.cfg.sub_rings_of(ring):
+                        sst = self.raps_rings.get(sub.vlan)
+                        if sst and sst.get("last_change") is not None and \
+                                frame.ts - sst["last_change"] <= \
+                                self.cfg.raps_flush_window:
+                            changed.append(sub.name())
+                    self.emit("CFM-209", rname,
+                              "%s propagated a topology change onto %s as "
+                              "an Event/Flush%s"
+                              % (mac_str(src), rname,
+                                 " (sub-ring %s changed state within %.0fs)"
+                                 % (", ".join(changed),
+                                    self.cfg.raps_flush_window)
+                                 if changed else ""), frame,
+                              {"src": mac_str(src), "ring": rname,
+                               "interconnection_node": True,
+                               "correlated_sub_rings": changed})
+                    return
+                self.emit("CFM-205", rname,
+                          "Event/Flush on %s from %s, which is not a "
+                          "declared interconnection node (%s)"
+                          % (rname, mac_str(src),
+                             ", ".join(mac_str(m) for m in allowed)), frame,
+                          {"src": mac_str(src), "ring": rname,
+                           "interconnection_nodes": [mac_str(m)
+                                                     for m in allowed]})
+                return
+
+        # Undeclared topology, or a ring with no interconnection nodes
+        # declared: the original behaviour, which cannot distinguish
+        # legitimate propagation from a bare flush.
+        self.emit("CFM-189", rname,
+                  "R-APS(Event/Flush) on %s from %s" % (rname, mac_str(src)),
+                  frame, {"src": mac_str(src), "ring": rname})
+        hist = self.flush_hist[vkey]
+        hist.append(frame.ts)
+        while hist and frame.ts - hist[0] > self.cfg.raps_flush_window:
+            hist.popleft()
+        if len(hist) >= self.cfg.raps_flush_burst:
+            self.emit("CFM-190", rname,
+                      "%d Event/Flush messages on %s within %.0fs"
+                      % (len(hist), rname, self.cfg.raps_flush_window),
+                      frame, {"ring": rname, "count": len(hist),
+                              "window_s": self.cfg.raps_flush_window})
+
+    def _raps_forged_sf(self, frame: CfmFrame, ring: Optional[Ring],
+                        rname: str) -> None:
+        """R-APS(SF) that nothing on the wire corroborates.
+
+        Same reasoning as CFM-083 for linear APS, with the ring caveat
+        that a tap sees one segment of a loop.
+        """
+        vkey = frame.vlan_key
+        healthy = [(lvl, ts) for (vk, lvl), ts in self.ccm_health.items()
+                   if vk == vkey and frame.ts - ts <= self.cfg.health_window]
+        ais_ts = self.ais_recent.get(vkey)
+        ais_fresh = ais_ts is not None and \
+            frame.ts - ais_ts <= self.cfg.health_window
+        if healthy and not ais_fresh:
+            lvls = sorted(l for l, _ in healthy)
+            self.emit("CFM-186", rname,
+                      "R-APS(SF) on %s while CCMs at level(s) %s kept "
+                      "arriving and no AIS was seen"
+                      % (rname, lvls), frame,
+                      {"src": mac_str(frame.src), "ring": rname,
+                       "healthy_levels": lvls})
+
+    def _ring_ccm_watch(self, frame: CfmFrame) -> None:
+        """G.8032's primary protection trigger is three missed CCMs.
+
+        Checked on every frame carrying a declared ring's VLAN, because a
+        passive observer has no timer of its own - the next frame on the
+        ring is what reveals that a MEP went quiet. One finding per quiet
+        episode per MEP, re-armed when the MEP speaks again.
+        """
+        if not self.cfg.rings:
+            return
+        vkey = frame.vlan_key
+        ring = self.cfg.ring_for(vkey)
+        if ring is None:
+            return
+        for mkey, st in self.mep.items():
+            if mkey[0] != vkey:
+                continue
+            nominal = CCM_INTERVAL_SECONDS.get(st["interval"])
+            if not nominal:
+                continue
+            gap = frame.ts - st["last_ts"]
+            threshold = nominal * self.cfg.ccm_loss_misses
+            if gap > threshold:
+                if self.ring_ccm_quiet.get(mkey):
+                    continue
+                self.ring_ccm_quiet[mkey] = True
+                self.emit("CFM-199", "%s/mep%d" % (ring.name(), mkey[3]),
+                          "MEP %d on ring %s silent for %.3fs, over the "
+                          "%.3fs three-miss threshold at its declared %s "
+                          "interval"
+                          % (mkey[3], ring.name(), gap, threshold,
+                             CCM_INTERVAL_NAMES.get(st["interval"], "?")),
+                          frame,
+                          {"mepid": mkey[3], "ring": ring.name(),
+                           "gap_s": round(gap, 6),
+                           "threshold_s": round(threshold, 6),
+                           "declared_interval": CCM_INTERVAL_NAMES.get(
+                               st["interval"], "?")})
+            else:
+                self.ring_ccm_quiet[mkey] = False
 
     # -- Class G -----------------------------------------------------------
 
@@ -1506,6 +2531,54 @@ class Engine:
                 "Y.1731 opcodes present: %s" % ", ".join(names), ts,
                 {"opcodes": {OPCODE_NAMES.get(o, str(o)): c
                              for o, c in sorted(self.inv_y1731.items())}})
+        if self.aps_inventory:
+            groups = []
+            for (vkey, lvl), inv in sorted(
+                    self.aps_inventory.items(),
+                    key=lambda kv: (str(kv[0][0]), kv[0][1])):
+                groups.append({
+                    "group": "%s/level%d" % (str(vkey), lvl),
+                    "vlan": list(vkey), "md_level": lvl,
+                    "nodes": {mac_str(m): sorted(v)
+                              for m, v in inv["nodes"].items()},
+                    "requests": sorted(inv["requests"]),
+                    "bridge_types": sorted(inv["bridge_types"]),
+                })
+            self.emit_static(
+                "CFM-093", "tap",
+                "; ".join("%s: %d node(s), protection type %s, states %s"
+                          % (g["group"], len(g["nodes"]),
+                             "/".join(sorted({b for v in g["nodes"].values()
+                                              for b in v})) or "-",
+                             ", ".join(g["requests"]))
+                          for g in groups), ts, {"groups": groups})
+        if self.raps_rings:
+            rings = []
+            for vkey, st in sorted(self.raps_rings.items()):
+                ring = self.cfg.ring_for(vkey)
+                rings.append({
+                    "ring": ring.name() if ring else (
+                        "vlan%s" % "/".join(str(v) for v in vkey)
+                        if vkey else "untagged"),
+                    "declared": ring is not None,
+                    "vlan": list(vkey),
+                    "nodes": sorted(mac_str(m) for m in st["nodes"]),
+                    "rb_claimants": sorted(mac_str(m) for m in st["rb"]),
+                    "requests": sorted(st["requests"]),
+                    "revisions": sorted(
+                        RAPS_REVISION_NAMES.get(v, "v%d" % v)
+                        for v in st["revisions"]),
+                    "raps_destinations": sorted(mac_str(d)
+                                                for d in st["dsts"]),
+                })
+            self.emit_static(
+                "CFM-201", "tap",
+                "; ".join("%s: %s, %d node(s), RB from %s, states %s"
+                          % (r["ring"], "/".join(r["revisions"]),
+                             len(r["nodes"]),
+                             ", ".join(r["rb_claimants"]) or "none",
+                             ", ".join(r["requests"]))
+                          for r in rings), ts, {"rings": rings})
         if self.inv_vlans:
             desc = []
             for vk, count in sorted(self.inv_vlans.items()):
@@ -1658,6 +2731,31 @@ class StopSignal:
         return self.stop
 
 
+# struct tpacket_auxdata: tp_status, tp_len, tp_snaplen (u32 x3),
+# tp_mac, tp_net, tp_vlan_tci, tp_vlan_tpid (u16 x4).
+_AUXDATA_FMT = "IIIHHHH"
+_AUXDATA_LEN = struct.calcsize(_AUXDATA_FMT)
+TP_STATUS_VLAN_VALID = 1 << 4
+TP_STATUS_VLAN_TPID_VALID = 1 << 6
+
+
+def reinsert_vlan(data: bytes, tci: int, tpid: int) -> bytes:
+    """Put a kernel-stripped 802.1Q tag back into the frame bytes.
+
+    Linux moves the outer VLAN tag out of the frame data and into socket
+    auxiliary data whenever the interface has receive VLAN offload
+    enabled, which is the default on most drivers and on veth. Without
+    this, every VLAN-keyed rule in the module silently collapses into the
+    untagged bucket on a live tap - not just the ring rules, but the
+    per-VLAN maintenance-association and MEP keying in Class C as well.
+    The offline pcap path never shows this, because libpcap writes the
+    reconstructed frame.
+    """
+    if len(data) < 12:
+        return data
+    return data[:12] + struct.pack("!HH", tpid or 0x8100, tci) + data[12:]
+
+
 def live_capture(iface: str, promisc: bool = True,
                  snaplen: int = 2048,
                  duration: Optional[float] = None,
@@ -1673,6 +2771,7 @@ def live_capture(iface: str, promisc: bool = True,
     SOL_PACKET = 263
     PACKET_ADD_MEMBERSHIP = 1
     PACKET_MR_PROMISC = 1
+    PACKET_AUXDATA = 8
 
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
                          socket.htons(ETH_P_ALL))
@@ -1687,6 +2786,18 @@ def live_capture(iface: str, promisc: bool = True,
             if on_warn:
                 on_warn("kernel filter not attached (%s); filtering in "
                         "userspace" % exc)
+        # Ask the kernel for the stripped VLAN tag. Without this the tag
+        # is simply lost; see reinsert_vlan().
+        auxdata = True
+        try:
+            sock.setsockopt(SOL_PACKET, PACKET_AUXDATA, 1)
+        except OSError as exc:
+            auxdata = False
+            if on_warn:
+                on_warn("PACKET_AUXDATA unavailable (%s); VLAN tags "
+                        "stripped by receive offload cannot be recovered. "
+                        "Disable it with: ethtool -K %s rxvlan off"
+                        % (exc, iface))
         sock.bind((iface, 0))
         if promisc:
             mreq = struct.pack("IHH8s", _if_index(iface), PACKET_MR_PROMISC,
@@ -1707,7 +2818,23 @@ def live_capture(iface: str, promisc: bool = True,
             if count is not None and seen >= count:
                 return
             try:
-                data = sock.recv(snaplen)
+                if auxdata:
+                    data, ancdata, _flags, _addr = sock.recvmsg(
+                        snaplen, socket.CMSG_SPACE(_AUXDATA_LEN))
+                    for level, ctype, cdata in ancdata:
+                        if (level != SOL_PACKET or ctype != PACKET_AUXDATA
+                                or len(cdata) < _AUXDATA_LEN):
+                            continue
+                        (status, _tlen, _snap, _mac, _net, tci,
+                         tpid) = struct.unpack_from(_AUXDATA_FMT, cdata)
+                        if status & TP_STATUS_VLAN_VALID:
+                            data = reinsert_vlan(
+                                data, tci,
+                                tpid if status & TP_STATUS_VLAN_TPID_VALID
+                                else 0x8100)
+                        break
+                else:
+                    data = sock.recv(snaplen)
             except TimeoutError:
                 continue
             except socket.timeout:          # pragma: no cover (py<3.10)
@@ -1854,7 +2981,136 @@ def build_parser() -> argparse.ArgumentParser:
                      metavar="OCTETS", help="Data TLV size before CFM-105")
     tun.add_argument("--aps-churn", type=int, default=Config.aps_churn_min,
                      metavar="N", help="APS state changes before CFM-085")
+
+    erps = p.add_argument_group(
+        "ERPS / G.8032",
+        "Ring rules need the declared topology: a legitimate protection "
+        "switch and a forged R-APS are identical on the wire without it. "
+        "An undeclared ring fails loud (CFM-200) rather than looking "
+        "clean, and the structural rules stay armed either way.")
+    erps.add_argument(
+        "--ring", action="append", default=[], metavar="SPEC",
+        help="declare a ring: VLAN[,rpl=MAC][,nodes=MAC/MAC/...]"
+             "[,name=LABEL][,role=major|sub][,parent=LABEL]"
+             "[,interconnect=MAC/MAC][,vc=yes|no][,revertive=yes|no]. "
+             "VLAN is the ring control VLAN, or 'untagged', or an "
+             "outer/inner QinQ pair as OUTER/INNER. Declare "
+             "interconnect= to tell legitimate sub-ring topology-change "
+             "propagation from a bare flush, and revertive=no on a "
+             "non-revertive ring, which G.8032 does not signal on the "
+             "wire. Repeatable.")
+    erps.add_argument("--raps-rate-max", type=float,
+                      default=Config.raps_rate_max, metavar="FPS",
+                      help="per-source R-APS rate threshold (CFM-198)")
+    erps.add_argument("--raps-churn", type=int,
+                      default=Config.raps_churn_min, metavar="N",
+                      help="R-APS state changes before CFM-197")
+    erps.add_argument("--raps-flush-burst", type=int,
+                      default=Config.raps_flush_burst, metavar="N",
+                      help="Event/Flush messages before CFM-190")
+    erps.add_argument("--rb-stale", type=float, default=Config.rb_stale,
+                      metavar="S",
+                      help="seconds after which an observed RPL-blocked "
+                           "claim counts as stale (CFM-194/206); distinct "
+                           "from the CFM-193 concurrency window")
+    erps.add_argument("--ccm-loss-misses", type=float,
+                      default=Config.ccm_loss_misses, metavar="N",
+                      help="missed CCMs before CFM-199; G.8032 uses 3")
     return p
+
+
+def parse_mac(text: str) -> bytes:
+    raw = text.replace(":", "").replace("-", "").replace(".", "")
+    if len(raw) != 12:
+        raise ValueError("bad MAC %r" % text)
+    return bytes.fromhex(raw)
+
+
+def parse_ring(spec: str) -> Ring:
+    """Parse one --ring declaration.
+
+    VLAN[,rpl=MAC][,nodes=MAC/MAC][,name=LABEL]
+    """
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("empty --ring specification")
+    head = parts[0]
+    if head.lower() in ("untagged", "none", "-"):
+        vlan: Tuple[int, ...] = ()
+    else:
+        try:
+            vlan = tuple(int(v, 10) for v in head.split("/") if v != "")
+        except ValueError:
+            raise ValueError("ring VLAN %r is not numeric; expected a VLAN "
+                             "id, 'untagged', or OUTER/INNER" % head)
+        for v in vlan:
+            if not 0 <= v <= 4095:
+                raise ValueError("VLAN id %d out of range 0..4095" % v)
+    rpl: Optional[bytes] = None
+    nodes: List[bytes] = []
+    label = ""
+    role = RING_ROLE_MAJOR
+    parent = ""
+    interconnect: List[bytes] = []
+    vc: Optional[bool] = None
+    revertive = True
+
+    def _yesno(key: str, val: str) -> bool:
+        low = val.strip().lower()
+        if low in ("yes", "true", "1", "on"):
+            return True
+        if low in ("no", "false", "0", "off"):
+            return False
+        raise ValueError("ring option %s needs yes or no, got %r"
+                         % (key, val))
+
+    for part in parts[1:]:
+        if "=" not in part:
+            raise ValueError("ring option %r needs key=value" % part)
+        key, val = part.split("=", 1)
+        key = key.strip().lower()
+        if key == "rpl":
+            rpl = parse_mac(val.strip())
+        elif key == "nodes":
+            nodes = [parse_mac(m.strip()) for m in val.split("/")
+                     if m.strip()]
+        elif key == "name":
+            label = val.strip()
+        elif key == "role":
+            role = val.strip().lower()
+            if role not in RING_ROLES:
+                raise ValueError("ring role %r must be major or sub" % role)
+        elif key == "parent":
+            parent = val.strip()
+        elif key == "interconnect":
+            interconnect = [parse_mac(m.strip()) for m in val.split("/")
+                            if m.strip()]
+        elif key == "vc":
+            vc = _yesno("vc", val)
+        elif key == "revertive":
+            revertive = _yesno("revertive", val)
+        else:
+            raise ValueError("unknown ring option %r; expected rpl, nodes, "
+                             "name, role, parent, interconnect, vc or "
+                             "revertive" % key)
+    # An RPL owner is by definition a ring node; accepting a declaration
+    # where it is absent from the node list would make CFM-195 fire on the
+    # owner's own R-APS.
+    if rpl is not None and nodes and rpl not in nodes:
+        nodes.append(rpl)
+    # Interconnection nodes are ring nodes by definition; omitting them
+    # from the node list would make CFM-195 fire on their own R-APS.
+    for mac in interconnect:
+        if nodes and mac not in nodes:
+            nodes.append(mac)
+    if role == RING_ROLE_SUB and not parent:
+        raise ValueError("a ring declared role=sub needs parent=LABEL")
+    if parent and role != RING_ROLE_SUB:
+        raise ValueError("parent= applies only to a ring with role=sub")
+    return Ring(vlan=vlan, rpl_owner=rpl, nodes=tuple(nodes), label=label,
+                role=role, parent=parent,
+                interconnect=tuple(interconnect), virtual_channel=vc,
+                revertive=revertive)
 
 
 def config_from_args(args: argparse.Namespace) -> Config:
@@ -1866,6 +3122,12 @@ def config_from_args(args: argparse.Namespace) -> Config:
         lbm_burst=args.lbm_burst,
         data_tlv_max=args.data_tlv_max,
         aps_churn_min=args.aps_churn,
+        rings=tuple(parse_ring(spec) for spec in args.ring),
+        raps_rate_max=args.raps_rate_max,
+        raps_churn_min=args.raps_churn,
+        raps_flush_burst=args.raps_flush_burst,
+        rb_stale=args.rb_stale,
+        ccm_loss_misses=args.ccm_loss_misses,
     )
 
 
@@ -1926,6 +3188,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         build_parser().error("give --pcap FILE or --iface IF")
     try:
         return run(args)
+    except ValueError as exc:
+        sys.stderr.write("%s: %s\n" % (MODULE_NAME, exc))
+        return 3
     except ParseError as exc:
         sys.stderr.write("%s: %s\n" % (MODULE_NAME, exc))
         return 3
