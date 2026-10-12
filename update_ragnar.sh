@@ -740,6 +740,21 @@ DROPIN
         systemctl daemon-reload 2>/dev/null || true
         echo -e "  ${GREEN}✓${NC} Kiosk restart-loop cap applied (drop-in)"
     fi
+    # Heal existing service-mode kiosks on update: re-run the (idempotent)
+    # installer so the Pi 5 / Xorg display fixes — vc4 PrimaryGPU xorg.conf, VT
+    # activation (chvt in the unit), video/render/input/tty groups, Chromium
+    # (not firefox), and /home ownership — reach boxes that just `git pull` +
+    # update, not only fresh or web-UI installs. Best-effort: a kiosk hiccup must
+    # never fail the whole update. Only the service (Pi OS Lite) path needs this;
+    # desktop/autostart installs re-provision harmlessly in autostart mode.
+    KIOSK_INSTALL_SRC="$ragnar_PATH/scripts/install_kiosk.sh"
+    if [ -f /etc/systemd/system/ragnar-kiosk.service ] && [ -f "$KIOSK_INSTALL_SRC" ]; then
+        if bash "$KIOSK_INSTALL_SRC" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Kiosk re-provisioned with latest display fixes"
+        else
+            echo -e "  ${YELLOW}⚠${NC} Kiosk re-provision needs attention (run: sudo bash scripts/install_kiosk.sh)"
+        fi
+    fi
 fi
 
 echo -e "${BLUE}Step 6.5: Validating actions.json configuration...${NC}"

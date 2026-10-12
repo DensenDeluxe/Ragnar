@@ -68,6 +68,22 @@ if [ -f "$RAGNAR_PATH/certs/ragnar.key" ]; then
     rm -f "$RAGNAR_PATH/certs/ragnar.key" "$RAGNAR_PATH/certs/ragnar.crt" 2>/dev/null || true
 fi
 
+# ── 2b. Home directory ownership ────────────────────────────────────────────
+# The image build can leave /home/ragnar owned by root (the home was created
+# before the ragnar user existed). The ragnar user then cannot write its own
+# dotfiles, which breaks anything it runs as itself — most visibly the on-screen
+# kiosk, whose Xorg/openbox/Chromium cannot create .Xauthority, caches or a
+# browser profile and die on every start. Make the user own its home. Idempotent
+# and cheap: skip entirely when it is already correct (don't walk a big home).
+if id "$RAGNAR_USER" >/dev/null 2>&1; then
+    HOME_DIR="$(getent passwd "$RAGNAR_USER" | cut -d: -f6)"
+    if [ -n "$HOME_DIR" ] && [ -d "$HOME_DIR" ] \
+       && [ "$(stat -c %U "$HOME_DIR" 2>/dev/null)" != "$RAGNAR_USER" ]; then
+        log "Fixing ownership of $HOME_DIR (was not owned by $RAGNAR_USER)"
+        chown "$RAGNAR_USER:$RAGNAR_USER" "$HOME_DIR" 2>/dev/null || true
+    fi
+fi
+
 # ── 3. Optional config drop-in: /boot/firmware/ragnar.conf ──────────────────
 # A plain key=value file the operator can drop onto the FAT partition before
 # first boot (editable on any computer, no login needed). Recognised keys:
