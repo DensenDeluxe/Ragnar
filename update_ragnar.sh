@@ -757,6 +757,18 @@ DROPIN
     fi
 fi
 
+# Console safety net (runs whether or not a kiosk is installed). A past kiosk
+# uninstall — or a Ragnar OS image built to boot straight into the kiosk — could
+# leave getty@tty1 masked/disabled, so turning the kiosk off left the box on a
+# black screen with no CLI and no login console after reboot. Unmask + enable is
+# a no-op on a normal box (tty1's getty is enabled by default) and brings the
+# login console back on the next boot where it had gone missing. We don't restart
+# or chvt here, to avoid disturbing an operator's live console during an update.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl unmask getty@tty1.service >/dev/null 2>&1 || true
+    systemctl enable getty@tty1.service >/dev/null 2>&1 || true
+fi
+
 echo -e "${BLUE}Step 6.5: Validating actions.json configuration...${NC}"
 python3 << 'PYTHON_EOF'
 import json

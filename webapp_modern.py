@@ -8304,6 +8304,7 @@ KIOSK_SERVICE_FILE = '/etc/systemd/system/ragnar-kiosk.service'
 KIOSK_INSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'install_kiosk.sh')
 KIOSK_UNINSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'uninstall_kiosk.sh')
 KIOSK_AUTOSTART_REL = '.config/autostart/ragnar-kiosk.desktop'
+KIOSK_WRAPPER_DST = '/usr/local/bin/ragnar-kiosk-run'
 
 
 def _kiosk_capability() -> tuple[bool, str]:
@@ -8592,6 +8593,75 @@ def _kiosk_install_and_start() -> bool:
     return False
 
 
+def _kiosk_enable_existing() -> bool:
+    """Start an already-installed service kiosk without re-running the installer.
+
+    Toggling the kiosk off now leaves it installed (see _kiosk_stop_disable), so
+    turning it back on is just `enable --now` — instant, no apt, no file regen.
+    Mirrors the service-start tail of _kiosk_install_and_start (reset the tripped
+    start limit, enable+start, then confirm it stayed up)."""
+    _kiosk_task_set(phase='starting')
+    _run_systemctl(['reset-failed', KIOSK_SERVICE])
+    enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
+    if enable_proc.returncode != 0:
+        err = enable_proc.stderr.strip() or enable_proc.stdout.strip() or 'unknown error'
+        logger.error(f"[kiosk] re-enable failed: {err}")
+        _kiosk_task_set(phase='failed',
+                        error=f'Could not start the kiosk service: {err}{_kiosk_failure_detail()}')
+        return False
+    time.sleep(5)
+    state = _systemctl_state_label('ragnar-kiosk')
+    if state not in ('active', 'activating'):
+        logger.error(f"[kiosk] service did not stay up after re-enable (state={state})")
+        _kiosk_task_set(
+            phase='failed',
+            error=f'The kiosk service started and then stopped ({state}).{_kiosk_failure_detail()}')
+        return False
+    logger.info("[kiosk] existing service re-enabled")
+    return True
+
+
+def _kiosk_stop_disable() -> bool:
+    """Turn the kiosk OFF without uninstalling it.
+
+    Toggling off used to run the full uninstaller — delete the systemd unit, the
+    wrapper, the tty1 autologin and the sudoers rule — which is heavy churn and
+    was the teardown that left the console black. Instead we stop it and leave it
+    installed but inert, so turning it back on is an instant `enable --now` with
+    no reinstall. A real removal is still available via scripts/uninstall_kiosk.sh
+    (with --purge for the apt packages)."""
+    _kiosk_task_set(phase='stopping')
+    # Close any running kiosk chromium + its on-screen exit-button helper.
+    subprocess.run(['sudo', 'pkill', '-f', 'ragnar-kiosk-chromium'],
+                   capture_output=True, timeout=10, check=False)
+    subprocess.run(['sudo', 'pkill', '-f', 'ragnar_kiosk_exit_button.py'],
+                   capture_output=True, timeout=10, check=False)
+    mode = _kiosk_mode()
+    if mode == 'service':
+        # Stop + disable: no run now, no start on boot, but the unit/wrapper/
+        # xorg.conf/autologin all stay on disk. Then switch the display off the
+        # kiosk's now-dead tty7 back to the tty1 console, so "off" lands on the
+        # CLI instead of a black screen.
+        _run_systemctl(['disable', '--now', KIOSK_SERVICE])
+        subprocess.run(
+            ['sudo', '-n', 'sh', '-c',
+             'command -v chvt >/dev/null 2>&1 && chvt 1 2>/dev/null || true'],
+            capture_output=True, timeout=10, check=False)
+        logger.info("[kiosk] service stopped and disabled (left installed)")
+        return True
+    if mode == 'autostart':
+        # No service to disable — the per-user .desktop entry is what relaunches
+        # the kiosk on each login, so remove just those (keep the wrapper and the
+        # apt packages). The live session's chromium was already killed above.
+        for p in _kiosk_autostart_paths():
+            subprocess.run(['sudo', '-n', 'rm', '-f', p],
+                           capture_output=True, timeout=10, check=False)
+            logger.info(f"[kiosk] removed autostart entry {p}")
+        return True
+    logger.info("[kiosk] disable requested but no kiosk is installed")
+    return True
+
+
 def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_changed: bool) -> None:
     """Background worker: install/start/stop the kiosk to match config.
     Handles both modes (autostart .desktop entry on Pi OS Desktop, systemd
@@ -8599,19 +8669,22 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
     _kiosk_task_set(busy=True, phase='starting', error=None, started=time.time())
     try:
         if new_enabled and not prev_enabled:
-            _kiosk_install_and_start()
+            # Fast path: a service kiosk left installed-but-disabled (the new
+            # "off" keeps it on disk) just needs re-enabling — instant, no apt,
+            # no file regen. Guard on the wrapper existing too, so a partial
+            # install falls through to the self-healing full installer.
+            if (not settings_changed
+                    and _kiosk_mode() == 'service'
+                    and os.path.exists(KIOSK_WRAPPER_DST)):
+                _kiosk_enable_existing()
+            else:
+                _kiosk_install_and_start()
         elif prev_enabled and not new_enabled:
-            _kiosk_task_set(phase='removing')
-            # Kill any running kiosk chromium first (autostart mode)
-            subprocess.run(['sudo', 'pkill', '-f', 'ragnar-kiosk-chromium'],
-                           capture_output=True, timeout=10, check=False)
-            # Tear down both possible artifacts via the uninstaller script
-            logger.info(f"[kiosk] running uninstaller: {KIOSK_UNINSTALL_SCRIPT}")
-            subprocess.run(
-                ['sudo', 'bash', KIOSK_UNINSTALL_SCRIPT],
-                capture_output=True, text=True, timeout=300, check=False
-            )
-            logger.info("[kiosk] kiosk removed")
+            # Turn off WITHOUT uninstalling: stop + disable (service) or drop the
+            # autostart entry (desktop), leaving everything else installed so the
+            # next enable is instant. A full removal stays available via
+            # scripts/uninstall_kiosk.sh.
+            _kiosk_stop_disable()
         elif new_enabled and settings_changed:
             _kiosk_task_set(phase='restarting')
             mode = _kiosk_mode()

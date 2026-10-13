@@ -52,7 +52,13 @@ hardware — see above). Ragnar then:
 2. Starts the kiosk immediately (no reboot needed) and arranges for it to launch
    on every boot.
 
-Disable the toggle to stop and remove it.
+Disable the toggle to turn the kiosk **off**. This does *not* uninstall it:
+in service mode it stops and disables `ragnar-kiosk.service` (and switches the
+display back to the tty1 console) but leaves the unit, wrapper and config on
+disk, so turning it back on is an instant start with no reinstall. Autostart
+mode just drops its per-user `.desktop` entry so it no longer launches on login.
+To fully remove it (and optionally purge the apt packages), run
+`sudo scripts/uninstall_kiosk.sh` (add `--purge` for the packages).
 
 ## The two modes (auto-detected)
 
@@ -323,3 +329,26 @@ already-installed kiosks, so these reach existing boxes too.
 home — some images create `/home/<user>` root-owned. `install_kiosk.sh` and
 `ragnar-firstboot.sh` now `chown` the home to the user; to fix by hand:
 `sudo chown -R <user>:<user> /home/<user>`.
+
+**Turning the kiosk OFF leaves a black screen with no way back to the CLI (even
+after a reboot).** The kiosk runs Xorg on **tty7** and switches the active
+console there. Stopping it used to leave the display on that now-dead VT — a
+black screen — and the uninstaller removed the tty1 autologin without making
+sure a login console was left behind. On a Ragnar OS image that ships
+`getty@tty1` masked (so only the kiosk draws the screen), that meant no console
+even after a reboot. Fixed: the kiosk unit now `chvt 1`s back to the console
+when it stops (`ExecStopPost`), and the uninstaller re-enables/starts
+`getty@tty1` and switches to it, so disabling the kiosk drops straight back to
+the RagnarOS CLI. A plain update also runs `systemctl unmask`/`enable
+getty@tty1` as a safety net. To recover a box that is already black:
+
+```
+# over SSH, or from any other machine via the web UI's Update button:
+sudo systemctl unmask getty@tty1.service
+sudo systemctl enable --now getty@tty1.service
+sudo chvt 1
+```
+
+With the kiosk **running**, the way to the console is the escape hatch
+(**Ctrl+Alt+Q**, or the on-screen ✕ on a touchscreen): it stops the service,
+which now `chvt`s back to tty1 for you.

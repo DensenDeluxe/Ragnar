@@ -409,6 +409,11 @@ ExecStartPre=+/bin/sh -c 'pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null
 # fbdev driver on the vc4 framebuffer and aborts. Best-effort (|| true).
 ExecStartPre=+/bin/sh -c 'chvt 7 2>/dev/null || true'
 ExecStart=$WRAPPER_DST
+# When the kiosk stops (escape hatch, crash, or disable) Xorg dies on tty7 and
+# the active console is left on that now-blank VT — a black screen with no way
+# back to the CLI. Switch the display back to tty1 (the autologin getty above)
+# so stopping the kiosk always drops to a usable console, not a black screen.
+ExecStopPost=+/bin/sh -c 'command -v chvt >/dev/null 2>&1 && chvt 1 2>/dev/null || true'
 Restart=on-failure
 # 10s (not 5) so a dying Xorg releases the VT/DRM master before the next start.
 RestartSec=10

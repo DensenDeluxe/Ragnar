@@ -4,6 +4,16 @@
 
 ### 2026-10-13
 
+#### fix(kiosk): turning the kiosk off returns to the CLI instead of a black screen
+*branch `fix/kiosk-restore-console`*
+
+- **Disabling the on-screen kiosk no longer leaves a black screen with no way back to the console.** The kiosk runs Xorg on **tty7** and makes that the active VT; stopping it left the display on the now-dead tty7 (black), and the uninstaller removed the tty1 autologin without guaranteeing a login console was left there. On a Ragnar OS image that ships `getty@tty1` masked (so only the kiosk draws the screen), even a reboot came up black.
+- **The kiosk unit now `chvt 1`s back to the console whenever it stops** (`ExecStopPost`), so the escape hatch (Ctrl+Alt+Q / on-screen ✕), a crash, or a disable all drop back to tty1 rather than a blank VT.
+- **The uninstaller restores the console**: it `unmask`s / `enable`s / `restart`s `getty@tty1` and switches to it, so "Kiosk off" in the UI returns straight to the RagnarOS CLI. All steps are no-ops on a box that was already fine.
+- **A plain update heals it too**: the existing service re-provision picks up the new `ExecStopPost`, and `update_ragnar.sh` now also `unmask`/`enable`s `getty@tty1` (ungated, idempotent) so a box whose image masked the console login gets it back on the next boot. Manual recovery for an already-black box: `sudo systemctl unmask getty@tty1 && sudo systemctl enable --now getty@tty1 && sudo chvt 1`.
+- **Turning the kiosk off no longer uninstalls it.** "Off" used to run the full uninstaller (delete the unit, wrapper, tty1 autologin and sudoers) — heavy churn, and that teardown was what blanked the console. Now service-mode "off" just **stops + disables** the unit (and `chvt 1`s back to the console), leaving everything on disk, so turning it back **on** is an instant `enable --now` with no apt and no file regeneration. Autostart/desktop mode still drops only its per-user `.desktop` entry. A true removal (and apt purge) stays available via `scripts/uninstall_kiosk.sh [--purge]`. The Settings UI follows suit ("Turning kiosk off…" / "Kiosk turned off.", and off-success is the service going *inactive* rather than the unit disappearing).
+- **Docs:** [kiosk.md › Troubleshooting](kiosk.md#troubleshooting). *(Fixes verified by code / `bash -n` / `node --check` and a live `/api/kiosk/status` smoke test; the reported Pi 5 was offline for a full on-hardware retest — the recovery command above is the manual path until it's reachable.)*
+
 #### fix(perf): remove the 1-second CPU-sample stall that made clicks feel laggy
 *branch `fix/status-cpu-nonblocking`*
 
