@@ -52,7 +52,13 @@ hardware — see above). Ragnar then:
 2. Starts the kiosk immediately (no reboot needed) and arranges for it to launch
    on every boot.
 
-Disable the toggle to stop and remove it.
+Disable the toggle to turn the kiosk **off**. This does *not* uninstall it:
+in service mode it stops and disables `ragnar-kiosk.service` (and switches the
+display back to the tty1 console) but leaves the unit, wrapper and config on
+disk, so turning it back on is an instant start with no reinstall. Autostart
+mode just drops its per-user `.desktop` entry so it no longer launches on login.
+To fully remove it (and optionally purge the apt packages), run
+`sudo scripts/uninstall_kiosk.sh` (add `--purge` for the packages).
 
 ## The two modes (auto-detected)
 

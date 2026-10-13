@@ -33231,7 +33231,7 @@ async function onKioskEnabledToggled(cb) {
     const enabled = !!cb.checked;
     const cfgPanel = document.getElementById('kiosk-config');
     if (cfgPanel) cfgPanel.classList.toggle('hidden', !enabled);
-    _setKioskMessage(enabled ? 'Installing kiosk…' : 'Removing kiosk…', 'info');
+    _setKioskMessage(enabled ? 'Starting kiosk…' : 'Turning kiosk off…', 'info');
     _setKioskBadge(enabled ? 'activating' : 'deactivating');
     try {
         const res = await fetch('/api/config', {
@@ -33328,6 +33328,11 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
                     if (data.mode === 'autostart') return data.installed === true;
                     return false;
                 } else {
+                    // "Off" now leaves a service kiosk installed-but-disabled, so
+                    // success is the service going inactive — not the unit being
+                    // deleted. Autostart mode still drops its entry, so there mode
+                    // flips to not_installed.
+                    if (data.mode === 'service') return data.service_state === 'inactive';
                     return data.installed === false || data.mode === 'not_installed';
                 }
             })();
@@ -33341,6 +33346,7 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
                 const label = {
                     installing: 'Installing the kiosk (fetching chromium) — this can take several minutes…',
                     removing: 'Removing the kiosk…',
+                    stopping: 'Turning the kiosk off…',
                     restarting: 'Restarting the kiosk…',
                     starting: 'Starting the kiosk…'
                 }[data.phase] || 'Working…';
@@ -33362,7 +33368,7 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
             if (isStableSuccess) {
                 let msg;
                 if (!expectEnabled) {
-                    msg = 'Kiosk removed.';
+                    msg = 'Kiosk turned off.';
                 } else if (data.mode === 'autostart') {
                     msg = data.service_state === 'active'
                         ? 'Kiosk is running on the display.'
