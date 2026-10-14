@@ -2387,13 +2387,24 @@ CDP Watch looks at the same frames from the attacker's side and flags their abus
   (CVE-2023-41910), **Cisco ATA 190/191/192** (CVE-2022-20688…20766) and
   **Unified CM** (CVE-2022-20804); plain IOS/IOS-XE deliberately excluded per
   Cisco's advisory, and an ATA guarded off the IP-Phone family by a negative
-  lookahead — attaches the CVEs to verify that device against, now spanning **25
+  lookahead — attaches the CVEs to verify that device against, now spanning **27
   CDP-plane CVEs**. `TTL=0` withdrawals (`CDP-050`) and the shared trailing-data
   check (`CDP-052`) round it out.
+- **UDLD** (`UDLD-001…043`) — the same scan also admits **UDLD** (UniDirectional Link
+  Detection, Cisco PID `0x0111` on the shared group MAC). UDLD is **off by default** and
+  both UDLD CVEs *require* it enabled, so a UDLD frame on the wire is itself the exposure
+  (`UDLD-001`). It carries no version banner, so OS-family attribution reuses the **CDP
+  identity of the same source MAC**: an NX-OS / FXOS / UCS neighbour → `UDLD-020`
+  (**CVE-2021-1368**, 8.8 port-channel code execution, + **CVE-2021-34714**, 7.4 reload
+  DoS); an IOS / IOS-XE / IOS-XR neighbour → `UDLD-021` (CVE-2021-34714, which *unlike*
+  CDPwn affects plain IOS/IOS-XE); no CDP sighting → `UDLD-022` (honest "attribute by
+  hand"). Malformed UDLD TLVs raise `UDLD-040`/`041`/`042`/`043` (overrun / underflow /
+  oversized string / trailing data), which escalate the verdict.
 
 The scan uses `tcpdump -e` with the BPF
-`ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000`, isolating CDP from the other
-protocols on that Cisco group MAC (DTP/VTP/UDLD/PAgP). CDP hellos are ~60s apart, so
+`ether dst 01:00:0c:cc:cc:cc and (ether[20:2] = 0x2000 or ether[20:2] = 0x0111)`, admitting
+CDP and UDLD while leaving the other protocols on that Cisco group MAC (DTP/VTP/PAgP) to
+their own watchers. CDP hellos are ~60s apart, so
 the default window is longer (30s). The first scan **learns** the current CDP speakers
 (the real switches/phones) as the baseline (`data/cdp_watch.json`); "Trust current"
 re-learns. Every result carries a **mitigation advisory**: disable CDP on access/edge
@@ -3685,6 +3696,17 @@ screened against the tracked CVE trains (a NOTE to verify THIS device, never a v
 IOS-XE now names the **August 2026 advisory wave** (CVE-2026-20267…20273, incl. the 9.8
 RCE CVE-2026-20272) and NX-OS adds **CVE-2025-20111**; a patched train stays quiet, and an
 untracked train is reported as unscreenable (silence is not evidence of patching).
+**TWAMP / IP SLA:** **`CG-114`** the TWAMP/OWAMP control plane reachable (TCP/862 — the
+unauthenticated precondition for **CVE-2025-20154** and **CVE-2021-34720**, both 8.6),
+**`CG-014`** a TWAMP responder's 64-byte Server Greeting, **`CG-115`** that greeting
+advertising **Unauthenticated mode** (usable with no shared secret, Modes bit `0x1`),
+**`CG-294`** a malformed greeting (nonzero MBZ tail), and **`CG-116`** Cisco's IP SLA
+Responder control on UDP/1967 (CVE-2021-34720 — IP SLA and TWAMP share the code path).
+**WLC (`CG-105`):** a Catalyst 9800 / Embedded Wireless Controller identity in the capture →
+verify the Out-of-Band AP-Image-Download feature against **CVE-2025-20188** (10.0,
+hardcoded-JWT arbitrary file upload) — gated on the WLC identity, not a bare 8443 flow.
+**SD-WAN (`CG-106`):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`,
+`vmanage`) in cleartext HTTP → **CVE-2026-20133**.
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 

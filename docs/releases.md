@@ -4,7 +4,27 @@
 
 ### 2026-10-14
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): MAC Watch v4 — passive MACsec / 802.1X-EAPOL / MKA L2-security plane
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): Cisco Guard v7 — TWAMP / IP SLA, WLC OOB AP-image (CVE-2025-20188 10.0), SD-WAN (+4 CVEs)
+*branch `feature/cdp-v5-cisco-v7`*
+
+- **Ported the feasible v7 additions into the in-app `do_cisco_guard`.** CVE index **351 → 355 named, 301 → 305 detected** (+4); Cisco Guard now names 33 CVEs. BPF adds `tcp port 862 or udp port 862 or udp port 1967`.
+- **TWAMP / IP SLA:** `CG-114` TWAMP/OWAMP control plane reachable on TCP/862 — the unauthenticated precondition for **CVE-2025-20154** (server OOB array-access reload) and **CVE-2021-34720** (IP SLA/TWAMP socket memory exhaustion), both 8.6; `CG-014` a 64-byte Server Greeting; `CG-115` that greeting offering **Unauthenticated mode** (Modes bit 0x1, usable with no shared secret); `CG-294` a malformed greeting (nonzero MBZ tail); `CG-116` Cisco IP SLA Responder control on UDP/1967 (CVE-2021-34720 — IP SLA and TWAMP share the code path).
+- **WLC (`CG-105`, CVE-2025-20188, 10.0):** a Catalyst 9800 / Embedded Wireless Controller identity → verify the Out-of-Band AP-Image-Download feature (hardcoded-JWT arbitrary file upload). **Gated on the WLC identity, not a bare 8443 flow**, so it doesn't fire on every HTTPS session in the broad guard capture.
+- **SD-WAN (`CG-106`, CVE-2026-20133):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`, `vmanage`) in cleartext HTTP.
+- **Deferred, with reasons:** `CG-295` (stateful Accept-Session resource-limit — needs TCP flow state the in-app model doesn't keep), `CG-293` (SMB default-account cleartext — needs request/response correlation), CVE-2024-20314 / CVE-2024-20271 (no passive packet signature, per the module), and the L2-byte codes still deferred from v6.
+- **Self-test:** the `cisco` suite grows to **43 scenarios** (TWAMP exposed/unauth/malformed, IP SLA, WLC with CVE-2025-20188, SD-WAN). **Live-validated** in a sealed netns: crafted TWAMP greeting + IP SLA + vManage HTTP replayed with `tcpreplay` fire `CG-114`/`CG-115`/`CG-116`/`CG-106` through the real `tcpdump` capture path.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_twamp` helpers under Cisco Guard and labels the four new IDs.
+
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): CDP Watch v5 — UDLD detection (CVE-2021-1368 port-channel RCE, CVE-2021-34714 reload DoS)
+*branch `feature/cdp-v5-cisco-v7`*
+
+- **Ported the v5 (v1.2.0) UDLD family into the in-app `do_cdp_watch`.** UDLD (UniDirectional Link Detection) rides the same Cisco group MAC as CDP (PID `0x0111`), so the capture BPF now admits both (`ether[20:2] = 0x2000 or 0x0111`). CVE index **349 → 351 named, 299 → 301 detected** (+2); CDP Watch now names 27 CVEs.
+- **UDLD is off by default and both CVEs require it enabled**, so a UDLD frame on the wire is itself the exposure (`UDLD-001`). UDLD carries no version banner, so OS-family attribution reuses the **CDP identity of the same source MAC**: NX-OS/FXOS/UCS → `UDLD-020` (**CVE-2021-1368**, 8.8 port-channel RCE + **CVE-2021-34714**, 7.4 reload DoS); IOS/IOS-XE/IOS-XR → `UDLD-021` (CVE-2021-34714, which *unlike* CDPwn affects plain IOS/IOS-XE); no CDP sighting → `UDLD-022` (honest "attribute by hand"). Malformed UDLD TLVs raise `UDLD-040`/`041`/`042`/`043` (overrun / underflow / oversized / trailing) and escalate the verdict.
+- **Not ported:** CVE-2020-3217 (onePK) — the module itself names it only as a contrast (state invisible on the wire); no packet signature.
+- **Self-test:** the `cdp` suite grows with 10 UDLD scenarios (presence, each malformed shape, NX-OS/IOS screening with CVE attribution, the unattributed case, verdict escalation). **Live-validated** in a sealed netns: a CDP NX-OS banner + UDLD frames replayed with `tcpreplay` fire `UDLD-001`/`UDLD-020` (with CVE-2021-1368) / `UDLD-041` through the real `tcpdump` capture path.
+- **Docs:** [nettools.md › CDP Watch](nettools.md#cdp-watch) (UDLD section, BPF), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_udld` helpers under CDP Watch and labels the two CVEs.
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): MAC Watch v4 — passive MACsec / 802.1X-EAPOL / MKA L2-security plane
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Added the one genuinely new v4 capability to the in-app `do_mac_watch`: a passive sniff of the link-security control plane.** The existing watcher is neighbour-table + `arp-scan` based, so it already covers 11 of the v4 drop's 14 detectors (disguised-vendor OUI, iface identity-change, FHRP gateway-pin, duplicate-MAC clone, randomization inventory, device tracking, EUI-64 mismatch, FHRP awareness). The three it structurally could **not** see — MACsec, 802.1X/EAPOL and MKA — ride dedicated EtherTypes that never reach the ARP/NDP caches, so this release adds an **opt-in** short `tcpdump` capture (`l2sec=1`, no frames emitted) that parses the 802.1AE SecTAG and EAPOL headers directly off the wire. (The RF-only v4 detectors — `dot11_seq_discontinuity`, `rssi_bimodal` — need 802.11 monitor mode and stay out of scope for the wired watcher; `syslog_forensic` is standalone-store only.)
@@ -14,7 +34,7 @@
 - **UI:** MAC Watch card gains an **L2 security** opt-in checkbox and an `L2-sec high` summary chip; findings render split into an abuse section (red, with code tags) and an in-use inventory section (sky-blue). Mobile-friendly (verified at 390 px). Cache-bust `?v=20261014-mac-v4-l2sec`.
 - **Docs:** [nettools.md › MAC Watch](nettools.md).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): BGP Path Watch v5 — FRR bgp_attr_encap CVE-2024-44070 posture (+1 named CVE)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): BGP Path Watch v5 — FRR bgp_attr_encap CVE-2024-44070 posture (+1 named CVE)
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Ported the one real new CVE from the v5 `pathwatch` drop into the in-app `do_bgp_watch` posture advisories.** The in-app BGP watcher is tcpdump-**text** based, so (like the rest of the malformed-UPDATE class) this is named as **exposure posture / context**, not byte-detected. CVE index **348 → 349 named** (+1 **context**: detected stays **299**, context 40→41).
@@ -22,7 +42,7 @@
 - **Self-test:** the `bgp` suite (12 scenarios) still passes. `gen_cve_list` owns the ID under BGP Path Watch and labels it.
 - **Docs:** [nettools.md › BGP Path Watch](nettools.md), [CREDITS.md](CREDITS.md).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): OSPF Watch v6 — OSPFv3 malformed-LSA DoS posture (+6 named CVEs)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): OSPF Watch v6 — OSPFv3 malformed-LSA DoS posture (+6 named CVEs)
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Ported the v6 OSPFv3/IPv6 DoS CVE set into the in-app `do_ospf_watch` posture advisories.** The in-app OSPF watcher is tcpdump-**text** based (it can't reconstruct the malformed LSA bytes), so these are named as **exposure posture / context**, not byte-detected — the honest framing the existing opaque-LSA advisory already uses. CVE index **342 → 348 named** (+6 **context**: detected stays **299**, context 34→40).
@@ -30,7 +50,7 @@
 - **Self-test:** the `ospf` suite (13 scenarios) still passes. `gen_cve_list` owns the new IDs under OSPF Watch and labels them.
 - **Docs:** [nettools.md › OSPF Security Scanner](nettools.md#ospf-security-scanner), [CREDITS.md](CREDITS.md).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): BFD Watch v4 — Seamless BFD (S-BFD, RFC 7880) reflector plane (+6 codes)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): BFD Watch v4 — Seamless BFD (S-BFD, RFC 7880) reflector plane (+6 codes)
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Re-vendored the Solarflere `bfdwatch` engine to v4** (root `bfdwatch.py`, 2615→3333 lines, 31→**37 codes**; **no new CVEs** — the 5 named CVEs and the index are unchanged at **342 named / 299 detected**). Same pattern as LACP / SR-MPLS: the upstream drop ships only the engine + `main`; the Ragnar integration layer (`do_bfd_watch`, `selftest`, `_bfd_capture_pcap`, `_bfd_verdict`, Watchtower feed) was spliced back on, and v4's CLI `__main__` dropped. The v4 engine API (`BFDWatch`, `self_test`) is unchanged, so the layer and its scenarios port cleanly.
@@ -38,7 +58,7 @@
 - **Self-test:** the `bfd` suite (9 scenarios incl. the engine's own Tier-1 reachability run) passes on the v4 engine. **Live-validated** in a sealed netns: a truncated and a malformed BFD control packet replayed with `tcpreplay` fire `BFD-TRUNCATED-HEADER` / `BFD-MALFORMED-HEADER` through the real `do_bfd_watch` tcpdump path.
 - **Docs:** [nettools.md › BFD Watch](nettools.md#bfd-watch) (S-BFD, 37 codes).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): SR-MPLS Watch v4 — LSP Ping / VCCV / IOAM OAM plane (+10 codes)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): SR-MPLS Watch v4 — LSP Ping / VCCV / IOAM OAM plane (+10 codes)
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Re-vendored the Solarflere `sr_mplswatch` engine to v4** (root `sr_mplswatch.py`, 3991→5558 lines, 46→**56 codes**; **no new CVEs** — these are wire conditions, so the 17 named CVEs and the index are unchanged at **342 named / 299 detected**). Like LACP, the upstream drop ships only the engine + `main`; the Ragnar integration layer (`do_sr_mpls_watch`, `selftest`, `_srm_capture_pcap`, `_srm_verdict`, Watchtower feed — a self-contained block with its own aliased imports) was spliced back on. The v4 engine API (`Config`, `Emitter`, `SRMPLSEngine`) is unchanged, so the layer and its 12 adapter scenarios port cleanly.
@@ -46,7 +66,7 @@
 - **Self-test:** the `srmpls` suite (12 adapter scenarios) passes on the v4 engine. **Live-validated** in a sealed netns: an MPLS label stack arriving on a declared **CE** port fires `SRM-MPLS-ON-CE-PORT` (critical) through the real `do_sr_mpls_watch` tcpdump path, verdict `segment-injection`.
 - **Docs:** [nettools.md › SR-MPLS Watch](nettools.md#sr-mpls-watch) (LSP Ping / VCCV / IOAM, 56 codes).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): OAM Watch v2 — +6 abuse codes (Event-replay refinement)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): OAM Watch v2 — +6 abuse codes (Event-replay refinement)
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Re-vendored the Solarflere `oamwatch` package to v2 (v0.2.0)** (`python/oamwatch/` + `python/oamwatch_tests/`; **38→44 codes, no new CVEs** — zero Link OAM CVEs clear the bar, so the index is unchanged at **342 named / 299 detected**). The 6 new codes (`OAM-075`..`080`) all land in the abuse group.
@@ -54,7 +74,7 @@
 - **Self-test:** the `oam` suite (19 scenarios) updated for the refined OAM-073 behavior; registry assert 38→44 (5 posture / 18 structural / 21 abuse), and the module's own **355-check conformance** tier runs out of process. **Live-validated** in a sealed netns: a backwards Event sequence fires `OAM-073` through the real `do_oam_watch` tcpdump path, verdict `attack`.
 - **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch) (44 codes, OAM-075..080).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): LACP Watch v3 — +28 codes (PAGP, PAUSE/PFC flow-control planes)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): LACP Watch v3 — +28 codes (PAGP, PAUSE/PFC flow-control planes)
 *branch `feature/lldp-watch-v3` (shared)*
 
 - **Re-vendored the Solarflere `lacpwatch` engine to v3** (root `lacpwatch.py`, 1958→3827 lines, 39→**67 codes**; **no new CVEs** — the one anchor stays CVE-2024-30388, so the index is unchanged at **342 named / 299 detected**). The upstream drop ships the engine with `main`/`run_self_test`; the Ragnar integration layer (`do_lacp_watch`, `selftest`, `_capture_pcap`, Watchtower `_emit_watchtower`, the `_verdict_for` card reduction) was spliced back on — the v3 `LacpWatch` API (`on_frame`, `findings`, `stats`, `halves`, `lag_posture_seen`) is compatible, and `selftest()` now adapts the module's own Tier-1 suite.
@@ -62,7 +82,7 @@
 - **Self-test:** the `lacp` suite runs the module's **150-check** Tier-1 (pure-Python, no sockets). **Live-validated** in a sealed netns: a VLAN-tagged + wrong-destination LACPDU replayed with `tcpreplay` fire `LACP-VLAN-TAGGED` / `LACP-NON-SLOW-DESTINATION` through the real `do_lacp_watch` tcpdump path, verdict `takeover`.
 - **Docs:** [nettools.md › LACP Watch](nettools.md#lacp-watch) (67 codes, PAGP / PAUSE-PFC planes).
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): CFM Watch v5 — Y.1731 measurement/transport + E-LMI cross-plane (+17 codes)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): CFM Watch v5 — Y.1731 measurement/transport + E-LMI cross-plane (+17 codes)
 *branch `feature/lldp-watch-v3` (shared with LLDP v3 et al.)*
 
 - **Re-vendored the Solarflere `cfmwatch` engine to v5 (v1.1.0)** (`python/cfmwatch.py` 148→192 KB) with its updated tests and fixtures (6 new: `elmi`, `elmi_undeclared`, `measurement`, `maintenance`, `opcodes`, `vxlan`). The in-app `do_cfm_watch` adapter is generic over `engine.findings`, so the new codes flow through. **No new CVEs** → CVE index unchanged at **342 named / 299 detected**.
@@ -72,7 +92,7 @@
 - **Live-validated** in a sealed netns: the E-LMI fixture replayed with `tcpreplay` fires `CFM-251`/`252`/`253` through the real `tcpdump` capture path with an EVC declared (0x88EE admitted), verdict `attack`.
 - **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch) (classes M/T/L, EVC declaration, 107 codes), [CREDITS.md](CREDITS.md), card EVC control.
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): LLDP Watch v3 — DCBX class (+10 codes, Data Center Bridging abuse)
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): LLDP Watch v3 — DCBX class (+10 codes, Data Center Bridging abuse)
 *branch `feature/lldp-watch-v3`*
 
 - **Re-vendored the Solarflere `lldpwatch` engine to v3** (`python/lldpwatch.py` 77→98 KB, `lldpwatch_frames.py`, `lldpwatch_conformance.py`; the scapy cross-check is byte-identical and unchanged) and added the new **`lldpwatch_dcbx_xcheck.py`** tier. The in-app `do_lldp_watch` adapter is generic over the engine, so the new codes flow through unchanged.
