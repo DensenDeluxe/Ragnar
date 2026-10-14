@@ -198,6 +198,7 @@ NAMES = {
     'CVE-2011-3323': 'Quagga ospf6d IPv6 prefix DoS', 'CVE-2018-14880': 'tcpdump OSPFv3 parser over-read',
     'CVE-2018-0466': 'Cisco IOS-XR OSPFv3 DoS', 'CVE-2013-5565': 'Cisco OSPFv3 DoS',
     'CVE-2025-8872': 'Arista EOS OSPFv3 DoS', 'CVE-2013-0149': 'Cisco IOS OSPF LSA manipulation',
+    'CVE-2024-44070': 'FRR bgp_attr_encap Tunnel-Encap crash',
     'CVE-2023-20024': 'Cisco SB switch web-UI DoS', 'CVE-2023-20156': 'Cisco SB switch web-UI DoS',
     'CVE-2023-20157': 'Cisco SB switch web-UI DoS', 'CVE-2023-20158': 'Cisco SB switch web-UI DoS',
     'CVE-2023-20162': 'Cisco SB switch web-UI info disclosure',

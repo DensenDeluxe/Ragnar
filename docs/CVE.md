@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **348** distinct CVE IDs
+- **349** distinct CVE IDs
 - **299** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **40** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **41** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-86060**
@@ -38,7 +38,7 @@ detector works is in [nettools.md](nettools.md).
 | 2021 | 34 |
 | 2022 | 29 |
 | 2023 | 45 |
-| 2024 | 51 |
+| 2024 | 52 |
 | 2025 | 38 |
 | 2026 | 45 |
 
@@ -51,7 +51,7 @@ detector works is in [nettools.md](nettools.md).
 | ARP Watch | 4 |
 | Aruba Guard | 42 |
 | BFD Watch | 5 |
-| BGP Path Watch | 13 |
+| BGP Path Watch | 14 |
 | BLE Pentest (active) | 6 |
 | CDP Watch | 25 |
 | CFM Watch | 4 |
@@ -356,6 +356,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2024-42509](https://nvd.nist.gov/vuln/detail/CVE-2024-42509) |  | detected | Aruba Guard | — |
 | [CVE-2024-42861](https://nvd.nist.gov/vuln/detail/CVE-2024-42861) |  | detected | PTP Watch | — |
 | [CVE-2024-43532](https://nvd.nist.gov/vuln/detail/CVE-2024-43532) | RemoteRegistry NTLM relay | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-44070](https://nvd.nist.gov/vuln/detail/CVE-2024-44070) | FRR bgp_attr_encap Tunnel-Encap crash | context only | BGP Path Watch | — |
 | [CVE-2024-47460](https://nvd.nist.gov/vuln/detail/CVE-2024-47460) |  | detected | Aruba Guard | — |
 | [CVE-2024-49112](https://nvd.nist.gov/vuln/detail/CVE-2024-49112) | LDAPNightmare | detected | LDAP Watch | — |
 | [CVE-2024-49113](https://nvd.nist.gov/vuln/detail/CVE-2024-49113) | LDAPNightmare | detected | LDAP Watch | — |

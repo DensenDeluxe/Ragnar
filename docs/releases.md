@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): BGP Path Watch v5 — FRR bgp_attr_encap CVE-2024-44070 posture (+1 named CVE)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Ported the one real new CVE from the v5 `pathwatch` drop into the in-app `do_bgp_watch` posture advisories.** The in-app BGP watcher is tcpdump-**text** based, so (like the rest of the malformed-UPDATE class) this is named as **exposure posture / context**, not byte-detected. CVE index **348 → 349 named** (+1 **context**: detected stays **299**, context 40→41).
+- **CVE-2024-44070** (FRRouting `bgp_attr_encap` — a corrupted Tunnel-Encapsulation attribute, the same sub-TLV class as CVE-2023-38802 / CVE-2024-30395) folded into the `malformed_attr` advisory. **CVE-2026-48685 was deliberately not added** — the upstream drop itself rejects it (FastNetMon extended-length attribute read, not a router BGP-daemon crash).
+- **Self-test:** the `bgp` suite (12 scenarios) still passes. `gen_cve_list` owns the ID under BGP Path Watch and labels it.
+- **Docs:** [nettools.md › BGP Path Watch](nettools.md), [CREDITS.md](CREDITS.md).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): OSPF Watch v6 — OSPFv3 malformed-LSA DoS posture (+6 named CVEs)
 *branch `feature/lldp-watch-v3` (shared)*
 

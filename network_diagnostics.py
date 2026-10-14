@@ -18915,8 +18915,9 @@ _BGP_ADVISORIES = {
         'severity': 'medium',
         'title': 'Patch bgpd for malformed BGP-UPDATE attribute crashes',
         'detail': ('Malformed BGP path attributes have repeatedly crashed router '
-                   'BGP daemons (e.g. FRRouting CVE-2023-38802 / Juniper rpd '
-                   'CVE-2024-30395 via a corrupted Tunnel-Encapsulation attribute; '
+                   'BGP daemons (e.g. FRRouting CVE-2023-38802 / CVE-2024-44070 '
+                   '(bgp_attr_encap) / Juniper rpd CVE-2024-30395 via a corrupted '
+                   'Tunnel-Encapsulation attribute; '
                    'CERT VU#347067 covers multiple implementations). The v4 corpus '
                    'spans FRR bgpd (zero-length path-attributes CVE-2023-41358, '
                    'MP_UNREACH CVE-2023-47234, EOR-bypass CVE-2023-47235, Prefix-SID '
@@ -18928,10 +18929,10 @@ _BGP_ADVISORIES = {
                    'reconstruct, and the software version is not visible on the wire — '
                    'these are named as exposure posture; check OSV for your BGP build '
                    'and patch, or run the standalone BGP tap for byte-level detection.'),
-        'refs': ['CVE-2023-38802', 'CVE-2024-30395', 'CVE-2023-41358', 'CVE-2023-47234',
-                 'CVE-2023-47235', 'CVE-2024-31948', 'CVE-2022-40302', 'CVE-2022-43681',
-                 'CVE-2026-37457', 'CVE-2026-37458', 'CVE-2026-37459', 'CVE-2026-37461',
-                 'CVE-2026-37462', 'VU#347067', _BGP_OSV_URL],
+        'refs': ['CVE-2023-38802', 'CVE-2024-30395', 'CVE-2024-44070', 'CVE-2023-41358',
+                 'CVE-2023-47234', 'CVE-2023-47235', 'CVE-2024-31948', 'CVE-2022-40302',
+                 'CVE-2022-43681', 'CVE-2026-37457', 'CVE-2026-37458', 'CVE-2026-37459',
+                 'CVE-2026-37461', 'CVE-2026-37462', 'VU#347067', _BGP_OSV_URL],
     },
 }
 

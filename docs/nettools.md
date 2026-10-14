@@ -3447,7 +3447,8 @@ link-local, `ff00::/8` multicast, IPv4-mapped, discard-only). It flags:
 The first scan learns the peers and prefix→origin map as the baseline
 (`data/bgp_watch.json`); **Trust current** re-learns after a legitimate change.
 As with OSPF, software-version CVEs aren't on the wire, so exposure conditions are
-flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** / Juniper rpd
+flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** / **CVE-2024-44070**
+(FRR `bgp_attr_encap`) / Juniper rpd
 **CVE-2024-30395** and the *(v4)* FRR/GoBGP parser corpus: zero-length path-attributes
 **CVE-2023-41358**, MP_UNREACH **CVE-2023-47234**, EOR-bypass **CVE-2023-47235**,
 Prefix-SID **CVE-2024-31948**, FlowSpec **CVE-2026-37457**, MP_REACH **CVE-2026-37458**,
