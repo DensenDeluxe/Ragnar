@@ -148,7 +148,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -3668,6 +3668,29 @@ It's **detection-only**, but the traceroute is *active probing*, so it runs
   `bgp_speaker.py` and `path_asymmetry.py` each expose `selftest()` (the latter now
   covers the convergence engine too), aggregated into the Detector Self-Test panel
   (`GET /api/net/routing-selftest`).
+
+**Passive BGP-message analysis tiers (Pathwatch v6).** Three vendored, pure-stdlib
+passive tiers ship with the suite (`python/bgp_pathwatch/`), each a byte-level decoder
+over captured BGP messages — **no transmit path, no CVEs** (the posture is behavioural,
+and BGPsec does **no** signature validation, which would not be passive):
+
+- **BGPsec posture / downgrade** (`bgpsec.py`, RFC 8205 — 20 codes): tracks the BGPsec
+  capability in the OPEN and the `BGPsec_PATH` attribute, and flags a **downgrade**
+  (a session that negotiated BGPsec then carries an unsigned AS_PATH), AFI/transport
+  mismatches, and malformed signature blocks.
+- **SR Policy / BGP-LS** (`bgpsrte.py`, RFC 9830 SR Policy SAFI 73 + RFC 9552 BGP-LS
+  AFI 16388 — 23 codes): decodes SR Policy NLRI + Tunnel-Encapsulation segment lists
+  and BGP-LS node/link/prefix NLRI, flagging **injection posture** (an SR Policy or
+  BGP-LS update from a peer that should not originate it) and malformed TLVs.
+- **Passive tap** (`bgptap.py`): a receive-only L3 tap with **dual-stack** parse (IPv6
+  extension-header walk), marker-resync TCP reassembly and BGP message framing — the
+  shared front-end that feeds the parser-CVE (`bgpcve.py`, 14 detectors / 12 codes),
+  BGPsec and SR-Policy tiers from a raw capture rather than a live session.
+
+These are wired into the Detector Self-Test as the **`bgp_tap` (57)**, **`bgpsec` (47)**
+and **`bgp_srte` (65)** suites — 169 offline checks, run in their own interpreter (no
+root, no network). The live capture adapters/routes for these tiers are a planned
+follow-up; today they ship vendored and self-test-validated.
 
 ### Vendor CVE Guards
 

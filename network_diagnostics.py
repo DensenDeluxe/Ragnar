@@ -20199,6 +20199,54 @@ def _bgp_selftest():
     return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
 
 
+_BGP_PATHWATCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'python', 'bgp_pathwatch')
+
+
+def _bgp_pathwatch_tier_selftest(testfile, label):
+    """Run a vendored BGP Pathwatch v6 passive-analysis tier's offline test suite
+    (pure-stdlib, no root, no network) in its own interpreter and adapt the
+    'N/N passing' result to the aggregator's scenarios shape. The tier modules use
+    bare sibling imports (bgp/bgpcve/...), so they run from their isolated vendored
+    directory `python/bgp_pathwatch/` rather than polluting `python/`. The subprocess
+    chdir's into that directory first, because the tests resolve bare imports and
+    their own source-scan passivity checks relative to it."""
+    code = ('import os, sys, runpy; d = %r; os.chdir(d); sys.path.insert(0, d); '
+            'runpy.run_path(os.path.join(d, %r), run_name="__main__")'
+            % (_BGP_PATHWATCH_DIR, testfile))
+    res = _run([sys.executable or 'python3', '-c', code], timeout=120)
+    out = (res.get('out') or '') + (res.get('err') or '')
+    m = re.search(r'(\d+)\s*/\s*(\d+)\s+passing', out)
+    if not m:
+        return {'success': False, 'scenarios': [
+            {'name': '%s suite' % label, 'pass': False, 'expect': 'N/N passing',
+             'got': 'rc %s %s' % (res.get('rc'), out.strip()[-160:])}]}
+    passed, total = int(m.group(1)), int(m.group(2))
+    scen = [{'name': '%s check %d' % (label, i + 1), 'pass': True} for i in range(passed)]
+    if passed != total:
+        scen.append({'name': '%s suite' % label, 'pass': False,
+                     'expect': '%d/%d' % (total, total), 'got': '%d/%d' % (passed, total)})
+    return {'success': passed == total and total > 0, 'scenarios': scen}
+
+
+def _bgptap_selftest():
+    """BGP Pathwatch v6 passive-tap tier (dual-stack L3 parse, IPv6 extension-header
+    walk, marker-resync TCP reassembly, BGP message framing) — 57 offline checks."""
+    return _bgp_pathwatch_tier_selftest('taptest.py', 'bgp-tap')
+
+
+def _bgpsec_selftest():
+    """BGP Pathwatch v6 BGPsec (RFC 8205) posture + downgrade tier — 47 offline
+    checks (20 codes, no CVEs; no signature validation — that would not be passive)."""
+    return _bgp_pathwatch_tier_selftest('bgpsectest.py', 'bgpsec')
+
+
+def _bgpsrte_selftest():
+    """BGP Pathwatch v6 SR Policy (RFC 9830 SAFI 73) + BGP-LS (RFC 9552, AFI 16388)
+    decode and injection-posture tier — 65 offline checks (23 codes, no CVEs)."""
+    return _bgp_pathwatch_tier_selftest('srtetest.py', 'bgp-srte')
+
+
 def _tls_selftest():
     """Adapt tls_watch.selftest() to the aggregator's scenarios/scapy shape."""
     r = tls_watch.selftest()
@@ -27997,7 +28045,9 @@ def do_routing_selftest():
               'apc_guard': _apc_selftest(),
               'liebert_guard': _liebert_selftest(),
               'dell_guard': _dell_selftest(),
-              'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
+              'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest(),
+              'bgp_tap': _bgptap_selftest(), 'bgpsec': _bgpsec_selftest(),
+              'bgp_srte': _bgpsrte_selftest()}
     return {
         'success': all(s['success'] for s in suites.values()),
         'scapy_available': _have_scapy(),

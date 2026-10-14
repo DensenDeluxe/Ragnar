@@ -4,6 +4,15 @@
 
 ### 2026-10-14
 
+#### [#959](https://github.com/PierreGode/Ragnar/pull/959) — feat(net): BGP Pathwatch v6 passive-analysis tiers — BGPsec / SR-Policy-BGP-LS / tap (169 self-test checks)
+*branch `feature/bgp-pathwatch-v6`*
+
+- **Vendored the three new passive BGP-message analysis tiers from Pathwatch v6** into `python/bgp_pathwatch/` (isolated subdir — the tiers use bare sibling imports `bgp`/`bgpcve`/… that would otherwise collide in `python/`): the shared v6 collector/codec (`bgp.py` + `iptrie.py`), the parser-CVE walker (`bgpcve.py`, 14 detectors / 12 codes), **BGPsec posture + downgrade** (`bgpsec.py`, RFC 8205 — 20 codes), **SR Policy + BGP-LS** (`bgpsrte.py`, RFC 9830 SAFI 73 + RFC 9552 — 23 codes) and the dual-stack **passive tap** (`bgptap.py`, IPv6 extension-header walk + marker-resync TCP reassembly). All pure-stdlib, receive-only, **no CVEs** (behavioural posture; BGPsec does no signature validation — that would not be passive).
+- **Wired their offline suites into the aggregate Detector Self-Test** as three new suites — **`bgp_tap` (57)**, **`bgpsec` (47)**, **`bgp_srte` (65)** = **169 checks** — run in their own interpreter (chdir'd into the vendored dir so the tests' bare imports + source-scan passivity checks resolve). `do_routing_selftest` is now **56 suites, all green**.
+- **No CVE-index change** — the tiers carry no CVEs, and `gen_cve_list` scans an explicit file list that excludes the vendored dir; CVE.md regenerates **identical** at **355 named / 305 detected**.
+- **Scope:** this is the "new tiers + validate" integration — the tiers ship vendored and self-test-validated; the existing receive-only collector (`bgp_speaker.py`) + OWD / path-asymmetry integration is untouched (no API-breaking rewrite). **Live capture adapters / routes / UI for the new tiers are a planned follow-up.**
+- **Docs:** [nettools.md › BGP Collector & Path Asymmetry](nettools.md#bgp-collector--path-asymmetry-control-plane--data-plane) (new "Passive BGP-message analysis tiers (Pathwatch v6)" subsection), Detector Self-Test list.
+
 #### [#958](https://github.com/PierreGode/Ragnar/pull/958) — feat(net): STP/BPDU Watch v2 (31 checks, per-MSTI) + new MRP Watch (MVRP/MMRP/GVRP/GMRP) + visibility matrix
 *branch `feature/stp-v2-mrp-watch`*
 
