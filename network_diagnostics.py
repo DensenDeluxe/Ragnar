@@ -25970,9 +25970,10 @@ def do_lldp_baseline(action='get'):
 
 def _lldp_selftest():
     """Adapter scenarios over the vendored engine + frame builders (offline, no root),
-    plus the module's own tiers run out-of-process: the 2117-check conformance
-    harness (which asserts scapy is NOT imported, so it cannot run inside this
-    process) and, with scapy present, the 285-check independent-dissector cross-check."""
+    plus the module's own tiers run out-of-process: the 2568-check conformance harness
+    (which asserts scapy is NOT imported, so it cannot run inside this process), the
+    338-check scapy cross-check, and — with tshark present — the 130-check DCBX
+    Wireshark-dissector cross-check (v3 added the DCBX class, LLDP-060..069)."""
     import tempfile
     scenarios = []
 
@@ -25986,20 +25987,21 @@ def _lldp_selftest():
         return {'success': False, 'scenarios': [
             {'name': 'lldpwatch import failed: %s' % e, 'pass': False}]}
 
-    check('registry: 30 codes (15 screening / 13 structural / 2 abuse)',
-          len(W.FINDINGS) == 30 and
+    check('registry: 40 codes (15 screening / 21 structural / 4 abuse)',
+          len(W.FINDINGS) == 40 and
           sorted(g for _n, _s, g in W.FINDINGS.values()).count('screening') == 15 and
-          sorted(g for _n, _s, g in W.FINDINGS.values()).count('structural') == 13)
+          sorted(g for _n, _s, g in W.FINDINGS.values()).count('structural') == 21 and
+          sorted(g for _n, _s, g in W.FINDINGS.values()).count('abuse') == 4)
     fam_cves = {c for f in W.BUILTIN_FAMILIES for c in f.cves}
     check('screening table names 30 distinct LLDP CVEs', len(fam_cves) == 30)
     check('engine passes its own passive-invariant AST audit',
           W.audit_source(open(W.__file__).read(), 'lldpwatch.py') == [])
 
-    def replay(frames, baseline=None, enforce=False):
+    def replay(frames, baseline=None, enforce=False, interval=0.001):
         fd, path = tempfile.mkstemp(suffix='.pcap')
         os.close(fd)
         try:
-            Fr.write_pcap(path, frames)
+            Fr.write_pcap(path, frames, interval=interval)
             return _lldp_analyze(path, baseline=baseline, enforce=enforce)
         finally:
             try:
@@ -26007,9 +26009,12 @@ def _lldp_selftest():
             except OSError:
                 pass
 
-    rows, neigh, n, _src = replay([b() for b in Fr.BENIGN_BUILDERS])
-    check('benign set (v4/v6 mgmt, 802.1Q, QinQ, MED phone, long banner, padding, FCS) '
-          '-> no finding (FP guard)', n == len(Fr.BENIGN_BUILDERS) and not rows)
+    # v3's benign set has 13 distinct sources — above the 12-distinct-source flood
+    # threshold — so space it 1 s/frame (no 10 s window holds 12) to prove the
+    # per-frame FP guard without tripping the rate correlator (flood is covered below).
+    rows, neigh, n, _src = replay([b() for b in Fr.BENIGN_BUILDERS], interval=1.0)
+    check('benign set (v4/v6 mgmt, 802.1Q, QinQ, MED phone, long banner, padding, FCS, '
+          'DCBX) -> no finding (FP guard)', n == len(Fr.BENIGN_BUILDERS) and not rows)
     check('verdict: benign LLDP -> clean, nothing captured -> no-traffic',
           _lldp_verdict(rows, n) == 'clean' and _lldp_verdict([], 0) == 'no-traffic')
     v6 = [x for x in neigh if any(a.startswith('[') for a in x['mgmt'])]
@@ -26064,6 +26069,12 @@ def _lldp_selftest():
         tail = (r['out'] or '').strip().splitlines()[-1:] or ['']
         check('scapy cross-check tier: %s' % tail[0][:90], r['rc'] == 0)
         xcheck = {'ran': True, 'pass': r['rc'] == 0}
+    # DCBX Wireshark-dissector cross-check (v3; needs tshark, skipped otherwise).
+    if _have('tshark'):
+        r = _run([sys.executable, os.path.join(here, 'lldpwatch_dcbx_xcheck.py'),
+                  '--quiet'], timeout=180)
+        tail = (r['out'] or r['err'] or '').strip().splitlines()[-1:] or ['']
+        check('DCBX cross-check tier: %s' % tail[0][:90], r['rc'] == 0)
     return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
             'scapy': xcheck}
 

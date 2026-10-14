@@ -42,6 +42,17 @@ def LAB_FORGED() -> bytes:
     """An unbaselined source - drives LLDP-049 under the enforce config."""
     return F.benign_minimal(src="02:00:00:00:de:ad")
 LAB_ENFORCE_CONFIG: Dict[str, Any] = {"enforce": True, "baseline": []}
+# DCBX conflict detection is opt-in, so the lab needs its own config for it.
+LAB_DCBX_CONFIG: Dict[str, Any] = {"dcbx_conflict_enforce": True,
+                                   "dcbx_churn_threshold": 2}
+# The clean corpus gives EVERY fixture its own source MAC so the lab can hold
+# each one individually accountable. That is a property of the corpus, not of
+# real traffic: 13 distinct LLDP speakers inside one flood window trips the
+# volumetric rule, correctly. The benign gate is testing that no well-formed
+# frame produces a structural or screening finding, so it lifts the two
+# volumetric thresholds and nothing else.
+LAB_CLEAN_CONFIG: Dict[str, Any] = {"flood_threshold": 10000,
+                                    "flood_distinct_src": 10000}
 
 
 # Readiness canary (suite LESSON AB). A fixed sleep after spawning the
@@ -93,6 +104,15 @@ def lab_pairs() -> List[str]:
         out.add("%s\t%s" % (code, fr.src))
     # the flood phase is volumetric: pin the code, not a single source
     out.add("LLDP-048\t*")
+    # the DCBX abuse rules are sequence-driven in the same way
+    for code, fn in (("LLDP-068", lambda: F.dcbx_conflict_frames()[1]),
+                     ("LLDP-069", lambda: F.dcbx_churn_frames(1)[0])):
+        out.add("%s\t%s" % (code, W.parse_ethernet(fn()).src))
+    # The churn source ALSO conflicts with the two conflict sources, because
+    # the lab replays both sequences into one sensor and all three advertise
+    # different DCB config. That is the rule working, not a stray — declared
+    # rather than filtered out, so the expectation matches the wire.
+    out.add("LLDP-068\t%s" % W.parse_ethernet(F.dcbx_churn_frames(1)[0]).src)
     return sorted(out)
 
 
@@ -102,7 +122,8 @@ def lab_codes() -> List[str]:
     return sorted(
         set(F.MALFORMED_BUILDERS)
         | set(F.VENDOR_BUILDERS)
-        | {"LLDP-048", "LLDP-025", "LLDP-026", "LLDP-049"}
+        | {"LLDP-048", "LLDP-025", "LLDP-026", "LLDP-049",
+           "LLDP-068", "LLDP-069"}
     )
 
 
@@ -327,11 +348,33 @@ def s_clean_set(c: Checker) -> None:
     for b in F.BENIGN_BUILDERS:
         got = codes_for(b())
         c.eq(got, [], "benign builder %s is silent" % b.__name__)
-    # and the whole clean set through ONE engine, in sequence, must stay silent
-    e = W.Engine(W.Config(flood_threshold=1000, flood_distinct_src=1000))
+    # The whole clean set through ONE engine. The volumetric thresholds are
+    # lifted, and that concession is now PINNED rather than quietly assumed:
+    # every fixture carries its own source MAC for per-fixture accountability,
+    # so the corpus has more distinct speakers than any real segment and trips
+    # the distinct-source rule. The lab caught this where this check could
+    # not, because this check had been raising the thresholds since before
+    # the corpus grew — so assert exactly what the concession is hiding.
+    e = W.Engine(W.Config.load(LAB_CLEAN_CONFIG))
     for b in F.BENIGN_BUILDERS:
         e.handle_frame(b())
     c.eq([r["code"] for r in e.findings], [], "clean set silent through one engine")
+
+    srcs = {W.parse_ethernet(b()).src for b in F.BENIGN_BUILDERS}
+    c.eq(len(srcs), len(F.BENIGN_BUILDERS),
+         "every benign fixture has its OWN source MAC")
+    c.ok(len(srcs) > W.Config().flood_distinct_src,
+         "the corpus really does exceed the default distinct-source threshold "
+         "(%d speakers vs %d), which is why the gate lifts it"
+         % (len(srcs), W.Config().flood_distinct_src))
+    e = W.Engine(W.Config())
+    for b in F.BENIGN_BUILDERS:
+        e.handle_frame(b())
+    got = sorted({r["code"] for r in e.findings})
+    c.eq(got, ["LLDP-048"],
+         "and under DEFAULT config the ONLY thing the corpus triggers is the "
+         "volumetric rule — no structural or screening finding hides behind "
+         "the lifted thresholds")
     # benign fixtures must not carry a screening identity
     for b in F.BENIGN_BUILDERS:
         raw = b()
@@ -364,6 +407,14 @@ FP_GATE_FRAMES = {
     "LLDP-052": F.benign_full,
     "LLDP-053": F.benign_with_fcs,
     "LLDP-054": F.benign_minimal,
+    "LLDP-060": F.benign_dcbx_ieee,
+    "LLDP-061": F.benign_dcbx_ieee,
+    "LLDP-062": F.benign_dcbx_ieee,
+    "LLDP-063": F.benign_dcbx_ieee,
+    "LLDP-064": F.benign_dcbx_ieee,
+    "LLDP-065": F.benign_dcbx_ieee,
+    "LLDP-066": F.benign_dcbx_ieee,
+    "LLDP-067": F.benign_dcbx_cee,
 }
 
 
@@ -677,6 +728,206 @@ def s_thresholds(c: Checker) -> None:
     loose = W.Config(max_org_specific=500)
     c.eq(codes_for(F.mal_org_oversized_unknown_oui(), loose), [],
          "a loosened org ceiling silences the oversized fixture")
+
+    c.sect("dcbx-ground-truth")
+    # THE TWO BENIGN DCBX FRAMES WERE VERIFIED BYTE FOR BYTE AGAINST
+    # WIRESHARK 4.2.2's INDEPENDENT DCBX DISSECTOR — zero malformed
+    # indications, every field read back as intended. scapy has NO DCBX
+    # dissector at all (only an opaque LLDPDUGenericOrganisationSpecific),
+    # so the usual cross-check tier cannot reach inside these TLVs; tshark
+    # is the oracle instead, in lldpwatch_dcbx_xcheck.py.
+    for fn in (F.benign_dcbx_ieee, F.benign_dcbx_cee):
+        c.eq(codes_for(fn()), [], "ground-truth %s is silent" % fn.__name__)
+    w = W.walk_tlvs(W.parse_ethernet(F.benign_dcbx_ieee()).payload)
+    orgs = [t for t in w.tlvs if t.type == 127]
+    c.eq(len(orgs), 4, "the IEEE ground-truth frame carries 4 DCBX TLVs")
+    c.eq([t.length for t in orgs], [25, 25, 6, 8],
+         "and their lengths are the pinned 802.1Qaz sizes")
+    c.eq(sorted(t.value[3] for t in orgs), [9, 10, 11, 12],
+         "ETS-Config, ETS-Recommendation, PFC and Application Priority")
+
+    c.sect("dcbx-encoding-traps")
+    # The two encodings that the specification alone would have got wrong,
+    # both pinned against the dissector. They are DIFFERENT from each other,
+    # which is the trap: one rule for both is the mistake.
+    #
+    # (1) ETS Max-TCs is 3 bits and the value 0 ENCODES 8.
+    c.eq(codes_for(F.frame(F.mandatory() + [F.t_ets_config(maxtc=0), F.t_end()],
+                           pad=False)), [],
+         "ETS max-TC raw 0 means EIGHT traffic classes and is silent")
+    c.eq(codes_for(F.frame(F.mandatory() + [F.t_ets_config(maxtc=8 & 0x07),
+                                            F.t_end()], pad=False)), [],
+         "raw 0 is the only encoding of 8; there is no literal 8")
+    for raw in (1, 2, 3):
+        got = codes_for(F.frame(F.mandatory() + [F.t_ets_config(maxtc=raw),
+                                                 F.t_end()], pad=False))
+        c.eq(got, ["LLDP-062"],
+             "ETS max-TC raw %d really does mean %d classes, so the default "
+             "priority map overruns it" % (raw, raw))
+    # (2) PFC capability is 4 bits and 8 ENCODES 8.
+    c.eq(codes_for(F.frame(F.mandatory() + [F.t_pfc(cap=8, enable=0xFF),
+                                            F.t_end()], pad=False)), [],
+         "PFC cap 8 with all 8 priorities enabled is legal and silent")
+    c.eq(codes_for(F.frame(F.mandatory() + [F.t_pfc(cap=0, enable=0x00),
+                                            F.t_end()], pad=False)), [],
+         "PFC cap 0 means no lossless classes, not an error")
+
+    c.sect("dcbx-ets-bandwidth")
+    # 802.1Qaz requires the ETS-allocated classes to total exactly 100.
+    for total, bw in (
+        (100, bytes([25, 25, 0, 10, 10, 10, 10, 10])),
+        (100, bytes([100, 0, 0, 0, 0, 0, 0, 0])),
+        (90, bytes([25, 25, 0, 10, 10, 10, 10, 0])),
+        (110, bytes([35, 25, 0, 10, 10, 10, 10, 10])),
+        (0, bytes([0, 0, 0, 0, 0, 0, 0, 0])),
+    ):
+        raw = F.frame(F.mandatory() + [F.t_ets_config(bw=bw), F.t_end()],
+                      pad=False)
+        got = codes_for(raw)
+        if total == 100:
+            c.eq(got, [], "ETS bandwidth totalling 100 is silent")
+        else:
+            c.ok("LLDP-061" in got,
+                 "ETS bandwidth totalling %d fires LLDP-061" % total)
+    # bandwidth is summed over the ETS classes ONLY — a strict-priority class
+    # carrying 0 must not be counted in, and must not be counted out either
+    rec = first(c, W.Engine().handle_frame(F.mal_dcbx_ets_bw_sum()),
+                "ETS bandwidth", "LLDP-061")
+    c.eq(rec.get("ets_total"), 90, "the finding reports the real total")
+    c.ok("100" in rec.get("detail", ""), "and names the required total")
+
+    c.sect("dcbx-pfc")
+    for cap, enable, want in (
+        (8, 0x18, []), (2, 0x03, []), (2, 0xFF, ["LLDP-063"]),
+        (12, 0x00, ["LLDP-063"]), (15, 0x00, ["LLDP-063"]),
+        (0, 0xFF, []),
+    ):
+        raw = F.frame(F.mandatory() + [F.t_pfc(cap=cap, enable=enable),
+                                       F.t_end()], pad=False)
+        c.eq(codes_for(raw), want,
+             "PFC cap=%d enable=0x%02x" % (cap, enable))
+
+    c.sect("dcbx-cee")
+    c.eq(codes_for(F.benign_dcbx_cee()), [], "a well-formed CEE TLV is silent")
+    # the pinned CEE body sizes; the Priority Groups one is where the missing
+    # subtype octet was caught
+    c.eq(W.CEE_FIXED_BODY[W.CEE_PRIORITY_GROUPS], 17,
+         "CEE Priority Groups body is 17 octets, INCLUDING the subtype octet")
+    c.eq(W.CEE_FIXED_BODY[W.CEE_CONTROL], 10, "CEE Control body is 10 octets")
+    c.eq(W.CEE_FIXED_BODY[W.CEE_PFC], 6, "CEE PFC body is 6 octets")
+    c.eq(W.CEE_FEATURE_HDR, 4,
+         "a CEE feature header is 4 octets: oper, max, flags, SUBTYPE")
+    for n in (16, 18):
+        body = bytes([0, 0, 0xE0, 0x00]) + b"\x00" * (n - 4)
+        raw = F.frame(F.mandatory()
+                      + [F.t_cee(subtlvs=(F.cee_control(),
+                                          F.cee_subtlv(2, body))), F.t_end()],
+                      pad=False)
+        c.eq(codes_for(raw), ["LLDP-067"],
+             "a %d-octet CEE Priority Groups body fires" % n)
+
+    c.sect("dcbx-cee-rule-separation")
+    # The fixed-length rule and the bounds rule must each be reachable on
+    # their own. A fixture using a FIXED-length sub-TLV type to test the
+    # BOUNDS walk is caught by the length rule first, so disabling the bounds
+    # check changes nothing — measured, it escaped all three tiers.
+    e = W.Engine()
+    rec = first(c, e.handle_frame(F.mal_dcbx_cee_unknown_overrun()),
+                "cee unknown-type overrun", "LLDP-067")
+    c.ok("only" in rec.get("detail", "") and "remain" in rec.get("detail", ""),
+         "the unknown-type overrun is caught by the BOUNDS rule, which is the "
+         "one that reports how many octets actually remain")
+    rec2 = first(c, W.Engine().handle_frame(F.mal_dcbx_cee_pg_wrong_len()),
+                 "cee pg wrong length", "LLDP-067")
+    c.ok("pinned layout" in rec2.get("detail", ""),
+         "while a fixed-size feature is caught by the LENGTH rule")
+    c.ok(rec.get("detail") != rec2.get("detail"),
+         "the two rules produce distinguishable findings")
+    c.ok(W.CEE_FIXED_BODY.get(4) is None,
+         "the Application feature has no pinned length, which is what makes "
+         "it able to reach the bounds walk")
+
+    c.sect("dcbx-version-conflict")
+    c.eq(codes_for(F.mal_dcbx_version_conflict()), ["LLDP-066"],
+         "IEEE and CEE in one LLDPDU fires LLDP-066")
+    c.eq(codes_for(F.benign_dcbx_ieee()), [], "IEEE alone is silent")
+    c.eq(codes_for(F.benign_dcbx_cee()), [], "CEE alone is silent")
+
+    c.sect("dcbx-abuse-sequences")
+    # Segment-scoped state this engine accumulated during its own run, the
+    # way the flood counter does — NOT an operator baseline. So these stay in
+    # the grab-and-go core and the 24h baseline cap never comes into it.
+    # LLDP-068 IS OPT-IN. Default-off is not caution, it is correctness:
+    # on a SPAN port aggregating many links, every mirrored link carries its
+    # own legitimately different DCB config, so an always-on rule fires on
+    # ordinary data-centre traffic. The clean-set contract caught exactly
+    # that — the two ground-truth frames conflicted with each other.
+    c.eq(W.Config().dcbx_conflict_enforce, False,
+         "DCBX conflict detection is OFF by default")
+    seq = F.dcbx_conflict_frames()
+    e = W.Engine(W.Config())
+    for i, raw in enumerate(seq):
+        e.handle_frame(raw, ts=1000.0 + i)
+    c.eq([r["code"] for r in e.findings], [],
+         "conflicting speakers are silent with the rule off")
+    cfg68 = W.Config.load(LAB_DCBX_CONFIG)
+    e = W.Engine(cfg68)
+    c.eq([r["code"] for r in e.handle_frame(seq[0], ts=1000.0)], [],
+         "the first DCBX speaker on a segment is not a finding")
+    c.eq([r["code"] for r in e.handle_frame(seq[1], ts=1001.0)], ["LLDP-068"],
+         "a second speaker with CONFLICTING config fires LLDP-068 when on")
+    # two speakers advertising the SAME config must stay silent even with
+    # the rule enabled: more than one DCBX speaker is legal
+    e = W.Engine(cfg68)
+    same = F.frame(F.mandatory() + [F.t_pfc(cap=8, enable=0x18), F.t_end()],
+                   src="02:00:00:00:dc:41", pad=False)
+    same2 = F.frame(F.mandatory() + [F.t_pfc(cap=8, enable=0x18), F.t_end()],
+                    src="02:00:00:00:dc:42", pad=False)
+    e.handle_frame(same, ts=1000.0)
+    c.eq([r["code"] for r in e.handle_frame(same2, ts=1001.0)], [],
+         "two speakers agreeing on config is NOT a finding even when on")
+
+    cfg = W.Config(dcbx_churn_threshold=2, dcbx_churn_window=60.0)
+    e = W.Engine(cfg)
+    fired = None
+    for i, raw in enumerate(F.dcbx_churn_frames(8)):
+        got = [r["code"] for r in e.handle_frame(raw, ts=2000.0 + i)]
+        if "LLDP-069" in got and fired is None:
+            fired = i
+    c.eq(fired, 3, "churn fires once the change count passes the threshold")
+    # a stable advertiser never churns, however many frames it sends
+    e = W.Engine(cfg)
+    stable = F.frame(F.mandatory() + [F.t_pfc(), F.t_end()],
+                     src="02:00:00:00:dc:50", pad=False)
+    for i in range(40):
+        e.handle_frame(stable, ts=3000.0 + i)
+    c.eq([r["code"] for r in e.findings], [],
+         "a stable DCBX advertiser is silent no matter how often it repeats")
+    # changes spread beyond the window do not accumulate
+    e = W.Engine(cfg)
+    for i, raw in enumerate(F.dcbx_churn_frames(8)):
+        e.handle_frame(raw, ts=4000.0 + i * 61.0)
+    c.eq([r["code"] for r in e.findings], [],
+         "config changes outside the churn window never accumulate")
+
+    c.sect("dcbx-ceiling")
+    lim = W.Config().max_dcbx_tlv
+    c.eq(lim, 256, "the documented DCBX ceiling is the real default")
+    c.ok(lim < 512,
+         "the ceiling is REACHABLE: the 9-bit TLV length field caps at 511, "
+         "so a 512-octet ceiling would be a branch no frame can enter")
+    c.eq(codes_for(F.mal_dcbx_oversized()), ["LLDP-060"],
+         "an over-ceiling DCBX TLV fires")
+    # a DCBX TLV is dispatched before the generic org-specific rules, so the
+    # general 128-octet ceiling must NOT clip a legitimately large one
+    big = F.t_app(entries=tuple((1, 1, 0x8900 + i) for i in range(45)))
+    raw = F.frame(F.mandatory() + [big, F.t_end()], pad=False)
+    c.ok(len(big) - 2 > W.Config().max_org_specific,
+         "the fixture really is over the GENERAL org ceiling (%d octets)"
+         % (len(big) - 2))
+    c.eq(codes_for(raw), [],
+         "a large but legal Application Priority table is NOT clipped by the "
+         "general org ceiling, because DCBX owns its own bound")
 
     c.sect("threshold-config")
     tight = W.Config(max_system_desc=16)
@@ -1321,9 +1572,9 @@ def s_registry(c: Checker) -> None:
     for _, (_, _, g) in W.FINDINGS.items():
         groups[g] = groups.get(g, 0) + 1
     c.eq(groups.get("screening"), 15, "15 screening codes")
-    c.eq(groups.get("structural"), 13, "13 structural codes")
-    c.eq(groups.get("abuse"), 2, "2 abuse codes")
-    c.eq(len(W.FINDINGS), 30, "30 codes in total")
+    c.eq(groups.get("structural"), 21, "21 structural codes")
+    c.eq(groups.get("abuse"), 4, "4 abuse codes")
+    c.eq(len(W.FINDINGS), 40, "40 codes in total")
     c.ok("posture" not in groups, "no posture/disclosure group exists")
 
     c.sect("coverage")
@@ -1351,6 +1602,10 @@ def s_registry(c: Checker) -> None:
     e = W.Engine()
     for i, raw in enumerate(F.flood_frames(30)):
         e.handle_frame(raw, ts=11000.0 + i * 0.05)
+    exercised |= {r["code"] for r in e.findings}
+    e = W.Engine(W.Config.load(LAB_DCBX_CONFIG))
+    for i, raw in enumerate(F.dcbx_conflict_frames() + F.dcbx_churn_frames(8)):
+        e.handle_frame(raw, ts=12000.0 + i)
     exercised |= {r["code"] for r in e.findings}
     missing = sorted(set(W.FINDINGS) - exercised)
     c.eq(missing, [], "every code is exercised by a fixture in this tier")
@@ -1396,6 +1651,10 @@ def s_registry(c: Checker) -> None:
             produced.add("%s\t%s" % (r["code"], r["src"]))
     for r in W.Engine(W.Config.load(LAB_ENFORCE_CONFIG)).handle_frame(LAB_FORGED()):
         produced.add("%s\t%s" % (r["code"], r["src"]))
+    e_d = W.Engine(W.Config.load(LAB_DCBX_CONFIG))
+    for i, raw in enumerate(F.dcbx_conflict_frames() + F.dcbx_churn_frames(8)):
+        for r in e_d.handle_frame(raw, ts=13000.0 + i):
+            produced.add("%s\t%s" % (r["code"], r["src"]))
     produced.add("LLDP-048\t*")
     for p in pairs:
         c.ok(p in produced,
@@ -1574,10 +1833,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="write the version-floor screening pcap here")
     ap.add_argument("--emit-enforce-pcap", default=None,
                     help="write the forged-neighbour pcap here")
+    ap.add_argument("--emit-dcbx-pcap", default=None,
+                    help="write the DCBX conflict+churn sequence pcap here")
     ap.add_argument("--emit-canary-pcap", default=None,
                     help="write the single-frame readiness canary pcap here")
     ap.add_argument("--print-canary-src", action="store_true",
                     help="print the canary frame's source MAC")
+    ap.add_argument("--print-clean-config", action="store_true",
+                    help="print the JSON config the benign FP gate uses")
+    ap.add_argument("--print-dcbx-config", action="store_true",
+                    help="print the JSON config the DCBX lab phase uses")
     ap.add_argument("--print-lab-config", action="store_true",
                     help="print the JSON config the screening lab phase uses")
     ap.add_argument("--print-lab-codes", action="store_true")
@@ -1601,12 +1866,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LAB_UNPARSEABLE(),
     ]
     enforce = [LAB_FORGED()]
+    dcbx = F.dcbx_conflict_frames() + F.dcbx_churn_frames(8)
 
     if args.print_canary_src:
         print(CANARY_SRC)
         return 0
     if args.print_lab_config:
         print(json.dumps(LAB_SCREEN_CONFIG, indent=2, sort_keys=True))
+        return 0
+    if args.print_clean_config:
+        print(json.dumps(LAB_CLEAN_CONFIG, indent=2, sort_keys=True))
+        return 0
+    if args.print_dcbx_config:
+        print(json.dumps(LAB_DCBX_CONFIG, indent=2, sort_keys=True))
         return 0
     if args.print_lab_pairs:
         for p in lab_pairs():
@@ -1620,6 +1892,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for path, frames in ((args.emit_pcap, attack), (args.emit_clean_pcap, clean),
                          (args.emit_screen_pcap, screen),
                          (args.emit_enforce_pcap, enforce),
+                         (args.emit_dcbx_pcap, dcbx),
                          (args.emit_canary_pcap, [canary_frame()])):
         if path:
             F.write_pcap(path, frames)

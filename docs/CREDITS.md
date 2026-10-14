@@ -202,7 +202,10 @@ behind them is Solarflere's work.
   FortiSwitchAX OUI-overflow RCE **CVE-2026-22627**), TRENDnet (CVE-2021-33315 / 33316 /
   33317), QNAP QSS (CVE-2021-28801), PAN-OS (CVE-2025-0116) and SonicWall SWS
   (CVE-2021-20024). It detects the malformed frame structurally, whichever stack it targets.
-  The advertised-version screen is labelled a note, not a verdict.
+  The advertised-version screen is labelled a note, not a verdict. v3 adds a **DCBX** class
+  (Data Center Bridging eXchange, `LLDP-060`..`069`) — 40 codes now — forged ETS bandwidth /
+  PFC / application-priority negotiation on the lossless fabric; there is no DCBX CVE, so it
+  earns its place on protocol abuse, not the corpus.
 - **The Cisco discovery plane** — **CDP Watch** screens 25 CDP-plane CVEs: the Armis **CDPwn**
   five (CVE-2020-3110 / 3111 / 3118 / 3119 / 3120) widened by the **LCDPwn** successor and its
   cross-vendor arm — the Video Surveillance 7000/8000 camera set (CVE-2020-3505 / 3506 / 3507 /

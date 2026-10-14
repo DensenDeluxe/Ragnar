@@ -370,6 +370,111 @@ def vendor_panos(src: str = "02:00:00:00:0c:0a") -> bytes:
     )
 
 
+# --------------------------------------------------------------------------
+# DCBX fixtures.
+#
+# The two benign builders below are the frames that were verified byte for
+# byte against Wireshark 4.2.2's independent DCBX dissector — zero malformed
+# indications, every field read back as intended. They are the ground truth
+# the rest of the DCBX work was written against, not hand-waved examples.
+# --------------------------------------------------------------------------
+
+OUI_CEE = b"\x00\x1b\x21"
+
+ETS_PRIO_TABLE = bytes([0x01, 0x23, 0x45, 0x67])   # prio n -> TC n
+ETS_BW_100 = bytes([25, 25, 0, 10, 10, 10, 10, 10])  # sums to 100 over ETS TCs
+ETS_TSA_OK = bytes([2, 2, 0, 2, 2, 2, 2, 2])         # TC2 strict, rest ETS
+
+
+def t_ets_config(maxtc: int = 0, willing: int = 1,
+                 prio: bytes = None, bw: bytes = None, tsa: bytes = None,
+                 declared: Optional[int] = None) -> bytes:
+    """802.1Qaz ETS Configuration (subtype 9), 25 octets.
+
+    maxtc is the RAW 3-bit field: 0 encodes 8 traffic classes.
+    """
+    b = (bytes([(willing << 7) | (maxtc & 0x07)])
+         + (ETS_PRIO_TABLE if prio is None else prio)
+         + (ETS_BW_100 if bw is None else bw)
+         + (ETS_TSA_OK if tsa is None else tsa))
+    return t_org(OUI_8021, 9, b, declared)
+
+
+def t_ets_recommend(prio: bytes = None, bw: bytes = None,
+                    tsa: bytes = None) -> bytes:
+    return t_org(OUI_8021, 10,
+                 bytes([0])
+                 + (ETS_PRIO_TABLE if prio is None else prio)
+                 + (ETS_BW_100 if bw is None else bw)
+                 + (ETS_TSA_OK if tsa is None else tsa))
+
+
+def t_pfc(cap: int = 8, enable: int = 0x18, willing: int = 1,
+          declared: Optional[int] = None) -> bytes:
+    """802.1Qaz PFC Configuration (subtype 11), 6 octets.
+
+    cap is a 4-bit field where 8 encodes 8 — a DIFFERENT encoding from the
+    ETS max-TC field above.
+    """
+    return t_org(OUI_8021, 11,
+                 bytes([(willing << 7) | (cap & 0x0F), enable & 0xFF]),
+                 declared)
+
+
+def t_app(entries=((1, 1, 0x8906),), declared: Optional[int] = None,
+          raw_table: Optional[bytes] = None) -> bytes:
+    """802.1Qaz Application Priority (subtype 12). Entries are
+    (priority, selector, protocol id), 3 octets each."""
+    if raw_table is None:
+        raw_table = b"".join(
+            bytes([((p & 0x07) << 5) | (s & 0x07)]) + struct.pack("!H", pid)
+            for p, s, pid in entries)
+    return t_org(OUI_8021, 12, bytes([0]) + raw_table, declared)
+
+
+def cee_subtlv(st: int, body: bytes, declared: Optional[int] = None) -> bytes:
+    ln = len(body) if declared is None else declared
+    return struct.pack("!H", ((st & 0x7F) << 9) | (ln & 0x1FF)) + body
+
+
+def cee_control(seq: int = 1, ack: int = 0) -> bytes:
+    return cee_subtlv(1, bytes([0, 0]) + struct.pack("!I", seq)
+                      + struct.pack("!I", ack))
+
+
+def cee_pg(bw: bytes = None, numtc: int = 8) -> bytes:
+    # oper, max, flags, SUBTYPE, pgid(4), bw(8), numTC(1) — the subtype octet
+    # is the one the dissector caught missing.
+    return cee_subtlv(2, bytes([0, 0, 0xE0, 0x00]) + ETS_PRIO_TABLE
+                      + (ETS_BW_100 if bw is None else bw) + bytes([numtc]))
+
+
+def cee_pfc(enable: int = 0x18, numtc: int = 8) -> bytes:
+    return cee_subtlv(3, bytes([0, 0, 0xE0, 0x00]) + bytes([enable, numtc]))
+
+
+def t_cee(subtlvs: Sequence[bytes] = None,
+          declared: Optional[int] = None) -> bytes:
+    if subtlvs is None:
+        subtlvs = (cee_control(), cee_pg(), cee_pfc())
+    return t_org(OUI_CEE, 2, b"".join(subtlvs), declared)
+
+
+def benign_dcbx_ieee(src: str = "02:00:00:00:dc:b1") -> bytes:
+    """VERIFIED against Wireshark: ETS-Config + ETS-Recommendation + PFC +
+    Application Priority, all fields read back correctly, no malformed."""
+    return frame(
+        mandatory() + [t_ets_config(), t_ets_recommend(), t_pfc(), t_app(),
+                       t_end()],
+        src=src, pad=False,
+    )
+
+
+def benign_dcbx_cee(src: str = "02:00:00:00:dc:b2") -> bytes:
+    """VERIFIED against Wireshark: CEE 1.01 Control + Priority Groups + PFC."""
+    return frame(mandatory() + [t_cee(), t_end()], src=src, pad=False)
+
+
 def vendor_cisco_sb220(src: str = "02:00:00:00:0c:0d") -> bytes:
     return frame(
         mandatory()
@@ -654,6 +759,191 @@ def mal_org_oversized_known_oui_unknown_sub(src: str = "02:00:00:00:04:1a") -> b
     )
 
 
+# --- DCBX malformed fixtures (structural only) ----------------------------
+
+def mal_dcbx_ets_wrong_len(src: str = "02:00:00:00:dc:01") -> bytes:
+    """LLDP-060 — ETS Configuration that really is 20 octets; 802.1Qaz fixes
+    it at 25.
+
+    Built with a genuinely SHORT BODY, not a shortened length field. Using
+    `declared=20` over a 21-octet body left one octet stranded outside the
+    TLV, which the walker then read as a stray header and cascaded into three
+    unrelated codes — a fixture testing four rules instead of one.
+    """
+    short = (bytes([0x88]) + ETS_PRIO_TABLE + ETS_BW_100 + bytes([2, 2, 0]))
+    return frame(mandatory() + [t_org(OUI_8021, 9, short), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_oversized(src: str = "02:00:00:00:dc:02") -> bytes:
+    """LLDP-060 — a 300-octet CEE DCBX TLV, over the 256-octet ceiling."""
+    filler = cee_subtlv(9, b"\x00" * 280)
+    return frame(mandatory() + [t_cee(subtlvs=(cee_control(), filler)),
+                                t_end()], src=src, pad=False)
+
+
+def mal_dcbx_ets_bw_sum(src: str = "02:00:00:00:dc:03") -> bytes:
+    """LLDP-061 — ETS bandwidth totals 90% across its ETS traffic classes.
+
+    802.1Qaz requires exactly 100. The single best self-marking signal that
+    an ETS advertisement was not produced by a conforming scheduler.
+    """
+    return frame(mandatory()
+                 + [t_ets_config(bw=bytes([25, 25, 0, 10, 10, 10, 10, 0])),
+                    t_end()], src=src, pad=False)
+
+
+def mal_dcbx_tsa_illegal(src: str = "02:00:00:00:dc:04") -> bytes:
+    """LLDP-062 — TSA value 7, which 802.1Qaz does not define. Bandwidth is
+    rebalanced so the ETS total stays exactly 100 and this fixture tests one
+    rule, not two."""
+    return frame(mandatory()
+                 + [t_ets_config(bw=bytes([0, 30, 0, 14, 14, 14, 14, 14]),
+                                 tsa=bytes([7, 2, 0, 2, 2, 2, 2, 2])),
+                    t_end()], src=src, pad=False)
+
+
+def mal_dcbx_prio_beyond_tc(src: str = "02:00:00:00:dc:05") -> bytes:
+    """LLDP-062 — priorities mapped onto TC 4-7 while advertising 4 traffic
+    classes; a receiver indexing its TC table by that value reads past it."""
+    return frame(mandatory() + [t_ets_config(maxtc=4), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_bw_on_strict(src: str = "02:00:00:00:dc:06") -> bytes:
+    """LLDP-062 — bandwidth assigned to a strict-priority traffic class,
+    where a bandwidth share has no meaning. ETS total still 100."""
+    return frame(mandatory()
+                 + [t_ets_config(bw=bytes([25, 25, 10, 10, 10, 10, 10, 10])),
+                    t_end()], src=src, pad=False)
+
+
+def mal_dcbx_pfc_cap_high(src: str = "02:00:00:00:dc:07") -> bytes:
+    """LLDP-063 — PFC capability 12; the field cannot exceed 8."""
+    return frame(mandatory() + [t_pfc(cap=12), t_end()], src=src, pad=False)
+
+
+def mal_dcbx_pfc_over_cap(src: str = "02:00:00:00:dc:08") -> bytes:
+    """LLDP-063 — PFC enabled on all 8 priorities while advertising capacity
+    for 2. Enabling more lossless classes than the device can honour is the
+    forged-PFC shape that starves a traffic class."""
+    return frame(mandatory() + [t_pfc(cap=2, enable=0xFF), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_app_truncated(src: str = "02:00:00:00:dc:09") -> bytes:
+    """LLDP-064 — Application Priority table truncated mid-entry."""
+    return frame(mandatory() + [t_app(raw_table=b"\x21\x89\x06\x21"),
+                                t_end()], src=src, pad=False)
+
+
+def mal_dcbx_app_reserved_sel(src: str = "02:00:00:00:dc:0a") -> bytes:
+    """LLDP-064 — Application selector 6, a reserved value."""
+    return frame(mandatory() + [t_app(entries=((1, 6, 0x8906),)), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_duplicate_ets(src: str = "02:00:00:00:dc:0b") -> bytes:
+    """LLDP-065 — two ETS Configuration TLVs; at most one is permitted and
+    which copy a receiver keeps is implementation-defined."""
+    return frame(mandatory() + [t_ets_config(), t_ets_config(), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_version_conflict(src: str = "02:00:00:00:dc:0c") -> bytes:
+    """LLDP-066 — IEEE 802.1Qaz and CEE DCBX advertised together."""
+    return frame(mandatory() + [t_ets_config(), t_cee(), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_cee_overrun(src: str = "02:00:00:00:dc:0d") -> bytes:
+    """LLDP-067 — a CEE sub-TLV declaring more octets than the enclosing
+    TLV holds."""
+    return frame(mandatory()
+                 + [t_cee(subtlvs=(cee_control(),
+                                   cee_subtlv(3, b"\x00" * 6, declared=400))),
+                    t_end()], src=src, pad=False)
+
+
+def mal_dcbx_cee_unknown_overrun(src: str = "02:00:00:00:dc:11") -> bytes:
+    """LLDP-067 — a sub-TLV with NO pinned length whose declared size runs
+    past the enclosing TLV.
+
+    Exists because mal_dcbx_cee_overrun could not reach the bounds check:
+    it used the PFC type, which has a fixed length, so the fixed-length rule
+    fired first and disabling the bounds check changed nothing in any tier
+    (suite LESSON AF). The Application feature has no pinned size, so this
+    frame can only be caught by the bounds walk.
+    """
+    return frame(mandatory()
+                 + [t_cee(subtlvs=(cee_control(),
+                                   cee_subtlv(4, b"\x00\x00\xE0\x00",
+                                              declared=400))),
+                    t_end()], src=src, pad=False)
+
+
+def mal_dcbx_cee_pg_wrong_len(src: str = "02:00:00:00:dc:0e") -> bytes:
+    """LLDP-067 — Priority Groups sub-TLV one octet short of the pinned
+    17-octet layout. This is the exact shape the Wireshark cross-check caught
+    in the first draft, where the subtype octet had been omitted."""
+    short = cee_subtlv(2, bytes([0, 0, 0xE0, 0x00]) + ETS_PRIO_TABLE
+                       + ETS_BW_100)
+    return frame(mandatory() + [t_cee(subtlvs=(cee_control(), short)),
+                                t_end()], src=src, pad=False)
+
+
+def mal_dcbx_cee_empty(src: str = "02:00:00:00:dc:0f") -> bytes:
+    """LLDP-067 — CEE DCBX TLV with no sub-TLVs; Control is mandatory."""
+    return frame(mandatory() + [t_cee(subtlvs=()), t_end()],
+                 src=src, pad=False)
+
+
+def mal_dcbx_cee_stray_octet(src: str = "02:00:00:00:dc:10") -> bytes:
+    """LLDP-067 — a single stray octet where a 2-octet sub-TLV header must
+    begin."""
+    return frame(mandatory()
+                 + [t_org(OUI_CEE, 2, b"".join([cee_control()]) + b"\x01"),
+                    t_end()], src=src, pad=False)
+
+
+def dcbx_conflict_frames() -> List[bytes]:
+    """LLDP-068 — two neighbours on one segment advertising DIFFERENT PFC
+    configuration. Not merely two speakers, which is legal."""
+    return [
+        frame(mandatory() + [t_pfc(cap=8, enable=0x18), t_end()],
+              src="02:00:00:00:dc:21", pad=False),
+        frame(mandatory() + [t_pfc(cap=8, enable=0x03), t_end()],
+              src="02:00:00:00:dc:22", pad=False),
+    ]
+
+
+def dcbx_churn_frames(n: int = 6) -> List[bytes]:
+    """LLDP-069 — one source repeatedly re-advertising which priorities are
+    lossless: the observable half of a pause attack."""
+    out = []
+    for i in range(n):
+        out.append(frame(mandatory()
+                         + [t_pfc(cap=8, enable=0x18 if i % 2 else 0x03),
+                            t_end()],
+                         src="02:00:00:00:dc:30", pad=False))
+    return out
+
+
+DCBX_MALFORMED = {
+    "LLDP-060": (mal_dcbx_ets_wrong_len, mal_dcbx_oversized),
+    "LLDP-061": (mal_dcbx_ets_bw_sum,),
+    "LLDP-062": (mal_dcbx_tsa_illegal, mal_dcbx_prio_beyond_tc,
+                 mal_dcbx_bw_on_strict),
+    "LLDP-063": (mal_dcbx_pfc_cap_high, mal_dcbx_pfc_over_cap),
+    "LLDP-064": (mal_dcbx_app_truncated, mal_dcbx_app_reserved_sel),
+    "LLDP-065": (mal_dcbx_duplicate_ets,),
+    "LLDP-066": (mal_dcbx_version_conflict,),
+    "LLDP-067": (mal_dcbx_cee_overrun, mal_dcbx_cee_unknown_overrun,
+                 mal_dcbx_cee_pg_wrong_len, mal_dcbx_cee_empty,
+                 mal_dcbx_cee_stray_octet),
+}
+
+
 def mal_reserved_tlv_type(src: str = "02:00:00:00:04:16") -> bytes:
     """LLDP-052 — TLV type 64, inside the reserved 9-126 range."""
     return frame(mandatory() + [tlv(64, b"\x00\x01\x02"), t_end()], src=src)
@@ -675,6 +965,7 @@ def mal_no_end(src: str = "02:00:00:00:04:18") -> bytes:
 
 
 MALFORMED_BUILDERS = {
+    **DCBX_MALFORMED,
     "LLDP-040": (mal_length_overrun,),
     "LLDP-041": (mal_ttl_illegal, mal_stray_octet),
     "LLDP-042": (mal_missing_mandatory, mal_missing_chassis_id),
@@ -704,6 +995,7 @@ BENIGN_BUILDERS = (
     benign_minimal, benign_full, benign_full_v6, benign_tagged, benign_qinq,
     benign_med_phone, benign_long_banner, benign_with_fcs,
     benign_pad1, benign_pad2, benign_pad3,
+    benign_dcbx_ieee, benign_dcbx_cee,
 )
 
 VENDOR_BUILDERS = {

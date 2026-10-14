@@ -2417,10 +2417,11 @@ crashes or reloads the neighbour's LLDP parser. This is separate from
 Juniper's `l2cpd` also drives STP/RSTP/MSTP, MVRP, ERP and LACP, so an LLDP crash there
 reinitialises spanning tree and flaps aggregation.
 
-There are 30 finding codes (`LLDP-nnn`) in three classes. There is **no disclosure-posture
-class**: a neighbour advertising its name and version over LLDP is how the protocol works.
+There are 40 finding codes (`LLDP-nnn`) in four classes (v3 added the DCBX class). There is
+**no disclosure-posture class**: a neighbour advertising its name and version over LLDP is how
+the protocol works.
 
-- **Class A: structural (13 codes, vendor-agnostic, no baseline).** This is where detection
+- **Class A: structural (21 codes, vendor-agnostic, no baseline).** This is where detection
   happens. The malformed frame looks the same whichever stack it targets.
   - `LLDP-040` *critical*: a TLV length past the end of the frame.
   - `LLDP-041`: an illegal fixed length (End / TTL / System Capabilities), or a stray header octet.
@@ -2447,7 +2448,17 @@ class**: a neighbour advertising its name and version over LLDP is how the proto
   only signal for the memory-leak CVEs (CVE-2020-27827, CVE-2023-20089, CVE-2021-26111),
   which have no single-frame shape. `LLDP-049` (forged neighbour) needs a baseline: it is
   **off** until you click **Trust current**, which trusts the neighbours from the last scan
-  (kept in `data/lldp_watch.json`). **Reset** turns it off again.
+  (kept in `data/lldp_watch.json`). **Reset** turns it off again. `LLDP-068`/`LLDP-069` add
+  DCBX-specific abuse (feature churn / a flapping willing-bit).
+- **Class D: DCBX (`LLDP-060`..`069`, v3).** DCBX (Data Center Bridging eXchange) rides inside
+  LLDP as organizationally-specific TLVs and negotiates the lossless fabric — ETS bandwidth,
+  PFC priorities and the application-priority table. **There is no DCBX CVE**; this is
+  protocol-abuse detection on a fabric where a forged negotiation starves or un-protects a
+  priority. It flags a malformed DCBX TLV (`LLDP-060`), an ETS bandwidth that doesn't sum to
+  100% (`LLDP-061`) or an illegal ETS/TSA field (`LLDP-062`), an invalid PFC field
+  (`LLDP-063`), a malformed application table (`LLDP-064`), a duplicate feature TLV
+  (`LLDP-065`), an IEEE-vs-CEE version conflict (`LLDP-066`) and a malformed CEE sub-TLV
+  (`LLDP-067`). It is point-to-point, so one tap sees one neighbour's advertisement.
 
 The capture runs `tcpdump` to a pcap and walks raw frames, with no scapy on this path. It is
 promiscuous because the LLDP group MACs are multicasts the host never joins. It is
@@ -2473,12 +2484,13 @@ deliberately not named here: CVE-2023-41910 (lldpd's **CDP** decoder) and CVE-20
   `GET/POST /api/net/lldp-baseline` `{action: trust|reset}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py lldp-watch [--iface I] [--seconds N] [--pcap FILE]
   [--json]` (`--pcap` replays a file; the baseline is not used or saved)
-- Self-test: suite `lldp` (41 scenarios). It covers every malformed fixture per code, the
-  benign FP set, screening, flood, the forged-neighbour baseline, dual-stack, and the
-  module's own **2117-check conformance** and **285-check scapy cross-check** tiers, run
-  out-of-process.
+- Self-test: suite `lldp` (50 scenarios). It covers every malformed fixture per code (DCBX
+  included), the benign FP set, screening, flood, the forged-neighbour baseline, dual-stack,
+  and the module's own **2568-check conformance** and **338-check scapy cross-check** tiers,
+  run out-of-process — plus, with `tshark` present, the **130-check DCBX Wireshark-dissector
+  cross-check**.
 - Vendored engine (Solarflere): `python/lldpwatch.py`, `lldpwatch_frames.py`,
-  `lldpwatch_conformance.py`, `lldpwatch_scapy_xcheck.py`. Validated live by replaying
+  `lldpwatch_conformance.py`, `lldpwatch_scapy_xcheck.py`, `lldpwatch_dcbx_xcheck.py`. Validated live by replaying
   malformed and vendor frames with `tcpreplay` over a veth pair in a sealed netns: the
   structural, flood and screening codes fire through the capture path, the four new
   `LLDP-031`..`034` families included, and CVE-2026-22627 is caught both structurally (the

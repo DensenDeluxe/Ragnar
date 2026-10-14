@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-10-14
+
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): LLDP Watch v3 — DCBX class (+10 codes, Data Center Bridging abuse)
+*branch `feature/lldp-watch-v3`*
+
+- **Re-vendored the Solarflere `lldpwatch` engine to v3** (`python/lldpwatch.py` 77→98 KB, `lldpwatch_frames.py`, `lldpwatch_conformance.py`; the scapy cross-check is byte-identical and unchanged) and added the new **`lldpwatch_dcbx_xcheck.py`** tier. The in-app `do_lldp_watch` adapter is generic over the engine, so the new codes flow through unchanged.
+- **40 finding codes now (was 30), in four classes** — new **Class D: DCBX** (Data Center Bridging eXchange, `LLDP-060`..`069`): DCBX rides inside LLDP as org-specific TLVs and negotiates the lossless fabric (ETS bandwidth, PFC priorities, application-priority table). It flags malformed DCBX TLVs, an ETS bandwidth that doesn't sum to 100%, illegal ETS/TSA or PFC fields, a malformed app table, duplicate features, an IEEE-vs-CEE version conflict, a malformed CEE sub-TLV, and DCBX-specific abuse (feature churn / flapping willing-bit). The split is +8 structural, +2 abuse. **There is no DCBX CVE**, so the CVE index is unchanged at **342 named / 299 detected**.
+- **Self-test:** the `lldp` suite grows to **50 scenarios** (the DCBX codes are auto-covered by the generic malformed-fixture loop), and runs the module's own **2568-check conformance** and **338-check scapy cross-check** out of process, plus — with `tshark` present — the **130-check DCBX Wireshark-dissector cross-check**. The benign FP-set is now spaced 1 s/frame so its 13 distinct sources don't trip the 12-distinct-source flood threshold.
+- **Live-validated** in a sealed netns: malformed DCBX frames replayed with `tcpreplay` fire `LLDP-060`/`062`/`063`/`067` through the real `tcpdump` capture path, verdict `attack`.
+- **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch) (DCBX class, 40 codes, tiers), [CREDITS.md](CREDITS.md).
+
 ### 2026-10-13
 
 #### fix(kiosk): turning the kiosk off returns to the CLI instead of a black screen
