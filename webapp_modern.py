@@ -16425,15 +16425,14 @@ def _adsb_upload_summary(day, rec, count):
     state = rec.get('state')
     head = f'ADS-B {nice} · {count} aircraft today'
     if state == 'ok':
-        extra = []
-        if rec.get('aircraft') is not None:
-            extra.append(f"{rec['aircraft']} accepted")
+        credited = rec.get('aircraft')
+        extra = [f"{credited} credited" if credited else "0 credited (none new today)"]
         if rec.get('exp'):
             extra.append(f"+{rec['exp']} XP")
         if rec.get('currency'):
             extra.append(f"+{rec['currency']} currency")
         title = 'Ragnar — ADS-B uploaded'
-        body = head + ('\n' + ', '.join(extra) if extra else '')
+        body = head + '\n' + ', '.join(extra)
     elif state == 'duplicate':
         title = 'Ragnar — ADS-B uploaded'
         body = head + '\nAlready on Wardrift (no new credit)'
@@ -16463,10 +16462,15 @@ def _adsb_wardrift_follow(day, upload_id, token, notify):
             continue
         if status == 'succeeded':
             res = body.get('result') or {}
+            cap = res.get('capture') or {}
+            credited = int(res.get('adsb_count') or 0)          # eligible aircraft that counted today
+            detected = cap.get('aircraft_count')                # parsed from the file
+            if detected is None:
+                detected = res.get('accepted_signals')
             result = _adsb_record(day, state='ok', upload_id=upload_id,
-                                  aircraft=res.get('aircraft_count', res.get('adsb_count')),
-                                  exp=res.get('adsb_exp') or res.get('awarded_exp') or 0,
-                                  currency=res.get('adsb_currency') or res.get('awarded_currency') or 0,
+                                  aircraft=credited, detected=detected,
+                                  exp=int(res.get('adsb_exp') or res.get('awarded_exp') or 0),
+                                  currency=int(res.get('adsb_currency') or res.get('awarded_currency') or 0),
                                   message='')
         elif status == 'failed':
             result = _adsb_record(day, state='failed', upload_id=upload_id,
