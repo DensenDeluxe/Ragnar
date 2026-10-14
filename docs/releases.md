@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): LACP Watch v3 — +28 codes (PAGP, PAUSE/PFC flow-control planes)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `lacpwatch` engine to v3** (root `lacpwatch.py`, 1958→3827 lines, 39→**67 codes**; **no new CVEs** — the one anchor stays CVE-2024-30388, so the index is unchanged at **342 named / 299 detected**). The upstream drop ships the engine with `main`/`run_self_test`; the Ragnar integration layer (`do_lacp_watch`, `selftest`, `_capture_pcap`, Watchtower `_emit_watchtower`, the `_verdict_for` card reduction) was spliced back on — the v3 `LacpWatch` API (`on_frame`, `findings`, `stats`, `halves`, `lag_posture_seen`) is compatible, and `selftest()` now adapts the module's own Tier-1 suite.
+- **v3 parses the neighbouring slow-protocol planes on the same wire**: **PAGP** (Cisco's pre-standard aggregation) and the MAC-Control **PAUSE / PFC** flow-control opcodes — as posture/abuse tiers (no CVE exists for them; a flood or a contradictory advertisement is the signal), alongside the existing LACP/Marker integrity codes.
+- **Self-test:** the `lacp` suite runs the module's **150-check** Tier-1 (pure-Python, no sockets). **Live-validated** in a sealed netns: a VLAN-tagged + wrong-destination LACPDU replayed with `tcpreplay` fire `LACP-VLAN-TAGGED` / `LACP-NON-SLOW-DESTINATION` through the real `do_lacp_watch` tcpdump path, verdict `takeover`.
+- **Docs:** [nettools.md › LACP Watch](nettools.md#lacp-watch) (67 codes, PAGP / PAUSE-PFC planes).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): CFM Watch v5 — Y.1731 measurement/transport + E-LMI cross-plane (+17 codes)
 *branch `feature/lldp-watch-v3` (shared with LLDP v3 et al.)*
 

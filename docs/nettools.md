@@ -2558,9 +2558,12 @@ CVE anchor is **CVE-2024-30388** (a specific malformed LACP packet flaps a Junos
 *(v2)* a malformed LACPDU from an external source followed by a member flap within a
 short window is now correlated into a dedicated **`LACP-MALFORMED-INDUCED-FLAP`** finding
 (the effect, not a byte signature Juniper never published; the flapping member's own
-garbage is excluded as a failing NIC). What it flags (37 codes across
-structural / delivery-path / identity / cross-view / state-machine / marker / posture
-groups), reduced to a single card **verdict**:
+garbage is excluded as a failing NIC). *(v3)* the module now also parses the neighbouring
+slow-protocol planes on the same wire — **PAGP** (Cisco's pre-standard aggregation), and
+the MAC-Control **PAUSE / PFC** flow-control opcodes — as posture/abuse tiers (no CVE
+exists for them; a flood or a contradictory advertisement is the signal). What it flags
+(**67 codes** across structural / delivery-path / identity / cross-view / state-machine /
+marker / PAGP / PAUSE-PFC / posture groups), reduced to a single card **verdict**:
 
 - **lag-hijack** (critical — the one that should page you) — fires only when **both**
   classes appear for the same member inside one correlation window: an
