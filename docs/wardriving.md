@@ -829,8 +829,11 @@ via dump1090) can feed Wardrift's **Aircraft Watch** (detect 10 different
 aircraft in a UTC day). Ragnar's live radar only shows what is overhead now, so
 `adsb.py` also logs every **unique ICAO** it hears per UTC day to
 `data/adsb/day_YYYYMMDD.jsonl` (one row per aircraft, plus one enrichment row
-when a callsign first becomes known). Both the **Wardriving tab** (Aircraft card) and the ADS-B radar page's
-**Wardrift Aircraft Watch** card upload that day's aircraft:
+when a callsign first becomes known). The Wardriving tab's status row shows a
+live **Aircraft** card — the day's unique count climbing as the radar hears new
+planes, with how many are overhead now (or *radar off*) underneath. Both the
+**Wardriving tab** (upload card) and the ADS-B radar page's **Wardrift Aircraft
+Watch** card upload that day's aircraft:
 
 - **Same account, same endpoint.** It uses the Wardrift sign-in from the main
   Settings (no separate key) and POSTs to the same `/v1/wardrive/logs` the
@@ -844,6 +847,12 @@ when a callsign first becomes known). Both the **Wardriving tab** (Aircraft card
   *Auto-upload while receiving* toggle re-sends the day's aircraft every
   `adsb_wardrift_interval_min` minutes (default 30) while the radar is running
   and only when the unique count has grown.
+- **Auto-start the radar** (opt-in, *Start the ADS-B radar when a wardrive
+  begins*; `wardriving_autostart_adsb`). When a wardrive starts, Ragnar frees
+  the RTL-SDR from the sub-GHz tools and starts the ADS-B radar, then stops it
+  when the drive ends — but only a radar it started itself, never one you
+  started by hand, and never if a radar is already running. Lets the Aircraft
+  count climb through a drive with nothing to switch on.
 - **Verdict + Pushover.** Wardrift answers *pending* then decides; Ragnar
   follows `GET /v1/wardrive/uploads/{id}` to the result and (for auto-uploads)
   sends a Pushover summary — *Wardrive Aircraft upload* / `pushover_notify_adsb_upload`,

@@ -14750,6 +14750,12 @@ def wardriving_status():
         status = engine.get_status()
         status['enabled'] = True
         status['allow_backfill'] = bool(shared_data.config.get('wardriving_allow_backfill', False))
+        # Live ADS-B tally for the wardriving status card (cheap; no lsusb).
+        try:
+            import adsb
+            status['adsb'] = adsb.live_status()
+        except Exception:
+            pass
         return jsonify(status)
     except Exception as e:
         logger.error(f"Wardriving status error: {e}")
@@ -16555,6 +16561,71 @@ def _adsb_wardrift_start_worker():
         _adsb_wardrift['worker'].start()
 
 
+# --- ADS-B auto-start with wardriving ---------------------------------------
+# When the operator opts in, start the ADS-B radar as a wardrive begins and stop
+# it when the drive ends. The RTL-SDR is a single resource shared with the
+# sub-GHz tools, so we free it first (same hand-off as /api/net/adsb/start) and
+# only auto-stop a radar WE started — never one the operator started by hand.
+_adsb_autostarted = {'on': False}
+
+
+def _free_rtl_sdr_for_adsb():
+    """Best-effort: release the RTL-SDR from any sub-GHz consumer so dump1090
+    can open it. Each stop is optional — a missing module is simply skipped."""
+    for mod, fns in (('rtl_sdr', ('power_stop', 'ism_stop')), ('pager', ('stop',)),
+                     ('acars', ('stop',)), ('vdl2', ('stop',)), ('radio', ('stop',)),
+                     ('vor', ('stop',)), ('aprs', ('stop',))):
+        try:
+            m = __import__(mod)
+            for fn in fns:
+                try:
+                    getattr(m, fn)()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+def _adsb_autostart_on_wardrive_start(_session_id):
+    if not shared_data.config.get('wardriving_autostart_adsb'):
+        return
+    try:
+        import adsb
+        if adsb.live_status().get('running'):
+            return                      # already on (operator-started) — don't claim it
+        _free_rtl_sdr_for_adsb()
+        res = adsb.start()
+        if res.get('ok'):
+            _adsb_autostarted['on'] = True
+            logger.info("ADS-B radar auto-started with wardriving")
+        else:
+            logger.warning(f"ADS-B auto-start failed: {res.get('error')}")
+    except Exception as e:
+        logger.error(f"ADS-B auto-start error: {e}")
+
+
+def _adsb_autostop_on_wardrive_finish(_session_id):
+    if not _adsb_autostarted.get('on'):
+        return                          # we didn't start it — leave it alone
+    _adsb_autostarted['on'] = False
+    try:
+        import adsb
+        adsb.stop()
+        logger.info("ADS-B radar auto-stopped with wardriving")
+    except Exception as e:
+        logger.error(f"ADS-B auto-stop error: {e}")
+
+
+try:
+    import wardriving as _wardriving_mod
+    if _adsb_autostart_on_wardrive_start not in _wardriving_mod.SESSION_STARTED_HOOKS:
+        _wardriving_mod.SESSION_STARTED_HOOKS.append(_adsb_autostart_on_wardrive_start)
+    if _adsb_autostop_on_wardrive_finish not in _wardriving_mod.SESSION_FINISHED_HOOKS:
+        _wardriving_mod.SESSION_FINISHED_HOOKS.append(_adsb_autostop_on_wardrive_finish)
+except Exception as _adsb_hook_exc:  # pragma: no cover
+    logger.error(f"ADS-B auto-start hook registration failed: {_adsb_hook_exc}")
+
+
 @app.route('/api/adsb/wardrift', methods=['GET', 'POST'])
 def adsb_wardrift():
     """ADS-B -> Wardrift status / settings.
@@ -16575,6 +16646,8 @@ def adsb_wardrift():
                     shared_data.config['adsb_wardrift_interval_min'] = min(max(int(data['interval_min']), 5), 1440)
                 except (TypeError, ValueError):
                     return jsonify({'error': 'interval_min must be minutes (5-1440)'}), 400
+            if 'autostart' in data:
+                shared_data.config['wardriving_autostart_adsb'] = bool(data['autostart'])
             shared_data.save_config()
             if shared_data.config.get('adsb_wardrift_auto'):
                 _adsb_wardrift['next_run'] = 0.0
@@ -16594,6 +16667,7 @@ def adsb_wardrift():
             'today_aircraft': adsb.day_icao_count(today),
             'auto': bool(shared_data.config.get('adsb_wardrift_auto', False)),
             'interval_min': int(shared_data.config.get('adsb_wardrift_interval_min', 30)),
+            'autostart': bool(shared_data.config.get('wardriving_autostart_adsb', False)),
             'pushover_ready': _pushover_ready(),
             'days': days,
         })

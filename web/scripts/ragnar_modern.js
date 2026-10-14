@@ -2143,7 +2143,11 @@ function _wifiSdrCheck() {
 function _wifiRtlCheck() {
     fetch('/api/net/rtl/status').then(r => r.json()).then(st => {
         const det = (st && st.detect) || {};
-        _wifiState.rtlAvailable = !!det.available;
+        // Show the SDR-page buttons when an RTL is physically PRESENT, not only
+        // when it's openable right now: `available` flips to false the moment a
+        // tool (e.g. dump1090 for the ADS-B radar) opens the dongle, which would
+        // otherwise hide the very button that leads to the running radar.
+        _wifiState.rtlAvailable = !!(det.available || det.device_present);
         _wifiRfwfShow();
     }).catch(() => {});
     fetch('/api/net/esp/status').then(r => r.json()).then(st => {
@@ -31979,6 +31983,13 @@ function updateWardrivingUI(status) {
     // session count from companions before the first DB stats roll-up.
     updateElement('wd-zigbee-count', String(stats.zigbee_devices || status.zigbee_count || 0));
 
+    // Aircraft (ADS-B) — unique aircraft heard this UTC day (climbs as the radar
+    // sees new ones); sub-line shows how many are overhead now, or that the
+    // radar is off (ADS-B needs an RTL-SDR running the radar).
+    const adsbLive = status.adsb || {};
+    updateElement('wd-adsb-live-count', String(adsbLive.today || 0));
+    updateElement('wd-adsb-live-sub', adsbLive.running ? `${adsbLive.live || 0} overhead` : 'radar off');
+
     // Interfaces
     const ifInfo = document.getElementById('wd-interfaces-info');
     if (status.interfaces && status.interfaces.length > 0) {
@@ -34176,6 +34187,8 @@ function _adsbWardriftRender(d) {
     if (upBtn) { upBtn.disabled = !d.signed_in || n === 0 || _adsbWardriftBusy; upBtn.style.opacity = upBtn.disabled ? 0.5 : 1; }
     if (auto) auto.checked = !!d.auto;
     if (iv) iv.value = String(d.interval_min || 30);
+    const astart = document.getElementById('wd-adsb-autostart');
+    if (astart) astart.checked = !!d.autostart;
     if (push) push.textContent = d.pushover_ready === 'off' ? '· Pushover is off in Settings'
         : d.pushover_ready === 'missing' ? '· set up Pushover for alerts' : '';
     if (last) {
@@ -34203,7 +34216,8 @@ async function saveAdsbWardrift() {
         const r = await fetch('/api/adsb/wardrift', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ auto: !!document.getElementById('wd-adsb-auto')?.checked,
-                                   interval_min: parseInt(document.getElementById('wd-adsb-interval')?.value || '30', 10) })
+                                   interval_min: parseInt(document.getElementById('wd-adsb-interval')?.value || '30', 10),
+                                   autostart: !!document.getElementById('wd-adsb-autostart')?.checked })
         });
         const d = await r.json();
         if (!d.error) _adsbWardriftRender(d);
