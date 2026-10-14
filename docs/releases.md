@@ -4,6 +4,11 @@
 
 ### 2026-10-14
 
+#### [#961](https://github.com/PierreGode/Ragnar/pull/961) — fix(net): L2 Data Link layer button count 16 → 18
+*branch `fix/net-l2-layer-count`*
+
+- **L2 Data Link tab button** in the Network view now reads **18** (was 16), matching the current L2 module inventory. UI label only — `web/index_modern.html` layer-bar `#net-layer-btn-l2` count span.
+
 #### [#960](https://github.com/PierreGode/Ragnar/pull/960) — feat(net): Cisco Guard v8 — MDT cleartext telemetry, secure-boot + IE-switch + SMB-default-account + egress-block CVEs (+5)
 *branch `feature/cisco-guard-v8`*
 
