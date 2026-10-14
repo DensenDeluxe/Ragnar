@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): BFD Watch v4 — Seamless BFD (S-BFD, RFC 7880) reflector plane (+6 codes)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `bfdwatch` engine to v4** (root `bfdwatch.py`, 2615→3333 lines, 31→**37 codes**; **no new CVEs** — the 5 named CVEs and the index are unchanged at **342 named / 299 detected**). Same pattern as LACP / SR-MPLS: the upstream drop ships only the engine + `main`; the Ragnar integration layer (`do_bfd_watch`, `selftest`, `_bfd_capture_pcap`, `_bfd_verdict`, Watchtower feed) was spliced back on, and v4's CLI `__main__` dropped. The v4 engine API (`BFDWatch`, `self_test`) is unchanged, so the layer and its scenarios port cleanly.
+- **v4 adds Seamless BFD (S-BFD, RFC 7880)** on udp/7784 — the stateless reflector plane used by SR / SR-TE path monitoring: a reflector in an illegal state (`BFD-SBFD-REFLECTOR-ILLEGAL-STATE`), a reflected discriminator that doesn't mirror the request (`BFD-SBFD-REFLECTOR-MIRROR-MISMATCH`), a cross-domain discriminator collision, a non-zero initiator interval, a source-port violation, and the reflected-loop primitive.
+- **Self-test:** the `bfd` suite (9 scenarios incl. the engine's own Tier-1 reachability run) passes on the v4 engine. **Live-validated** in a sealed netns: a truncated and a malformed BFD control packet replayed with `tcpreplay` fire `BFD-TRUNCATED-HEADER` / `BFD-MALFORMED-HEADER` through the real `do_bfd_watch` tcpdump path.
+- **Docs:** [nettools.md › BFD Watch](nettools.md#bfd-watch) (S-BFD, 37 codes).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): SR-MPLS Watch v4 — LSP Ping / VCCV / IOAM OAM plane (+10 codes)
 *branch `feature/lldp-watch-v3` (shared)*
 

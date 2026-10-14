@@ -2825,6 +2825,13 @@ Reduced to a single card **verdict**:
   once), collapsed detection-time, and *(v3)* a **micro-BFD flap storm**
   (`BFD-MICRO-FLAP-STORM` — sustained flapping on a `6784` micro-BFD/LAG session, the
   **CVE-2026-33800** Juniper MX PFEMAN/FPC-crash shape).
+- *(v4)* **Seamless BFD (S-BFD, RFC 7880)** on `udp/7784` — the stateless reflector plane
+  used by SR / SR-TE path monitoring. Six codes flag a reflector in an illegal state
+  (`BFD-SBFD-REFLECTOR-ILLEGAL-STATE`), a reflected discriminator that doesn't mirror the
+  request (`BFD-SBFD-REFLECTOR-MIRROR-MISMATCH`), a discriminator colliding across SR
+  domains, a non-zero initiator interval, a source-port violation, and the reflected-loop
+  primitive — the ways a forged or misconfigured reflector blackholes or loops a monitored
+  SR path. (Still no new CVE — these are protocol-abuse conditions.)
 
 It also reads **auth posture** off the wire without holding any key: mid-session
 **downgrade**, one-sided (**asymmetric**) authentication, and stalled-sequence **replay
