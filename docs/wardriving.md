@@ -847,6 +847,12 @@ Watch** card upload that day's aircraft:
   *Auto-upload while receiving* toggle re-sends the day's aircraft every
   `adsb_wardrift_interval_min` minutes (default 30) while the radar is running
   and only when the unique count has grown.
+- **Auto-start the radar** (opt-in, *Start the ADS-B radar when a wardrive
+  begins*; `wardriving_autostart_adsb`). When a wardrive starts, Ragnar frees
+  the RTL-SDR from the sub-GHz tools and starts the ADS-B radar, then stops it
+  when the drive ends — but only a radar it started itself, never one you
+  started by hand, and never if a radar is already running. Lets the Aircraft
+  count climb through a drive with nothing to switch on.
 - **Verdict + Pushover.** Wardrift answers *pending* then decides; Ragnar
   follows `GET /v1/wardrive/uploads/{id}` to the result and (for auto-uploads)
   sends a Pushover summary — *Wardrive Aircraft upload* / `pushover_notify_adsb_upload`,

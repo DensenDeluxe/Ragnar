@@ -115,6 +115,10 @@ def _freq_to_channel(freq_mhz):
 # (the webapp registers auto-upload here).
 SESSION_FINISHED_HOOKS = []
 
+# Callables run with the session id whenever any engine starts a session (the
+# webapp registers ADS-B auto-start here). Mirrors SESSION_FINISHED_HOOKS.
+SESSION_STARTED_HOOKS = []
+
 # A row whose position is within this many metres of the GPS track (inside the
 # row's own first..last-seen window, plus slack) is re-timed to that moment.
 _ALIGN_MAX_M = 50
@@ -2438,6 +2442,14 @@ class WardrivingEngine:
         self._ensure_hat_buttons()
 
         logger.info(f"Wardriving started: interfaces={self.interfaces}, GPS={gps_ok}, device={self.device_name}")
+        # Every start path (web, CYD, boot) lands here; the webapp uses this to
+        # auto-start the ADS-B radar when the operator opted in.
+        if self.session:
+            for cb in list(SESSION_STARTED_HOOKS):
+                try:
+                    cb(self.session.session_id)
+                except Exception as e:
+                    logger.error(f"session-started hook failed: {e}")
         return {
             'success': True,
             'session_id': self.session.session_id,

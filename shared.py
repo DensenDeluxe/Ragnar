@@ -1025,6 +1025,7 @@ class SharedData:
             # sightings to Wardrift via the signed-in account. Off by default.
             "adsb_wardrift_auto": False,
             "adsb_wardrift_interval_min": 30,   # minutes between auto-uploads while receiving
+            "wardriving_autostart_adsb": False,  # start the ADS-B radar when a wardrive begins
         }
 
     def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):

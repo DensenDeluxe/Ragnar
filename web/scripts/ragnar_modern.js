@@ -34183,6 +34183,8 @@ function _adsbWardriftRender(d) {
     if (upBtn) { upBtn.disabled = !d.signed_in || n === 0 || _adsbWardriftBusy; upBtn.style.opacity = upBtn.disabled ? 0.5 : 1; }
     if (auto) auto.checked = !!d.auto;
     if (iv) iv.value = String(d.interval_min || 30);
+    const astart = document.getElementById('wd-adsb-autostart');
+    if (astart) astart.checked = !!d.autostart;
     if (push) push.textContent = d.pushover_ready === 'off' ? '· Pushover is off in Settings'
         : d.pushover_ready === 'missing' ? '· set up Pushover for alerts' : '';
     if (last) {
@@ -34210,7 +34212,8 @@ async function saveAdsbWardrift() {
         const r = await fetch('/api/adsb/wardrift', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ auto: !!document.getElementById('wd-adsb-auto')?.checked,
-                                   interval_min: parseInt(document.getElementById('wd-adsb-interval')?.value || '30', 10) })
+                                   interval_min: parseInt(document.getElementById('wd-adsb-interval')?.value || '30', 10),
+                                   autostart: !!document.getElementById('wd-adsb-autostart')?.checked })
         });
         const d = await r.json();
         if (!d.error) _adsbWardriftRender(d);

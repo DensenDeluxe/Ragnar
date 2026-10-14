@@ -8506,6 +8506,10 @@
                                 <span id="wd-adsb-today" class="text-xs text-gray-400"></span>
                             </div>
                             <label class="flex items-center gap-2 text-xs text-gray-400 mt-3 flex-wrap cursor-pointer">
+                                <input type="checkbox" id="wd-adsb-autostart" onchange="saveAdsbWardrift()" class="accent-amber-500">
+                                <span>Start the ADS-B radar when a wardrive begins</span>
+                            </label>
+                            <label class="flex items-center gap-2 text-xs text-gray-400 mt-2 flex-wrap cursor-pointer">
                                 <input type="checkbox" id="wd-adsb-auto" onchange="saveAdsbWardrift()" class="accent-amber-500">
                                 <span>Auto-upload while receiving, every</span>
                                 <select id="wd-adsb-interval" onchange="saveAdsbWardrift()" class="bg-slate-700 text-white text-xs rounded px-1.5 py-0.5 border border-slate-600">
@@ -9570,7 +9574,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261014-adsb-live-card"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261014-adsb-autostart"></script>
 
 
 
