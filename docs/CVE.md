@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **342** distinct CVE IDs
-- **299** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **346** distinct CVE IDs
+- **303** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **34** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -35,12 +35,12 @@ detector works is in [nettools.md](nettools.md).
 | 2018 | 10 |
 | 2019 | 15 |
 | 2020 | 30 |
-| 2021 | 34 |
+| 2021 | 35 |
 | 2022 | 29 |
 | 2023 | 45 |
 | 2024 | 51 |
-| 2025 | 37 |
-| 2026 | 45 |
+| 2025 | 39 |
+| 2026 | 46 |
 
 ## By detector
 
@@ -55,7 +55,7 @@ detector works is in [nettools.md](nettools.md).
 | BLE Pentest (active) | 6 |
 | CDP Watch | 25 |
 | CFM Watch | 4 |
-| Cisco Guard | 29 |
+| Cisco Guard | 33 |
 | Comware Guard | 2 |
 | Dell Guard | 2 |
 | DHCP Guardian | 2 |
@@ -225,6 +225,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-34527](https://nvd.nist.gov/vuln/detail/CVE-2021-34527) | PrintNightmare | detected | RPC / NetLogon Watch | — |
 | [CVE-2021-34618](https://nvd.nist.gov/vuln/detail/CVE-2021-34618) |  | detected | LLDP Watch | — |
 | [CVE-2021-34703](https://nvd.nist.gov/vuln/detail/CVE-2021-34703) |  | detected | LLDP Watch | — |
+| [CVE-2021-34720](https://nvd.nist.gov/vuln/detail/CVE-2021-34720) | IP SLA/TWAMP socket memory exhaustion | detected | Cisco Guard | — |
 | [CVE-2021-34779](https://nvd.nist.gov/vuln/detail/CVE-2021-34779) |  | detected | LLDP Watch | — |
 | [CVE-2021-34780](https://nvd.nist.gov/vuln/detail/CVE-2021-34780) |  | detected | LLDP Watch | — |
 | [CVE-2021-36942](https://nvd.nist.gov/vuln/detail/CVE-2021-36942) | PetitPotam | detected | RPC / NetLogon Watch, Relay / Coercion Watch | — |
@@ -362,7 +363,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-8677](https://nvd.nist.gov/vuln/detail/CVE-2025-8677) |  | detected | DNS Watch | — |
 | [CVE-2025-10948](https://nvd.nist.gov/vuln/detail/CVE-2025-10948) |  | detected | MikroTik Guard | — |
 | [CVE-2025-20111](https://nvd.nist.gov/vuln/detail/CVE-2025-20111) | NX-OS health-monitor frame DoS | detected | Cisco Guard | — |
+| [CVE-2025-20154](https://nvd.nist.gov/vuln/detail/CVE-2025-20154) | TWAMP server OOB array-access reload | detected | Cisco Guard | — |
 | [CVE-2025-20164](https://nvd.nist.gov/vuln/detail/CVE-2025-20164) |  | detected | Cisco Guard | — |
+| [CVE-2025-20188](https://nvd.nist.gov/vuln/detail/CVE-2025-20188) | IOS-XE WLC OOB AP-image hardcoded-JWT upload (10.0) | detected | Cisco Guard | — |
 | [CVE-2025-20241](https://nvd.nist.gov/vuln/detail/CVE-2025-20241) |  | detected | Cisco Guard | — |
 | [CVE-2025-20312](https://nvd.nist.gov/vuln/detail/CVE-2025-20312) |  | detected | Cisco Guard | — |
 | [CVE-2025-20315](https://nvd.nist.gov/vuln/detail/CVE-2025-20315) | CAPWAP malformed header | detected | Cisco Guard | — |
@@ -405,6 +408,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-19668](https://nvd.nist.gov/vuln/detail/CVE-2026-19668) |  | detected | DNS Watch | — |
 | [CVE-2026-20010](https://nvd.nist.gov/vuln/detail/CVE-2026-20010) |  | detected | LLDP Watch | — |
 | [CVE-2026-20074](https://nvd.nist.gov/vuln/detail/CVE-2026-20074) | IS-IS multi-instance exposure | detected | IS-IS Watch | — |
+| [CVE-2026-20133](https://nvd.nist.gov/vuln/detail/CVE-2026-20133) | Catalyst SD-WAN Manager API flaw | detected | Cisco Guard | — |
 | [CVE-2026-20222](https://nvd.nist.gov/vuln/detail/CVE-2026-20222) | EIGRP update flood | detected | EIGRP Watch | — |
 | [CVE-2026-20267](https://nvd.nist.gov/vuln/detail/CVE-2026-20267) | IOS XE access control (Aug-2026 wave) | detected | Cisco Guard | — |
 | [CVE-2026-20268](https://nvd.nist.gov/vuln/detail/CVE-2026-20268) | IOS XE buffer restriction (Aug-2026 wave) | detected | Cisco Guard | — |

@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **299 CVEs detected from the wire.** 342 distinct CVE IDs are named across Ragnar's
-  code; 299 of them a passive detector actually identifies. The rest are named, not detected:
+- **303 CVEs detected from the wire.** 346 distinct CVE IDs are named across Ragnar's
+  code; 303 of them a passive detector actually identifies. The rest are named, not detected:
   34 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
