@@ -98,6 +98,7 @@ matrix to zoom (`/web/images/osi/`).
 | [ARP Poisoning](#arp-poisoning) | Diagnostics · L2 | `GET /api/net/arp-check`, `/arp-baseline` |
 | [Switch Discovery + PoE](#switch-discovery-lldp--cdpv1v2--edp--fdp) | Diagnostics · L2 | `GET /api/net/lldp` |
 | [STP/BPDU Watch](#stpbpdu-watch) | Diagnostics · L2 | `GET /api/net/stp-watch`, `POST /api/net/stp-baseline` |
+| [MRP Watch](#mrp-watch) | Diagnostics · L2 | `GET /api/net/mrp-watch` |
 | [DTP Watch](#dtp-watch) | Diagnostics · L2 | `GET /api/net/dtp-watch`, `POST /api/net/dtp-baseline` |
 | [CDP Watch](#cdp-watch) | Diagnostics · L2 | `GET /api/net/cdp-watch`, `POST /api/net/cdp-baseline` |
 | [LLDP Watch](#lldp-watch) | Diagnostics · L2 | `GET /api/net/lldp-watch`, `GET/POST /api/net/lldp-baseline` |
@@ -1800,38 +1801,91 @@ RA-packet CVEs land here, where the RA options are actually parsed.)
   `POST /api/net/icmp-baseline` `{action: reset}` · binary: `tcpdump`
 
 ### STP/BPDU Watch
-A **passive** spanning-tree security scanner covering **802.1D STP / 802.1w RSTP /
-802.1s MSTP** (IEEE group MAC `01:80:c2:00:00:00`) and **Cisco PVST+ / Rapid-PVST+**
-(per-VLAN, group MAC `01:00:0c:cc:cc:cd`). **Detection-only** — it never sends a BPDU.
+A **passive** spanning-tree **security** scanner (**v2**) covering **802.1D STP /
+802.1w RSTP / 802.1s MSTP** (IEEE group MAC `01:80:c2:00:00:00`) and **Cisco PVST+ /
+Rapid-PVST+** (per-VLAN, group MAC `01:00:0c:cc:cc:cd`). **Detection-only** — it never
+sends a BPDU. v2 moves from the earlier presence sketch to a full **byte-level
+decoder** (vendored engine `python/stpwatch.py`): 802.1D Config/TCN, RSTP port roles
+and proposal/agreement, MSTP CIST + the MST config-ID (region name, revision, 16-byte
+digest) **and every 16-octet MSTI Configuration Message**, and PVST+/RPVST+ over SNAP,
+with one/two VLAN tags (QinQ) — running **31 checks (STP-001..031)** across six
+families. **No CVEs** — BPDUs are unauthenticated **by design**, so every check is
+behavioural/spec-derived (a Sept 2026 CVE sweep found nothing passively detectable at
+CVSS ≥ 6.5 that qualified).
 
-Spanning tree prevents L2 loops by electing a **root bridge** (the switch with the
-numerically lowest Bridge ID = priority + MAC) and blocking redundant paths back
-toward it. BPDUs carry the election and are multicast in the clear with **no
-authentication**, so an attacker who injects a BPDU claiming a **superior root**
-(priority 0 — the Yersinia "claim root role" move) wins the election, becomes the
-root bridge, and the tree reconverges to pull traffic through them (subnet-wide L2
-MITM). BPDU/TCN floods force constant reconvergence (DoS) and MAC-table flushing
-(which turns the switch into a hub — an aid to sniffing). What it flags:
+Spanning tree prevents L2 loops by electing a **root bridge** (lowest Bridge ID =
+priority + MAC) and blocking redundant paths back toward it. BPDUs carry the election,
+multicast in the clear with **no authentication**, so an attacker who injects a BPDU
+claiming a **superior root** (priority 0 — the Yersinia "claim root role" move) wins,
+becomes the root bridge, and the tree reconverges to pull traffic through them
+(subnet-wide L2 MITM). Findings fold into a verdict bucket:
 
-- **root-hijack** — a BPDU advertising a root **superior** to the baseline root
-  (lower priority, or equal priority + lower MAC): a root-bridge takeover. This is
-  the top finding — an active L2 MITM.
-- **rogue-bridge** — a new bridge (Bridge-ID MAC) participating in spanning tree that
-  isn't in the baseline (an unexpected switch, or a spoofed bridge).
-- **bpdu-flood** — an elevated BPDU rate: a reconvergence-storm DoS.
-- **topology-change** — TCN / TC-flag churn: repeated topology changes flushing the
-  MAC tables (instability, or a TCN-flood attack).
+- **root-hijack** — a BPDU advertising a root **superior** to the baseline (`STP-002`),
+  **or a regional-root takeover inside a single MST instance** (`STP-024`): a root
+  takeover and active L2 MITM. This is the top finding.
+- **rogue-bridge** — a new bridge (`STP-004`), a **BPDU on a declared edge/access port**
+  (`STP-005`, a BPDU-Guard gap), or two distinct roots advertised at once (`STP-019`).
+- **bpdu-flood** — a TCN / BPDU / RSTP-proposal storm (`STP-006/007/008/016`): a
+  reconvergence-storm DoS.
+- **topology-change** — TCN / root-change churn (`STP-001/003/023/025/030`) flushing
+  MAC tables (instability, or a TCN-flood).
+- **anomaly** — any other field-sanity (priority floor, bogus source MAC, illegal
+  timers, message-age/path-cost), MST digest/region, or **per-MSTI** violation
+  (`STP-009..015`, `021/022`, `023..031`).
+
+**The per-MSTI tier** is the subtle one: an attacker already inside a legitimate MST
+region (correct region name + digest, so `STP-021/022` stay silent) can leave every
+CIST field untouched and forge a superior regional root, a sub-floor priority, or a
+zero internal path cost inside **one MSTI's own 16-octet record** — a real traffic
+redirect on whichever VLANs map to that instance. The engine deserializes every
+record, keys state on `(iface, region, MSTID)`, re-runs the CIST reasoning per
+instance, and scopes findings `vlan=MSTI:<n>`. One frame carrying twelve MSTI records
+is still **one BPDU**, so rate/hello/silence stay on the CIST and a wide region never
+self-reports as a storm.
 
 The BPF is `(ether dst 01:80:c2:00:00:00) or (ether dst 01:00:0c:cc:cc:cd)`, captured
-with `tcpdump -e` for the sender MAC. For PVST+ the per-VLAN root is carried in the
-Bridge-ID's extended system-id, so the scanner tracks a root **per VLAN/instance**.
-The first scan **learns** the current root(s) and legitimate bridges as the baseline
-(`data/stp_watch.json`); after a legitimate topology change, click "Trust current".
-The real hardening — which this tool exists to nudge you toward — is **BPDU Guard**
-(+ PortFast) on edge/access ports and **Root Guard** on ports toward downstream
-switches, plus pinning your real root/backup-root to priority 0/4096. **API:**
-`GET /api/net/stp-watch`, `POST /api/net/stp-baseline`. **CLI:** `stp-watch`,
+to a **raw pcap** (the v2 engine decodes from the MAC header). The first scan
+**learns** the current root(s), bridges, MST regions and per-MSTI regional roots as
+the baseline (`data/stp_watch.json`) during a short grace window; after a legitimate
+topology change, click "Trust current". The real hardening this tool nudges you toward
+is **BPDU Guard** (+ PortFast) on edge/access ports and **Root Guard** toward
+downstream switches, plus pinning your real root/backup-root to priority 0/4096.
+**API:** `GET /api/net/stp-watch`, `POST /api/net/stp-baseline`. **CLI:** `stp-watch`,
 `stp-selftest`.
+
+### MRP Watch
+A **passive** monitor for the standards-based **dynamic registration** protocols —
+the siblings of Cisco's VTP: 802.1ak **MVRP** (EtherType `0x88F5`, dst
+`01:80:C2:00:00:21`) and **MMRP** (`0x88F6`, dst `...:20`), plus legacy 802.1D
+**GVRP/GMRP** (no EtherType, LLC/802.3-length framed to the same two MACs).
+**Detection-only** — it never transmits. This is **not** IEC 62439-2 ring-redundancy
+"MRP"; it is the VLAN/multicast registration plane. Vendored pure-python engine
+`python/mrpwatch.py` (**21 codes**, **no CVEs** — none exist for any of the four
+protocols, same shape as STP).
+
+**MVRP and MMRP use different EtherTypes**, so the capture admits **both** plus the
+whole GARP application block — `ether proto 0x88f5 or ether proto 0x88f6 or (ether[0:4]
+= 0x0180c200 and ether[4:2] >= 0x0020 and ether[4:2] <= 0x002f)` — a filter on `0x88F5`
+alone would silently drop 100% of MMRP. Findings fold into a
+**clean / observed / suspicious / attack** verdict:
+
+- **Posture (`MRP-001..007`)** — which protocol(s) are in use (INFO/LOW), a
+  mixed-generation note, a `known_vlans` baseline note, and an unknown GARP
+  application on `:22`–`:2f` (reported, never decoded).
+- **Attack / abuse (`MRP-101..108`)** — a **LeaveAll flood** from one source
+  (`101/103/105/107`, HIGH) forces network-wide re-registration (the standards-based
+  sibling of the VTP bomb `vtpwatch` detects); a **registration burst for
+  never-before-seen VLANs/groups** (`102/104/106/108`, MEDIUM) is a VLAN-hopping setup
+  signal. Rate alerts **latch** — a sustained flood is one finding, not one per frame.
+- **Structural (`MRP-120..125`)** — VectorAttribute / GARP-attribute overruns, missing
+  end marks (strict mode), unexpected ProtocolVersion, and base-6 vector-byte
+  violations.
+
+Optionally supply your **known VLANs** as an operator baseline: it escalates an
+out-of-baseline registration burst from MEDIUM to HIGH, but **never gates detection**.
+On a predominantly Cisco segment (VTP/DTP preferred) this may legitimately see no
+traffic — an environment fact, not a fault. **API:** `GET /api/net/mrp-watch`
+(`?seconds=&interface=&known_vlans=`). **CLI:** `mrp-watch`, `mrp-selftest`.
 
 ### SMB Watch
 A **passive** Windows-endpoint attack-surface scanner in three parts (one capture),

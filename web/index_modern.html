@@ -1877,8 +1877,8 @@
                         <!-- Visibility matrix reference (overview) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Module visibility matrix <span class="text-xs font-normal text-gray-500">— reference guide · every module by OSI layer × vantage tier</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261010-cfm" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">A clean verdict is only as wide as the tap: check a module's vantage tier before reading silence as safety. Each layer button above shows its own band of this matrix. Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image to open it full-size.</p>
                         </details>
@@ -1948,7 +1948,7 @@
                         <!-- Routing-scanner self-test + Scapy -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                             <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                                <h3 class="text-lg font-semibold">Detector Self-Test <span class="text-xs font-normal text-gray-500">(IGMP · IPv6 · NDP · RA Guard · NTP · ICMP · SNMP · TLS · Cert · STP · SMB · Relay · LDAP · SSH · Telnet · DTP · CDP · VTP · EIGRP · IS-IS · FHRP · OSPF · ARP · MAC · DHCP · DNS · BGP · LACP · RPC · BFD · PTP · SR-MPLS · IPsec/IKE · DNS-Watch · Cisco · Juniper · Arista · Comware · MikroTik · Aruba · APC · Liebert · Dell · speaker · OWD)</span></h3>
+                                <h3 class="text-lg font-semibold">Detector Self-Test <span class="text-xs font-normal text-gray-500">(IGMP · IPv6 · NDP · RA Guard · NTP · ICMP · SNMP · TLS · Cert · STP · SMB · Relay · LDAP · SSH · Telnet · DTP · CDP · VTP · MRP · EIGRP · IS-IS · FHRP · OSPF · ARP · MAC · DHCP · DNS · BGP · LACP · RPC · BFD · PTP · SR-MPLS · IPsec/IKE · DNS-Watch · Cisco · Juniper · Arista · Comware · MikroTik · Aruba · APC · Liebert · Dell · speaker · OWD)</span></h3>
                                 <div id="scapy-status" class="text-xs text-gray-400"></div>
                             </div>
                             <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay, <strong>SSH</strong> regreSSHion/Terrapin, <strong>Telnet</strong>, <strong>RPC/NetLogon</strong> incl. <strong>Zerologon</strong> / DCSync / WinRM), the link-aggregation integrity monitor (<strong>LACP</strong> LAG-hijack / flapping), the timing- and forwarding-plane watchers (<strong>BFD</strong> failover manipulation, <strong>PTP</strong> grandmaster takeover, <strong>SR-MPLS</strong> segment injection), the <strong>IPsec/IKE</strong> key-exchange posture detector (D(HE)at / weak DH groups, SWEET32, Aggressive Mode) — part of the cross-protocol <strong>D(HE)at</strong> (CVE-2002-20001) coverage that also names finite-field DH exposure in <strong>TLS</strong> and <strong>SSH</strong>, the vendor CVE guards (<strong>Cisco</strong>, <strong>Juniper</strong>, <strong>Arista</strong>, <strong>Comware</strong>, <strong>MikroTik</strong>, <strong>Aruba</strong>, <strong>APC</strong> (its vendored module's own 516-check tier plus the in-app capture adapter), <strong>Liebert</strong> (likewise, 198 checks plus live loopback) and <strong>Dell</strong> — Dell Guard runs as a standalone daemon, so the panel exercises its offline classifier self-test), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization incl. HSRP/VRRP virtual-MAC awareness, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
@@ -2010,8 +2010,8 @@
                         <!-- Visibility matrix reference (l7) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L7 Application <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261010-cfm" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2514,8 +2514,8 @@
                         <!-- Visibility matrix reference (l6) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L6 Presentation <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261010-cfm" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2566,8 +2566,8 @@
                         <!-- Visibility matrix reference (l5) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L5 Session <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261010-cfm" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2611,8 +2611,8 @@
                         <!-- Visibility matrix reference (l4) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L4 Transport <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261010-cfm" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2658,8 +2658,8 @@
                         <!-- Visibility matrix reference (l3) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L3 Network <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261010-cfm" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2868,13 +2868,13 @@
                 </div>
 
                 <!-- ===== L2 Data Link ===== -->
-                <div id="net-layer-l2" class="net-layer hidden" data-desc="ARP / MAC, the switch control protocols (STP, DTP, CDP, LLDP, VTP, LACP, IS-IS), carrier Ethernet OAM (Link OAM, CFM / Y.1731), PTP and the Bluetooth LE link layer (BLE Watch).">
+                <div id="net-layer-l2" class="net-layer hidden" data-desc="ARP / MAC, the switch control protocols (STP, DTP, CDP, LLDP, VTP, MRP, LACP, IS-IS), carrier Ethernet OAM (Link OAM, CFM / Y.1731), PTP and the Bluetooth LE link layer (BLE Watch).">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
                         <!-- Visibility matrix reference (l2) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L2 Data Link <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261010-cfm" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2930,7 +2930,7 @@
                         <!-- STP/BPDU Watch (spanning tree) -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                             <h3 class="text-lg font-semibold mb-1">STP/BPDU Watch <span class="text-xs font-normal text-gray-500">(spanning tree · root hijack)</span></h3>
-                            <p class="text-xs text-amber-300/90 mb-2">Passive spanning-tree security scanner — <strong>detection-only</strong>, never sends a BPDU. STP/RSTP/MSTP (and Cisco PVST+) elect a <strong>root bridge</strong> by lowest Bridge ID; BPDUs carry the election, multicast in the clear with no auth. An attacker who sends a BPDU claiming a <strong>superior root</strong> (priority 0 — Yersinia "claim root role") wins and the tree reconverges to pull traffic through them (<strong>L2 MITM</strong>). Flags <strong>root-hijack</strong> (a root superior to the baseline), <strong>rogue-bridge</strong> (a new bridge in spanning tree), <strong>bpdu-flood</strong> (reconvergence-storm DoS) and <strong>topology-change</strong> (TCN/TC churn that flushes MAC tables). Defenses are BPDU Guard on edge ports and Root Guard downstream.</p>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive spanning-tree <strong>security</strong> scanner (v2) — <strong>detection-only</strong>, never sends a BPDU. A byte-level decoder for 802.1D / RSTP / MSTP (including <strong>every per-MSTI record</strong>) and Cisco PVST+/RPVST+, running <strong>31 checks</strong> across six families. STP elects a <strong>root bridge</strong> by lowest Bridge ID; BPDUs carry the election, multicast in the clear with no auth. An attacker who sends a BPDU claiming a <strong>superior root</strong> (priority 0 — Yersinia "claim root role") wins and the tree reconverges to pull traffic through them (<strong>L2 MITM</strong>). Flags <strong>root-hijack</strong> (superior BPDU, incl. a regional-root takeover inside one MST instance), <strong>rogue-bridge</strong> (new bridge / BPDU on an edge port / two roots at once), <strong>bpdu-flood</strong> (reconvergence-storm DoS), <strong>topology-change</strong> (TCN/TC churn) and <strong>anomaly</strong> (field-sanity / MST digest-region / per-MSTI violations). No CVEs — BPDUs are unauthenticated by design, so every check is behavioural. Defenses are BPDU Guard on edge ports and Root Guard downstream.</p>
                             <p class="text-sm text-gray-400 mb-3">One short passive capture on the BPDU group MACs (IEEE <span class="font-mono">01:80:c2:00:00:00</span> + Cisco PVST+ <span class="font-mono">01:00:0c:cc:cc:cd</span>). The first scan learns the current root(s) — per VLAN for PVST+ — and legitimate bridges as the baseline (<span class="font-mono">data/stp_watch.json</span>); after a legitimate topology change, click "Trust current".</p>
                             <div class="flex flex-wrap items-center gap-2">
                                 <select id="stp-iface" title="Interface for the BPDU capture — pick the switch-facing NIC you want to audit" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
@@ -2941,6 +2941,21 @@
                                 <button onclick="stpTrustBaseline()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Learn the current root(s) and bridges as the trusted baseline — use after a legitimate topology change">Trust current</button>
                             </div>
                             <div id="stp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                        </div>
+                        <!-- MRP Watch (MVRP / MMRP / GVRP / GMRP registration) -->
+                        <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                            <h3 class="text-lg font-semibold mb-1">MRP Watch <span class="text-xs font-normal text-gray-500">(MVRP / MMRP / GVRP / GMRP registration)</span></h3>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive monitor for the standards-based <strong>dynamic registration</strong> protocols — the siblings of Cisco's VTP: 802.1ak <strong>MVRP</strong> (EtherType <span class="font-mono">0x88F5</span>) and <strong>MMRP</strong> (<span class="font-mono">0x88F6</span>), plus legacy 802.1D <strong>GVRP/GMRP</strong> (LLC-framed). <strong>Detection-only</strong>, never transmits. <em>Not</em> IEC 62439-2 ring-redundancy MRP — this is the VLAN/multicast registration plane. MVRP and MMRP use <strong>different EtherTypes</strong>, so the capture admits both plus the whole GARP application block (a filter on 0x88F5 alone would silently miss all MMRP). Flags a <strong>LeaveAll flood</strong> (<span class="font-mono">MRP-101/103/105/107</span>, HIGH — forces network-wide re-registration, the standards sibling of the VTP bomb), a <strong>registration burst for never-before-seen VLANs/groups</strong> (<span class="font-mono">MRP-102/104/106/108</span> — a VLAN-hopping setup signal), and structural/malformed PDUs (<span class="font-mono">MRP-120..125</span>). No CVEs — none exist for these four protocols.</p>
+                            <p class="text-sm text-gray-400 mb-3">Optionally supply your <strong>known VLANs</strong> (comma-separated) as an operator baseline — it escalates a registration burst for out-of-baseline VLANs from MEDIUM to HIGH, but <strong>never gates detection</strong>. On a predominantly Cisco segment (VTP/DTP preferred) this card may legitimately see no traffic — that's an environment fact, not a fault.</p>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <select id="mrp-iface" title="Interface for the capture — pick the switch-facing NIC you want to audit" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                                    <option value="">Auto (wired first)</option>
+                                </select>
+                                <input id="mrp-secs" type="number" min="5" max="50" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                                <input id="mrp-known-vlans" type="text" placeholder="known VLANs (e.g. 1,10,100)" title="Operator VLAN baseline — scoping only, never gates detection" class="w-full sm:w-56 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                                <button onclick="runMrpWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan MRP</button>
+                            </div>
+                            <div id="mrp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
                         <!-- DTP Watch (VLAN hopping) -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
@@ -3164,8 +3179,8 @@
                         <!-- Visibility matrix reference (l1) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L1 Physical <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261010-cfm" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261010-cfm" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261014-stp-v2-mrp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261014-stp-v2-mrp" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -9574,7 +9589,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261014-adsb-btn-fix"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261014-stp-v2-mrp"></script>
 
 
 

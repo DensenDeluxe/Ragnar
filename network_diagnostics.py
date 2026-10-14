@@ -14637,9 +14637,13 @@ def _isis_selftest():
 # reconverges to pull traffic through them (subnet-wide MITM). BPDU/TCN floods force
 # constant reconvergence (DoS) and MAC-table flushing (which aids sniffing). The
 # defenses are BPDU Guard (kill the port on any BPDU) on edge ports and Root Guard
-# toward downstream switches. This scanner is PASSIVE: one short capture of the BPDUs,
-# classified against a learned baseline of the root(s) and legitimate bridges. It
-# never sends a BPDU. What it flags:
+# toward downstream switches. This scanner is PASSIVE: one short raw-frame capture of
+# the BPDUs, decoded + classified by the vendored v2 engine (python/stpwatch.py) --
+# byte-level 802.1D/RSTP/MSTP (incl. every per-MSTI record) + PVST+/RPVST+, 31 checks
+# (STP-001..031), no CVEs (BPDUs are unauthenticated by design) -- against a learned
+# baseline of the root(s), bridges, MST regions and per-MSTI regional roots. It never
+# sends a BPDU. Findings fold into a verdict bucket (an 'anomaly' bucket catches the
+# field-sanity / MST / per-MSTI violations beyond the four headline cases):
 #   * root-hijack      — a BPDU advertising a root superior to the baseline root
 #     (lower priority, or equal priority + lower MAC): a root-bridge takeover.
 #   * rogue-bridge     — a new bridge (Bridge-ID MAC) speaking STP, not in the baseline.
@@ -14649,77 +14653,6 @@ _STP_WATCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'data', 'stp_watch.json')
 _stp_watch_lock = threading.Lock()
 _STP_EVENTS_CAP = 200
-_STP_FLOOD_RATE = 30            # BPDUs/s above this (with volume) == flood
-_STP_TCN_CHURN = 3              # TCN/TC events in a window above this == instability
-_STP_SRC_RE = re.compile(r'^([0-9a-fA-F:]{17})\s*>\s*'
-                         r'(01:80:c2:00:00:00|01:00:0c:cc:cc:cd)')
-_STP_TYPE_RE = re.compile(r'STP 802\.1(\w)')
-_STP_BRIDGE_RE = re.compile(r'bridge-id ([0-9a-fA-F]{4})\.([0-9a-fA-F:]{17})')
-_STP_ROOT_RE = re.compile(r'root-id ([0-9a-fA-F]{4})\.([0-9a-fA-F:]{17}),'
-                          r'\s*root-pathcost (\d+)')
-_STP_FLAGS_RE = re.compile(r'Flags \[([^\]]*)\]')
-
-
-def _mac_int(mac):
-    try:
-        return int(mac.replace(':', ''), 16)
-    except (ValueError, AttributeError):
-        return 0
-
-
-def _parse_stp_capture(output):
-    """Parse `tcpdump -e -t -v` text over BPDUs into events. Each BPDU is a header
-    line (`<src> > <group-mac>, 802.3, ... STP 802.1d, Config, Flags [...], bridge-id
-    PRIO.MAC.PORT`) optionally followed by a `root-id PRIO.MAC, root-pathcost N` line.
-    TCN BPDUs are a single `STP 802.1d, Topology Change` line."""
-    events = []
-    cur = None
-    for raw in output.splitlines():
-        line = raw.strip()
-        if 'STP 802.1' in line:
-            if cur:
-                events.append(cur)
-            src = _STP_SRC_RE.match(line)
-            t = _STP_TYPE_RE.search(line)
-            tletter = t.group(1).lower() if t else 'd'
-            is_pvst = ('pid PVST' in line
-                       or (src and src.group(2) == '01:00:0c:cc:cc:cd'))
-            if is_pvst:
-                proto = 'pvst+'
-            elif tletter == 'w':
-                proto = 'rstp'
-            elif tletter == 's':
-                proto = 'mstp'
-            else:
-                proto = 'stp'
-            is_tcn = 'Topology Change' in line and 'Config' not in line
-            fl = _STP_FLAGS_RE.search(line)
-            flagset = ([f.strip() for f in fl.group(1).split(',') if f.strip()]
-                       if fl else [])
-            br = _STP_BRIDGE_RE.search(line)
-            cur = {'src': src.group(1).lower() if src else None,
-                   'dst': src.group(2) if src else None,
-                   'proto': proto, 'kind': 'tcn' if is_tcn else 'config',
-                   'tc': 'Topology change' in flagset, 'flags': flagset,
-                   'bridge_prio': int(br.group(1), 16) if br else None,
-                   'bridge_mac': br.group(2).lower() if br else None,
-                   'root_prio': None, 'root_mac': None, 'pathcost': None,
-                   'port_role': None, 'vlan': None}
-            continue
-        if cur is None:
-            continue
-        rm = _STP_ROOT_RE.search(line)
-        if rm:
-            cur['root_prio'] = int(rm.group(1), 16)
-            cur['root_mac'] = rm.group(2).lower()
-            cur['pathcost'] = int(rm.group(3))
-            cur['vlan'] = cur['root_prio'] & 0x0FFF
-            pr = re.search(r'port-role (\w+)', line)
-            if pr:
-                cur['port_role'] = pr.group(1)
-    if cur:
-        events.append(cur)
-    return [e for e in events if e['src']]
 
 
 def _stp_watch_load():
@@ -14743,332 +14676,462 @@ def _stp_watch_save(d):
 
 
 def do_stp_baseline(action='get'):
-    """Manage the learned STP baseline (per-instance root bridge + legitimate bridges)."""
+    """Manage the learned STP v2 baseline (per-segment root bridge, legitimate
+    bridges, MST regions and per-MSTI regional roots). Reset re-learns on next run."""
     with _stp_watch_lock:
         if action == 'reset':
             _stp_watch_save({})
             return {'success': True, 'reset': True, 'baseline': {}}
         b = _stp_watch_load()
         return {'success': True, 'baseline': {
-            'roots': b.get('roots') or {}, 'bridges': b.get('bridges') or []}}
+            'roots': b.get('roots') or {}, 'bridges': b.get('bridges') or {},
+            'mst_regions': b.get('mst_regions') or {},
+            'msti_roots': b.get('msti_roots') or {}}}
 
 
-def _stp_analyze(events, seconds, baseline, learn=True):
-    """Pure classifier over parsed BPDU events. Separated from capture for the
-    self-test. May mutate+persist `baseline` when learn=True."""
-    seconds = max(1, int(seconds))
-
-    instances = {}
-    bridges = {}
-    tcn_count = 0
-    tc_count = 0
-    for e in events:
-        if e['bridge_mac']:
-            b = bridges.setdefault(e['bridge_mac'], {
-                'mac': e['bridge_mac'], 'proto': e['proto'], 'count': 0,
-                'roles': set()})
-            b['count'] += 1
-            if e['port_role']:
-                b['roles'].add(e['port_role'])
-        if e['kind'] == 'tcn':
-            tcn_count += 1
-        if e['tc']:
-            tc_count += 1
-        if e['root_prio'] is not None:
-            key = str(e['vlan'] if e['vlan'] is not None else 0)
-            inst = instances.setdefault(key, {
-                'vlan': int(key), 'proto': e['proto'], 'best': None,
-                'claimer': None, 'root_macs': set()})
-            inst['root_macs'].add(e['root_mac'])
-            cand = (e['root_prio'], _mac_int(e['root_mac']))
-            if inst['best'] is None or cand < inst['best']:
-                inst['best'] = cand
-                inst['claimer'] = {'prio': e['root_prio'], 'mac': e['root_mac'],
-                                   'by': e['bridge_mac'] or e['src']}
-
-    known_roots = dict(baseline.get('roots') or {})
-    known_bridges = set(baseline.get('bridges') or [])
-    had_baseline = bool(known_roots) or bool(known_bridges)
-
-    learned = False
-    if learn and not had_baseline and (instances or bridges):
-        baseline['roots'] = {
-            k: {'prio': inst['claimer']['prio'], 'mac': inst['claimer']['mac']}
-            for k, inst in instances.items() if inst['claimer']}
-        baseline['bridges'] = sorted(bridges.keys())
-        learned = True
-        known_roots = dict(baseline['roots'])
-        known_bridges = set(baseline['bridges'])
-        had_baseline = True
-
-    PRIORITY = ['root-hijack', 'rogue-bridge', 'bpdu-flood', 'topology-change', 'clean']
-    verdict = 'clean'
-    reasons = []
-
-    def bump(v):
-        nonlocal verdict
-        if PRIORITY.index(v) < PRIORITY.index(verdict):
-            verdict = v
-
-    # Root hijack: an advertised root superior to (or displacing) the baseline root.
-    if had_baseline:
-        for k in sorted(instances, key=lambda x: int(x)):
-            inst = instances[k]
-            base = known_roots.get(k)
-            if not base or not inst['claimer']:
-                continue
-            cand = inst['best']
-            base_t = (base['prio'], _mac_int(base['mac']))
-            if cand < base_t:
-                bump('root-hijack')
-                c = inst['claimer']
-                where = f"VLAN {inst['vlan']}" if inst['proto'] == 'pvst+' else \
-                    (f"instance {inst['vlan']}" if inst['vlan'] else "the CIST")
-                reasons.append(
-                    f"ROOT HIJACK on {where}: {c['by']} is advertising root "
-                    f"{c['prio']}.{c['mac']} — superior to the baseline root "
-                    f"{base['prio']}.{base['mac']}. It wins the election and becomes "
-                    f"the root bridge, pulling traffic through it (L2 MITM). Enable "
-                    f"Root Guard / BPDU Guard")
-
-    # Rogue bridges (new senders).
-    if had_baseline:
-        for mac in sorted(bridges):
-            if mac not in known_bridges:
-                bump('rogue-bridge')
-                reasons.append(
-                    f"New STP bridge {mac} ({bridges[mac]['proto'].upper()}) — not in "
-                    f"the baseline; an unexpected switch (or a spoofed bridge) is "
-                    f"participating in spanning tree on this segment")
-
-    # BPDU flood (reconvergence-storm DoS).
-    rate = round(len(events) / seconds, 2)
-    if len(events) > 100 and rate > _STP_FLOOD_RATE:
-        bump('bpdu-flood')
-        reasons.append(
-            f"BPDU flood: {rate} BPDUs/s (normal is ~1 per bridge every 2s) — a "
-            f"spanning-tree storm forcing constant reconvergence (DoS)")
-
-    # Topology-change churn (MAC-table flushing).
-    if (tcn_count + tc_count) > _STP_TCN_CHURN:
-        bump('topology-change')
-        reasons.append(
-            f"Topology-change churn: {tcn_count} TCN + {tc_count} TC-flagged BPDUs in "
-            f"{seconds}s — repeated topology changes flush the MAC tables (traffic "
-            f"floods, which aids sniffing) and can be a TCN-flood attack")
-
-    advisories = []
-    if instances or bridges:
-        advisories.append(
-            "Harden spanning tree: BPDU Guard + PortFast on every edge/access port "
-            "(any BPDU there err-disables the port), Root Guard on ports toward "
-            "downstream switches (rejects superior BPDUs), and set your real root/backup "
-            "root to a low priority (0/4096) so a rogue can't outbid them.")
-
-    def _pub_inst(k, inst):
-        base = known_roots.get(k)
-        c = inst['claimer'] or {}
-        status = 'known'
-        if base:
-            if (c.get('prio'), _mac_int(c.get('mac', ''))) < (base['prio'],
-                                                              _mac_int(base['mac'])):
-                status = 'hijacked'
-        elif had_baseline:
-            status = 'new'
-        else:
-            status = 'learned'
-        return {'vlan': inst['vlan'], 'proto': inst['proto'],
-                'root_prio': c.get('prio'), 'root_mac': c.get('mac'),
-                'advertised_by': c.get('by'),
-                'baseline_root': (f"{base['prio']}.{base['mac']}" if base else None),
-                'status': status}
-
-    if reasons:
-        summary = reasons
-    elif not (instances or bridges):
-        summary = ['No BPDUs seen — no spanning tree on this segment (an access port '
-                   'with BPDU Guard, or an isolated link)']
-    else:
-        summary = ['Spanning-tree root(s) and bridges match the trusted baseline']
-
-    return {
-        'success': True,
-        'verdict': verdict,
-        'reasons': summary,
-        'learned': learned,
-        'bridge_count': len(bridges),
-        'instance_count': len(instances),
-        'packet_count': len(events),
-        'rate': rate,
-        'tcn_count': tcn_count,
-        'tc_count': tc_count,
-        'instances': [_pub_inst(k, instances[k])
-                      for k in sorted(instances, key=lambda x: int(x))],
-        'bridges': [{'mac': m, 'proto': bridges[m]['proto'],
-                     'roles': sorted(bridges[m]['roles']), 'count': bridges[m]['count'],
-                     'baseline': m in known_bridges} for m in sorted(bridges)],
-        'advisories': advisories,
-    }
+_STP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+# IEEE 802.1D/w/s BPDUs ride LLC/SNAP to 01:80:c2:00:00:00; Cisco PVST+/RPVST+
+# rides SNAP to 01:00:0c:cc:cc:cd. The v2 engine decodes both from the raw MAC
+# header, so capture is a raw pcap (not tcpdump text) over just those two groups.
+_STP_BPF = '(ether dst 01:80:c2:00:00:00) or (ether dst 01:00:0c:cc:cc:cd)'
+# Finding-id -> UI verdict bucket. First match in this order wins (worst first).
+_STP_VERDICT_BUCKETS = [
+    ('root-hijack', {'STP-002', 'STP-024'}),                        # superior-root / regional-root takeover
+    ('bpdu-flood', {'STP-006', 'STP-007', 'STP-008', 'STP-016'}),   # TCN / BPDU / RSTP-proposal storm
+    ('rogue-bridge', {'STP-004', 'STP-005', 'STP-019', 'STP-028'}), # new bridge / edge BPDU / multiple roots
+    ('topology-change', {'STP-001', 'STP-003', 'STP-023', 'STP-025', 'STP-030'}),
+]
+_STP_SEV_TO_GUARD = {'CRITICAL': 'critical', 'HIGH': 'high', 'MEDIUM': 'medium',
+                     'LOW': 'low', 'INFO': 'info'}
+_STP_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
 
 
-def _stp_capture(interface, seconds):
-    """One passive tcpdump window over BPDUs -> (raw, error). Uses -e for the sender
-    MAC; the BPF covers IEEE (01:80:c2:00:00:00) and Cisco PVST+ (01:00:0c:cc:cc:cd)."""
+def _stp_import():
+    """Import the vendored STP v2 engine (python/ on sys.path). Pure stdlib at
+    runtime; scapy appears only in the engine's own test harness, never here."""
+    if _STP_PY_DIR not in sys.path:
+        sys.path.insert(0, _STP_PY_DIR)
+    import stpwatch as _w
+    return _w
+
+
+def _stp_capture_pcap(interface, seconds):
+    """One passive tcpdump window over BPDUs -> (frames, error). Writes a pcap and
+    reads raw Ethernet frames back; emits nothing on the wire."""
     if not _have('tcpdump'):
-        return '', 'tcpdump is not installed. Click Install to add it.'
-    bpf = '(ether dst 01:80:c2:00:00:00) or (ether dst 01:00:0c:cc:cc:cd)'
-    res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '128', '-c', '20000', bpf],
-               timeout=seconds + 8)
-    out = res['out']
-    if not out and res['err'] and ('permission' in res['err'].lower()
-                                   or "couldn't" in res['err'].lower()
-                                   or 'no such device' in res['err'].lower()
-                                   or 'syntax error' in res['err'].lower()):
-        return '', res['err'].strip()[:200]
-    return out, None
+        return [], 'tcpdump is not installed. Click Install to add it.'
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap')
+    os.close(fd)
+    try:
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-p',
+                    '-nn', '-s', '256', '-c', '20000', '-w', path, _STP_BPF],
+                   timeout=seconds + 8)
+        try:
+            empty = os.path.getsize(path) < 25
+        except OSError:
+            empty = True
+        if empty and res.get('err') and (
+                'permission' in res['err'].lower() or "couldn't" in res['err'].lower()
+                or 'no such device' in res['err'].lower() or 'syntax' in res['err'].lower()):
+            return [], res['err'].strip()[:200]
+        try:
+            return list(_lldp_read_pcap(path)), None
+        except ValueError:
+            return [], None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
-def do_stp_watch(interface=None, seconds=20, learn=True):
-    """Passive spanning-tree / BPDU security scanner (detection-only). BPDUs are ~2s
-    apart, so a slightly longer window. Learns the root(s) + legitimate bridges on
-    first run."""
+def _stp_verdict(ids):
+    """Map the set of fired finding-ids to the UI verdict bucket (worst wins)."""
+    for name, bucket in _STP_VERDICT_BUCKETS:
+        if ids & bucket:
+            return name
+    return None
+
+
+def _stp_baseline_is_v2(store):
+    """True only for a v2-engine baseline: it has a 'version' key and every root /
+    MSTI-root record is a BridgeID.to_json() dict (carries 'raw_priority'). Guards
+    against feeding a pre-v2 store to the engine (which would KeyError)."""
+    if not isinstance(store, dict) or not store.get('version'):
+        return False
+    recs = list((store.get('roots') or {}).values()) + \
+        list((store.get('msti_roots') or {}).values())
+    return all(isinstance(v, dict) and 'raw_priority' in v for v in recs)
+
+
+def _stp_scan_frames(frames, iface, baseline=None, edge_ifaces=(), learning=False,
+                     start_ts=None):
+    """Decode + detect: parse_frame -> Analyzer.process over raw frames. Returns
+    (findings_rows, analyzer, regions, bpdu_count). Separated from capture so the
+    self-test drives the exact decode+detect path the live watcher uses."""
+    W = _stp_import()
+    base_ts = start_ts if start_ts is not None else (frames[0][0] if frames else time.time())
+    an = W.Analyzer(baseline=baseline, edge_ifaces=edge_ifaces, start_ts=base_ts,
+                    learning=learning)
+    regions, rows, bpdus = {}, {}, 0
+    for ts, raw in frames:
+        try:
+            p = W.parse_frame(raw, iface, ts)
+        except Exception:
+            p = None
+        if p is None:
+            continue
+        bpdus += 1
+        reg = getattr(p, 'region', None)
+        if reg:
+            regions.setdefault(reg, {'first_seen': ts})
+        for f in an.process(p):
+            sev = _STP_SEV_TO_GUARD.get(f.severity, 'info')
+            k = (f.id, f.iface, f.vlan)
+            r = rows.get(k)
+            if r is None:
+                rows[k] = {'code': f.id, 'name': f.name, 'severity': sev,
+                           'iface': f.iface, 'vlan': f.vlan, 'summary': f.summary,
+                           'evidence': {kk: str(vv) for kk, vv in (f.evidence or {}).items()},
+                           'count': 1}
+            else:
+                r['count'] += 1
+    an._seen_regions = regions
+    out = sorted(rows.values(), key=lambda r: (-_STP_SEV_RANK.get(r['severity'], 0),
+                                               r['code'], str(r['iface']), str(r['vlan'])))
+    return out, an, regions, bpdus
+
+
+def do_stp_watch(interface=None, seconds=20, learn=True, edge=()):
+    """Passive spanning-tree / BPDU SECURITY scanner (detection-only) — v2. Decodes
+    802.1D / RSTP / MSTP (incl. every per-MSTI record) and Cisco PVST+/RPVST+ from
+    the BPDUs the switches already emit, and flags tampering: superior-root takeover
+    (yersinia), floods/DoS, field-sanity violations, MST digest/region mismatch, and
+    the per-instance (MSTI) takeover tier — 31 checks (STP-001..031), no CVEs (BPDUs
+    are unauthenticated by design). Never transmits. Learns the legitimate root(s) +
+    bridges on first run (grace period) unless a baseline is already stored."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
     if iface not in _list_iface_names(include_virtual=True):
         return {'success': False, 'error': f'unknown interface: {iface}'}
     seconds = _clamp_int(seconds, 20, 5, 50)
-
-    text, err = _stp_capture(iface, seconds)
+    frames, err = _stp_capture_pcap(iface, seconds)
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
-    events = _parse_stp_capture(text)
 
     with _stp_watch_lock:
-        baseline = _stp_watch_load()
-        result = _stp_analyze(events, seconds, baseline, learn=learn)
-        if result.get('learned'):
-            _stp_watch_save(baseline)
-        if result['verdict'] != 'clean':
+        store = _stp_watch_load()
+        # The v2 engine baseline carries a 'version' key and raw_priority-shaped
+        # root records (BridgeID.to_json). A pre-v2 store is incompatible, so ignore
+        # it and re-learn (the next learn overwrites it in the v2 shape).
+        baseline = store if (_stp_baseline_is_v2(store)
+                             and (store.get('roots') or store.get('msti_roots'))) else None
+        learning = bool(learn and baseline is None)
+        rows, an, regions, bpdus = _stp_scan_frames(
+            frames, iface, baseline=baseline, edge_ifaces=tuple(edge), learning=learning)
+        learned = False
+        if learning and bpdus:
+            _stp_watch_save(an.build_baseline())
+            learned = True
+
+    ids = {r['code'] for r in rows}
+    verdict = _stp_verdict(ids)
+    if verdict is None:
+        verdict = 'anomaly' if rows else 'clean'
+    reasons = [f"{r['code']} {r['name']}: {r['summary']}"
+               + (f" (x{r['count']})" if r['count'] > 1 else '') for r in rows]
+
+    health = an.health()
+    mhealth = an.msti_health()
+    if verdict != 'clean':
+        with _stp_watch_lock:
             b = _stp_watch_load()
-            evs = b.get('events') or []
-            evs.append({'ts': int(time.time()), 'verdict': result['verdict'],
-                        'reasons': result['reasons'][:6]})
+            evs = (b.get('events') or [])
+            evs.append({'ts': int(time.time()), 'verdict': verdict,
+                        'reasons': [r['code'] for r in rows][:8]})
             b['events'] = evs[-_STP_EVENTS_CAP:]
             _stp_watch_save(b)
 
-    result['interface'] = iface
-    result['seconds'] = seconds
-    return result
+    return {
+        'success': True, 'interface': iface, 'seconds': seconds,
+        'verdict': verdict, 'learned': learned,
+        'findings': rows, 'reasons': reasons,
+        'segments': health, 'msti': mhealth,
+        'summary': {
+            'bpdus': bpdus, 'segments': len(health), 'msti': len(mhealth),
+            'findings': len(rows),
+            'critical': sum(1 for r in rows if r['severity'] == 'critical'),
+            'high': sum(1 for r in rows if r['severity'] == 'high'),
+            'medium': sum(1 for r in rows if r['severity'] == 'medium'),
+        },
+        'source': f'passive capture on {iface}',
+    }
 
 
 def _stp_selftest():
-    """Self-test the STP/BPDU detectors with synthetic captures, plus a Scapy
-    end-to-end leg (craft a real superior-root BPDU -> pcap -> tcpdump -e -> parse)."""
+    """STP Watch v2 self-test: the vendored engine's own 151-check tier (its own
+    interpreter — scapy only for the cross-check leg), plus an in-app leg that
+    crafts a yersinia-style superior-root BPDU, writes a pcap, and reads it back
+    through the real capture->parse->Analyzer path, asserting STP-002 + verdict."""
     scenarios = []
 
-    def cfg(src, root_prio, root_mac, bridge_prio=None, bridge_mac=None, flags='none',
-            pathcost=0, pvst=False):
-        bridge_prio = bridge_prio if bridge_prio is not None else root_prio
-        bridge_mac = bridge_mac or src
-        dst = '01:00:0c:cc:cc:cd' if pvst else '01:80:c2:00:00:00'
-        pid = 'oui Cisco (0x00000c), pid PVST (0x010b), length 41: ' if pvst else ''
-        return (f"{src} > {dst}, 802.3, length 49: LLC, dsap STP (0x42) Individual, "
-                f"ssap STP (0x42) Command, ctrl 0x03: {pid}STP 802.1d, Config, "
-                f"Flags [{flags}], bridge-id {bridge_prio:04x}.{bridge_mac}.0000, "
-                f"length 35\n"
-                f"\tmessage-age 1.00s, max-age 20.00s, hello-time 2.00s, "
-                f"forwarding-delay 15.00s\n"
-                f"\troot-id {root_prio:04x}.{root_mac}, root-pathcost {pathcost}")
+    def sc(name, ok, expect='', got=''):
+        scenarios.append({'name': name, 'expect': expect, 'got': str(got), 'pass': bool(ok)})
 
-    def tcn(src):
-        return (f"{src} > 01:80:c2:00:00:00, 802.3, length 7: LLC, dsap STP (0x42) "
-                f"Individual, ssap STP (0x42) Command, ctrl 0x03: STP 802.1d, "
-                f"Topology Change")
+    # 1. The vendored engine's own tier (subprocess; prints 'N/N self-tests passed').
+    res = _run([sys.executable or 'python3', os.path.join(_STP_PY_DIR, 'test_stpwatch.py')],
+               timeout=180)
+    out = (res.get('out') or '') + (res.get('err') or '')
+    m = re.search(r'(\d+)/(\d+)\s+self-tests passed', out)
+    if m:
+        passed, total = int(m.group(1)), int(m.group(2))
+        for i in range(passed):
+            scenarios.append({'name': 'stpwatch check %d' % (i + 1), 'pass': True,
+                              'expect': 'pass', 'got': 'pass'})
+        if passed != total:
+            sc('stpwatch engine self-test', False, '%d/%d' % (total, total),
+               '%d/%d' % (passed, total))
+    else:
+        sc('stpwatch engine self-test', False, 'N/N self-tests passed',
+           'rc %s %s' % (res.get('rc'), out.strip()[-160:]))
 
-    def run(name, text, seconds, baseline, expect):
-        events = _parse_stp_capture(text)
-        res = _stp_analyze(events, seconds, dict(baseline or {}), learn=not baseline)
-        ok = res['verdict'] == expect
-        scenarios.append({'name': name, 'expect': expect, 'got': res['verdict'],
-                          'events': len(events), 'pass': ok})
-        return res
-
-    # Baseline: root of the CIST is 8000.00:11:22:33:44:55 (priority 32768), one bridge.
-    base = {'roots': {'0': {'prio': 0x8000, 'mac': '00:11:22:33:44:55'}},
-            'bridges': ['00:11:22:33:44:55']}
-
-    # 1. clean: the known root re-advertising itself.
-    run('clean', cfg('00:11:22:33:44:55', 0x8000, '00:11:22:33:44:55'), 20, base,
-        'clean')
-    # 2. root-hijack: a new bridge claims root with priority 0 (superior).
-    run('root-hijack', cfg('de:ad:be:ef:00:01', 0x0000, 'de:ad:be:ef:00:01'), 20, base,
-        'root-hijack')
-    # 3. rogue-bridge: a new bridge advertising the *existing* root (not superior).
-    run('rogue-bridge', cfg('de:ad:be:ef:00:02', 0x8000, '00:11:22:33:44:55',
-                            bridge_mac='de:ad:be:ef:00:02'), 20, base, 'rogue-bridge')
-    # 4. topology-change: known bridge + several TCNs (MAC-flush churn).
-    run('topology-change',
-        cfg('00:11:22:33:44:55', 0x8000, '00:11:22:33:44:55') + "\n"
-        + "\n".join(tcn('00:11:22:33:44:55') for _ in range(4)), 20, base,
-        'topology-change')
-    # 5. bpdu-flood: a burst of BPDUs from the known root.
-    run('bpdu-flood',
-        "\n".join(cfg('00:11:22:33:44:55', 0x8000, '00:11:22:33:44:55')
-                  for _ in range(200)), 3, base, 'bpdu-flood')
-    # 6. pvst+ parse: per-VLAN BPDU, VLAN encoded in the priority low bits.
-    pev = _parse_stp_capture(cfg('00:11:22:33:44:55', 0x8064, '00:11:22:33:44:55',
-                                 bridge_prio=0x8064, pvst=True))
-    p_ok = (len(pev) == 1 and pev[0]['proto'] == 'pvst+' and pev[0]['vlan'] == 100
-            and pev[0]['root_prio'] == 0x8064)
-    scenarios.append({'name': 'pvst-parse', 'expect': 'pvst+/vlan100',
-                      'got': f"{pev[0]['proto'] if pev else '-'}/vlan"
-                             f"{pev[0]['vlan'] if pev else '?'}", 'pass': p_ok})
-    # 7. parse: TC flag + fields.
-    fev = _parse_stp_capture(cfg('00:11:22:33:44:55', 0x8000, '00:11:22:33:44:55',
-                                 flags='Topology change, Topology change ACK'))
-    f_ok = (len(fev) == 1 and fev[0]['tc'] is True
-            and fev[0]['root_mac'] == '00:11:22:33:44:55'
-            and fev[0]['bridge_prio'] == 0x8000)
-    scenarios.append({'name': 'flags-parse', 'expect': 'tc=True',
-                      'got': f"tc={fev[0]['tc'] if fev else '?'}", 'pass': f_ok})
-
-    # Scapy end-to-end: craft a real superior-root (priority 0) BPDU.
-    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    # 2. In-app leg: craft BPDUs with scapy, write a pcap, read + analyze through
+    #    the real capture->engine path. A legit root (prio 8192) learned during the
+    #    grace window, then a yersinia-style superior root (prio 0, LAA source) past
+    #    grace -> STP-002 CRITICAL, verdict root-hijack.
     try:
-        import tempfile
-        from scapy.all import Dot3, LLC, STP, wrpcap
-        if _have('tcpdump'):
-            pkt = (Dot3(dst='01:80:c2:00:00:00', src='de:ad:be:ef:00:01')
-                   / LLC(dsap=0x42, ssap=0x42, ctrl=3)
-                   / STP(rootid=0, rootmac='de:ad:be:ef:00:01', bridgeid=0,
-                         bridgemac='de:ad:be:ef:00:01', pathcost=0))
-            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
-                pcap_path = tf.name
-            wrpcap(pcap_path, [pkt])
-            res = _run(['tcpdump', '-e', '-nn', '-t', '-v', '-r', pcap_path], timeout=10)
-            evs = _parse_stp_capture(res['out'])
-            e = evs[0] if evs else {}
-            base2 = {'roots': {'0': {'prio': 0x8000, 'mac': '00:11:22:33:44:55'}},
-                     'bridges': ['00:11:22:33:44:55']}
-            cls = _stp_analyze(evs, 20, dict(base2), learn=False)
-            ok = (e.get('root_prio') == 0 and e.get('src') == 'de:ad:be:ef:00:01'
-                  and cls['verdict'] == 'root-hijack')
-            scapy_result = {'ran': True, 'root_prio': e.get('root_prio'),
-                            'src': e.get('src'), 'verdict': cls['verdict'], 'pass': ok,
-                            'tcpdump_out': res['out'].strip()[:200]}
-            try:
-                os.remove(pcap_path)
-            except OSError:
-                pass
-    except Exception as e:
-        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+        from scapy.layers.l2 import Dot3, LLC, STP
 
-    passed = all(s['pass'] for s in scenarios) and (not scapy_result.get('ran')
-                                                    or scapy_result.get('pass'))
-    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+        def bpdu(src, root_prio, root_mac):
+            return bytes(Dot3(src=src, dst='01:80:c2:00:00:00')
+                         / LLC(dsap=0x42, ssap=0x42, ctrl=3)
+                         / STP(rootid=root_prio, rootmac=root_mac,
+                               bridgeid=root_prio, bridgemac=src, pathcost=0))
+        legit = bpdu('00:11:22:33:44:55', 8192, '00:11:22:33:44:55')
+        superior = bpdu('ba:ad:ba:ad:00:01', 0, 'ba:ad:ba:ad:00:01')
+        frames = [(1000.0 + i, legit) for i in range(3)] + [(1040.0, superior)]
+        rows, an, _, bpdus = _stp_scan_frames(frames, 'eth0', start_ts=1000.0)
+        ids = {r['code'] for r in rows}
+        sc('stp-superior-root-takeover', 'STP-002' in ids and _stp_verdict(ids) == 'root-hijack',
+           'STP-002 root-hijack', f'{sorted(ids)}/{_stp_verdict(ids)}')
+        sc('stp-bpdus-decoded', bpdus == 4, '4 BPDUs decoded', bpdus)
+    except Exception as e:
+        sc('stp-inapp-leg', False, 'ran', '%s: %s' % (type(e).__name__, e))
+
+    return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios}
+
+
+# --------------------------------------------------------------------------
+# MRP Watch: passive MVRP / MMRP / GVRP / GMRP registration-protocol monitor.
+#
+# The standards-based siblings of Cisco's VTP (vtpwatch): the 802.1ak Multiple
+# Registration Protocols — MVRP (EtherType 0x88F5, dst 01:80:C2:00:00:21) and
+# MMRP (0x88F6, dst ...:20) — plus the legacy 802.1D GARP applications GVRP/GMRP
+# (no EtherType, LLC/802.3-length framed to the same two MACs). This is NOT the
+# IEC 62439-2 ring-redundancy "MRP"; it is the VLAN/multicast registration plane.
+# MVRP and MMRP use DIFFERENT EtherTypes, so a filter on 0x88F5 alone silently
+# drops 100% of MMRP — the capture admits both plus the whole GARP application
+# block 01:80:C2:00:00:20-2F. Detection-only; never transmits. Vendored pure-
+# python engine python/mrpwatch.py (21 codes, no CVEs — the four protocols have
+# none, same shape as stpwatch). verdict: clean / observed / suspicious / attack.
+# --------------------------------------------------------------------------
+_MRP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+# Both EtherTypes, plus the GARP application block bound purely by destination MAC
+# (GARP has no EtherType). Boundary-tested in the engine: matches :20-:2f, rejects
+# :00 (STP) / :02 (LACP) / :0e (LLDP) / :30.
+_MRP_BPF = ('ether proto 0x88f5 or ether proto 0x88f6 or '
+            '(ether[0:4] = 0x0180c200 and ether[4:2] >= 0x0020 and ether[4:2] <= 0x002f)')
+_MRP_SEV_TO_GUARD = {'HIGH': 'high', 'MEDIUM': 'medium', 'LOW': 'low', 'INFO': 'info'}
+_MRP_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3}
+
+
+def _mrp_import():
+    """Import the vendored MRP engine (python/ on sys.path). Pure stdlib — no scapy
+    at runtime (scapy appears only in the module's own GARP cross-check test tier)."""
+    if _MRP_PY_DIR not in sys.path:
+        sys.path.insert(0, _MRP_PY_DIR)
+    import mrpwatch as _w
+    return _w
+
+
+def _mrp_scan_frames(frames, known_vlans=None):
+    """Feed (ts, raw) frames through the engine and collapse its per-frame Findings
+    into one row per (code, src, proto) with a count. Returns (rows, verdict).
+    Separated from capture so the self-test drives the exact same path."""
+    W = _mrp_import()
+    cfg = W.Config(known_vlans=set(known_vlans) if known_vlans else None)
+    watch = W.MrpWatch(cfg)
+    rows = {}
+    for ts, raw in frames:
+        for f in watch.feed(raw, ts):
+            sev = _MRP_SEV_TO_GUARD.get(f.severity, 'info')
+            k = (f.code, f.src, f.proto)
+            r = rows.get(k)
+            if r is None:
+                rows[k] = {'code': f.code, 'severity': sev, 'src': f.src,
+                           'proto': f.proto, 'title': f.title,
+                           'detail': {kk: str(vv) for kk, vv in f.detail.items()},
+                           'count': 1}
+            else:
+                r['count'] += 1
+    out = sorted(rows.values(), key=lambda r: (-_MRP_SEV_RANK.get(r['severity'], 0),
+                                               r['code'], r['src']))
+    if any(r['severity'] == 'high' for r in out):
+        verdict = 'attack'
+    elif any(r['severity'] == 'medium' for r in out):
+        verdict = 'suspicious'
+    elif out:
+        verdict = 'observed'
+    else:
+        verdict = 'clean'
+    return out, verdict
+
+
+def _mrp_capture(interface, seconds):
+    """One passive tcpdump window over MRP/GARP frames -> (frames, error). Writes a
+    pcap and reads raw Ethernet frames back; emits nothing on the wire."""
+    if not _have('tcpdump'):
+        return [], 'tcpdump is not installed. Click Install to add it.'
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap')
+    os.close(fd)
+    try:
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-p',
+                    '-nn', '-s', '256', '-c', '20000', '-w', path, _MRP_BPF],
+                   timeout=seconds + 8)
+        try:
+            empty = os.path.getsize(path) < 25        # pcap global header is 24 bytes
+        except OSError:
+            empty = True
+        if empty and res.get('err') and (
+                'permission' in res['err'].lower() or "couldn't" in res['err'].lower()
+                or 'no such device' in res['err'].lower() or 'syntax' in res['err'].lower()):
+            return [], res['err'].strip()[:200]
+        try:
+            return list(_lldp_read_pcap(path)), None
+        except ValueError:
+            return [], None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def do_mrp_watch(interface=None, seconds=20, known_vlans=None):
+    """Passive MVRP / MMRP / GVRP / GMRP registration-protocol monitor
+    (detection-only). Captures both modern EtherTypes AND the legacy GARP
+    application block, feeds the vendored engine, and folds its MRP-0xx findings
+    into a clean/observed/suspicious/attack verdict. A LeaveAll flood (MRP-101/
+    103/105/107) is the standards-based sibling of the VTP bomb; a burst of
+    never-before-seen VLANs/groups (MRP-102/104/106/108) is a VLAN-hopping
+    setup signal. known_vlans (operator baseline) only escalates severity — it
+    never gates detection."""
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return {'success': False, 'error': 'no interface to capture on'}
+    if iface not in _list_iface_names(include_virtual=True):
+        return {'success': False, 'error': f'unknown interface: {iface}'}
+    seconds = _clamp_int(seconds, 20, 5, 50)
+    frames, err = _mrp_capture(iface, seconds)
+    if err:
+        return {'success': False, 'interface': iface, 'error': err,
+                'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    rows, verdict = _mrp_scan_frames(frames, known_vlans=known_vlans)
+    reasons = [f"{r['code']} {r['proto']} {r['title']}"
+               + (f" (x{r['count']})" if r['count'] > 1 else '')
+               + (f" — src {r['src']}" if r['src'] else '')
+               for r in rows if r['severity'] != 'info']
+    return {
+        'success': True, 'interface': iface, 'seconds': seconds,
+        'verdict': verdict, 'findings': rows, 'reasons': reasons,
+        'summary': {'frames': len(frames), 'findings': len(rows),
+                    'high': sum(1 for r in rows if r['severity'] == 'high'),
+                    'medium': sum(1 for r in rows if r['severity'] == 'medium'),
+                    'protocols': sorted({r['proto'] for r in rows})},
+        'source': f'passive capture on {iface}',
+    }
+
+
+def _mrp_pcap_bytes(frames):
+    """Pack (ts, raw) frames into a classic Ethernet pcap (little-endian, us) so the
+    self-test exercises the exact capture->pcap->read->engine path, not just feed()."""
+    import struct as _st
+    blob = _st.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+    for ts, raw in frames:
+        blob += _st.pack('<IIII', int(ts), int((ts - int(ts)) * 1e6), len(raw), len(raw)) + raw
+    return blob
+
+
+def _mrp_selftest():
+    """MRP Watch self-test: the vendored module's own 65-check tier (its own
+    interpreter — it needs no root), plus an in-app leg that writes crafted MVRP /
+    MMRP frames to a real pcap and reads them back through the capture->engine path,
+    asserting the codes and verdict. No root, no wire."""
+    scenarios = []
+
+    def sc(name, ok, expect='', got=''):
+        scenarios.append({'name': name, 'expect': expect, 'got': str(got), 'pass': bool(ok)})
+
+    # 1. The vendored module's own tier (subprocess; prints 'N passed, F failed').
+    res = _run([sys.executable or 'python3', os.path.join(_MRP_PY_DIR, 'test_mrpwatch.py')],
+               timeout=120)
+    out = (res.get('out') or '') + (res.get('err') or '')
+    m = re.search(r'(\d+)\s+passed,\s+(\d+)\s+failed', out)
+    if m:
+        passed, failed = int(m.group(1)), int(m.group(2))
+        for i in range(passed):
+            scenarios.append({'name': 'mrpwatch check %d' % (i + 1), 'pass': True,
+                              'expect': 'pass', 'got': 'pass'})
+        if failed:
+            sc('mrpwatch module self-test', False, '0 failed', '%d failed' % failed)
+    else:
+        sc('mrpwatch module self-test', False, 'N passed, 0 failed',
+           'rc %s %s' % (res.get('rc'), out.strip()[-160:]))
+
+    # 2. In-app leg: craft frames, write a pcap, read + analyze through the adapter.
+    src = 'aa:bb:cc:00:00:01'
+    sb = bytes.fromhex(src.replace(':', ''))
+    # MVRP LeaveAll-only vector (lenflags 0x2000): version0, VLAN msg, msg+pdu endmarks.
+    mvrp_la = bytes.fromhex('0180c2000021') + sb + b'\x88\xf5' + \
+        bytes([0x00, 0x01, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00])
+    # MMRP (different EtherType — the "half-blind filter" case): group-MAC msg.
+    mmrp = bytes.fromhex('0180c2000020') + sb + b'\x88\xf6' + \
+        bytes([0x00, 0x02, 0x06, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00])
+    benign = bytes.fromhex('ffffffffffff') + sb + b'\x08\x00' + b'\x00' * 40  # IPv4, not ours
+
+    # (a) MVRP LeaveAll flood -> MRP-101 (HIGH) + MRP-001 presence, verdict attack.
+    la_frames = [(1000.0 + i, mvrp_la) for i in range(6)]
+    rows, verdict = _mrp_scan_frames(la_frames)
+    codes = {r['code'] for r in rows}
+    sc('mrp-mvrp-leaveall-flood', 'MRP-101' in codes and 'MRP-001' in codes
+       and verdict == 'attack', 'MRP-101+MRP-001 attack', f'{sorted(codes)}/{verdict}')
+    # (b) MMRP must be seen despite the different EtherType (half-blind-filter guard).
+    rows2, _ = _mrp_scan_frames([(2000.0, mmrp)])
+    sc('mrp-mmrp-distinct-ethertype', 'MRP-002' in {r['code'] for r in rows2},
+       'MRP-002', sorted(r['code'] for r in rows2))
+    # (c) Benign non-MRP traffic is ignored.
+    rows3, v3 = _mrp_scan_frames([(3000.0, benign)])
+    sc('mrp-benign-ignored', not rows3 and v3 == 'clean', 'clean/none', f'{len(rows3)}/{v3}')
+    # (d) Full capture->pcap->read->engine path (the real adapter wiring).
+    import tempfile
+    fd, p = tempfile.mkstemp(suffix='.pcap')
+    try:
+        os.write(fd, _mrp_pcap_bytes(la_frames))
+        os.close(fd)
+        rows4, v4 = _mrp_scan_frames(list(_lldp_read_pcap(p)))
+        sc('mrp-pcap-roundtrip', 'MRP-101' in {r['code'] for r in rows4} and v4 == 'attack',
+           'MRP-101 attack via pcap', f'{sorted(r["code"] for r in rows4)}/{v4}')
+    finally:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+    return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios}
 
 
 # --------------------------------------------------------------------------
@@ -27910,7 +27973,7 @@ def do_routing_selftest():
               'ndp': _ndp_selftest(), 'raguard': _raguard_selftest(),
               'ntp': _ntp_selftest(), 'icmp': _icmp_selftest(),
               'snmp': _snmp_selftest(), 'cert': _cert_selftest(),
-              'stp': _stp_selftest(), 'isis': _isis_selftest(),
+              'stp': _stp_selftest(), 'mrp': _mrp_selftest(), 'isis': _isis_selftest(),
               'smb': _smb_selftest(), 'relay': _relay_selftest(),
               'dtp': _dtp_selftest(), 'cdp': _cdp_selftest(), 'vtp': _vtp_selftest(),
               'eigrp': _eigrp_selftest(),
@@ -29983,6 +30046,18 @@ def register_network_diagnostics(app, logger=None):
             action = 'reset' if (data.get('action') == 'reset') else 'get'
         _log(f"net/stp-baseline {action}")
         return jsonify(do_stp_baseline(action))
+
+    @app.route('/api/net/mrp-watch', methods=['GET'])
+    def net_mrp_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
+        kv = [int(v) for v in re.split(r'[,\s]+', request.args.get('known_vlans') or '')
+              if v.strip().isdigit()]
+        _log(f"net/mrp-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_mrp_watch(interface=iface, seconds=secs,
+                                    known_vlans=kv or None))
 
     @app.route('/api/net/dtp-watch', methods=['GET'])
     def net_dtp_watch():
@@ -32777,6 +32852,15 @@ def _cli(argv=None):
     stst = sub.add_parser('stp-selftest', help='self-test the STP/BPDU detectors (no root)')
     stst.add_argument('--json', action='store_true', help='emit JSON')
 
+    mrw = sub.add_parser('mrp-watch', help='passive MVRP/MMRP/GVRP/GMRP registration scan')
+    mrw.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    mrw.add_argument('--seconds', '-s', type=int, default=20, help='capture window (5-50)')
+    mrw.add_argument('--known-vlans', default=None, help='operator VLAN baseline, comma-separated (scoping only)')
+    mrw.add_argument('--json', action='store_true', help='emit JSON')
+
+    mrst = sub.add_parser('mrp-selftest', help='self-test the MRP (MVRP/MMRP/GVRP/GMRP) detectors (no root)')
+    mrst.add_argument('--json', action='store_true', help='emit JSON')
+
     dt = sub.add_parser('dtp-watch', help='passive DTP / VLAN-hopping scan (Cisco)')
     dt.add_argument('--iface', '-i', default=None, help='interface (default: route)')
     dt.add_argument('--seconds', '-s', type=int, default=30, help='capture window (5-65)')
@@ -33669,20 +33753,19 @@ def _cli(argv=None):
         elif not r.get('success'):
             print(f"error: {r.get('error')}")
         else:
+            sm = r.get('summary', {})
             print(f"STP Watch [{r['interface']}] {r['seconds']}s: {r['verdict'].upper()}  "
-                  f"({r['packet_count']} BPDUs, {r['bridge_count']} bridge(s), "
-                  f"{r['instance_count']} instance(s); {r['tcn_count']} TCN)")
+                  f"({sm.get('bpdus', 0)} BPDUs, {sm.get('segments', 0)} segment(s), "
+                  f"{sm.get('msti', 0)} MSTI; {sm.get('findings', 0)} finding(s))")
             if r.get('learned'):
                 print("  (baseline learned this run)")
-            for inst in r.get('instances', []):
-                mark = '' if inst['status'] in ('known', 'learned') else f" [{inst['status']}]"
-                print(f"  {inst['proto'].upper()} vlan/inst {inst['vlan']}: root "
-                      f"{inst['root_prio']}.{inst['root_mac']} via {inst['advertised_by']}{mark}")
-            for b in r.get('bridges', []):
-                tag = '' if b['baseline'] else ' *NEW*'
-                print(f"    bridge {b['mac']} ({b['proto']}){tag}")
-            for rs in r.get('reasons', []):
-                print(f"  - {rs}")
+            for f in r.get('findings', []):
+                vlan = '' if f.get('vlan') in (None, '') else f" vlan={f['vlan']}"
+                print(f"  [{f['code']}] {f['severity'].upper()}{vlan}: {f['summary']}"
+                      + (f" (x{f['count']})" if f.get('count', 1) > 1 else ''))
+            for s in r.get('segments', []):
+                print(f"    segment vlan/inst {s['vlan']}: root {s['root']} "
+                      f"({s['bridges']} bridge(s), {s['bpdus']} BPDUs, {s['encap']})")
         return 0 if r.get('success') else 1
 
     if args.cmd == 'stp-selftest':
@@ -33691,15 +33774,42 @@ def _cli(argv=None):
             print(json.dumps(r, indent=2))
         else:
             for s in r['scenarios']:
-                print(f"  [{'PASS' if s['pass'] else 'FAIL'}] {s['name']}: "
-                      f"expect={s['expect']} got={s['got']}")
-            sc = r['scapy']
-            if sc.get('ran'):
-                print(f"  [{'PASS' if sc.get('pass') else 'FAIL'}] scapy-e2e: "
-                      f"root_prio={sc.get('root_prio')} verdict={sc.get('verdict')}")
-            else:
-                print(f"  [skip] scapy-e2e: {sc.get('reason')}")
-            print(f"STP self-test: {'OK' if r['success'] else 'FAILED'}")
+                if not s['pass'] or not s['name'].startswith('stpwatch check'):
+                    print(f"  [{'PASS' if s['pass'] else 'FAIL'}] {s['name']}: "
+                          f"expect={s['expect']} got={s['got']}")
+            print(f"STP self-test: {'OK' if r['success'] else 'FAILED'} "
+                  f"({sum(1 for s in r['scenarios'] if s['pass'])}/{len(r['scenarios'])})")
+        return 0 if r['success'] else 1
+
+    if args.cmd == 'mrp-watch':
+        kv = [int(v) for v in re.split(r'[,\s]+', args.known_vlans or '') if v.strip().isdigit()]
+        r = do_mrp_watch(interface=args.iface, seconds=args.seconds, known_vlans=kv or None)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            sm = r.get('summary', {})
+            print(f"MRP Watch [{r['interface']}] {r['seconds']}s: {r['verdict'].upper()}  "
+                  f"({sm.get('frames', 0)} frame(s), {sm.get('findings', 0)} finding(s); "
+                  f"{', '.join(sm.get('protocols', [])) or 'none'})")
+            for f in r.get('findings', []):
+                src = f" src {f['src']}" if f.get('src') else ''
+                print(f"  [{f['code']}] {f['severity'].upper()} {f['proto']}: {f['title']}"
+                      + (f" (x{f['count']})" if f.get('count', 1) > 1 else '') + src)
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'mrp-selftest':
+        r = _mrp_selftest()
+        if args.json:
+            print(json.dumps(r, indent=2))
+        else:
+            for s in r['scenarios']:
+                if not s['pass'] or not s['name'].startswith('mrpwatch check'):
+                    print(f"  [{'PASS' if s['pass'] else 'FAIL'}] {s['name']}: "
+                          f"expect={s['expect']} got={s['got']}")
+            print(f"MRP self-test: {'OK' if r['success'] else 'FAILED'} "
+                  f"({sum(1 for s in r['scenarios'] if s['pass'])}/{len(r['scenarios'])})")
         return 0 if r['success'] else 1
 
     if args.cmd == 'dtp-watch':
