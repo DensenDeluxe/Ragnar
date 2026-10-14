@@ -578,6 +578,28 @@ verdict:
    must never read as a clone. True NDP cache poisoning is
    [ndpwatch](watchtower.md)'s job — macwatch only consumes NDP to learn
    bindings.
+6. **L2 security (MACsec / 802.1X-EAPOL / MKA)** — **opt-in passive sniff.** The
+   neighbour-table/arp-scan model above can only see what reaches the ARP/NDP
+   caches; the link-security control plane rides dedicated EtherTypes that never
+   do. Tick **L2 security** (`l2sec=1`) to add a short, harmless capture
+   (`tcpdump`, no frames emitted) of MACsec (802.1AE, `0x88E5`) and 802.1X /
+   EAPOL / MKA (`0x888E`), parse the SecTAG and EAPOL headers directly off the
+   wire, and fold the result into the verdict:
+   - **MACSEC-010** — a MACsec **packet number that rolls backwards** inside one
+     secure association (replay protection off, or an active replay) → **spoofed**.
+   - **MACSEC-011** — a secure-channel **SCI whose system-identifier contradicts
+     the frame's own source MAC** (a spoofed secure channel) → **spoofed**.
+   - **MACSEC-012** — a **confidentiality downgrade**: an association once seen
+     encrypted (`TCI.E=1`) now arriving integrity-only (forced cipher-off) → **spoofed**.
+   - **EAPOL-010** — an **EAPOL-Logoff burst** that force-deauthenticates an
+     802.1X port (port-access denial of service) → **spoofed**.
+   - **EAPOL-011** — an **EAPOL-Start flood** (supplicant-impersonation / access
+     flood) → **suspicious**.
+   - **MACSEC-013 / EAPOL-012 / MKA-010** — MACsec channels, 802.1X port
+     authentication, and MKA key-agreement participants that are legitimately in
+     use are **inventoried (INFO), never flagged**.
+   This is posture detection, not a CVE probe — MAC Watch carries no CVEs. Off by
+   default so the background / e-Paper path stays fast; enable it per scan.
 
 Every MAC is classified as **Vendor** (universal/burned-in), **FHRP virtual**
 (HSRP/VRRP/GLBP redundancy), **Spoofed**
@@ -605,9 +627,11 @@ limited. True device tracking across a MAC *and* IP change needs 802.11
 probe-request fingerprinting, which is monitor-mode only; MAC Watch labels its
 tracking as the neighbour-table approximation.
 
-- Endpoints: `GET /api/net/mac-watch` `?scan=0|1&interface=<if>`,
+- Endpoints: `GET /api/net/mac-watch` `?scan=0|1&interface=<if>&l2sec=0|1&l2sec_seconds=<2-30>`,
   `POST /api/net/mac-watch-reset` · store: `data/mac_watch.json` · uses
-  `ip neigh` (iproute2) + optional `arp-scan`; OUI DB from `arp-scan`/`nmap`
+  `ip neigh` (iproute2) + optional `arp-scan`; OUI DB from `arp-scan`/`nmap`;
+  the opt-in L2-security sniff uses `tcpdump` + `scapy` (best-effort — silently
+  skipped when absent)
 
 ### 🛡️ Network Integrity Monitor
 The one **passive, alerting** tool in the suite (everything else is on-demand).

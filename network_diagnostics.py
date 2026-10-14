@@ -1324,6 +1324,205 @@ _MAC_EVENTS_CAP = 200
 # One MAC bound to at least this many distinct IPs at once is a clone candidate.
 _MAC_CLONE_MIN_IPS = 2
 
+# --------------------------------------------------------------------------
+# L2-security passive sniff (MAC Watch v4) — MACsec / 802.1X-EAPOL / MKA.
+#
+# The neighbour-table/arp-scan model above cannot see the link-security control
+# plane: MACsec (802.1AE), 802.1X port authentication (EAPOL) and the MACsec Key
+# Agreement protocol (MKA, EAPOL type 5) ride dedicated EtherTypes that never
+# reach the ARP/NDP caches. A short, OPT-IN passive capture (no frames are ever
+# emitted) parses the SecTAG and EAPOL headers directly off the wire and folds
+# the findings into the same verdict:
+#   * MACSEC-010  PN regression inside one secure association — a replayed or
+#                 rolled-back packet number (replay protection off, or an active
+#                 replay).                                                   HIGH
+#   * MACSEC-011  SCI system-identifier != transmitting source MAC — the secure
+#                 channel claims an identity the frame's own source contradicts
+#                 (spoofed secure channel).                                  HIGH
+#   * MACSEC-012  confidentiality downgrade — an SA seen encrypted (TCI.E=1)
+#                 now arriving integrity-only (E=0): forced cipher-off.      HIGH
+#   * MACSEC-013  MACsec secure channel observed (inventory).               INFO
+#   * EAPOL-010   EAPOL-Logoff burst — spoofed Logoff frames force-deauth the
+#                 port (802.1X denial of service).                          HIGH
+#   * EAPOL-011   EAPOL-Start flood — supplicant-impersonation / access DoS. MEDIUM
+#   * EAPOL-012   802.1X port authentication observed (inventory).          INFO
+#   * MKA-010     MACsec Key Agreement (MKA) participant observed (inventory).INFO
+# MAC Watch carries no CVEs; these are passive posture signals, not CVE probes.
+_MACSEC_ETHERTYPE = 0x88E5
+_EAPOL_ETHERTYPE = 0x888E
+_L2SEC_BPF = 'ether proto 0x88e5 or ether proto 0x888e'
+_L2SEC_CAPTURE_S = 6               # default passive-sniff window (opt-in)
+# EAPOL abuse thresholds (per capture window).
+_EAPOL_LOGOFF_MIN = 3              # >= this many Logoff frames -> deauth DoS
+_EAPOL_START_FLOOD = 8             # >= this many Start frames -> access flood
+
+
+def _macsec_parse(src_mac, payload):
+    """Parse an 802.1AE SecTAG (the bytes AFTER the 0x88E5 EtherType) into
+    {an, pn, enc, icv, sci, sci_mac} or None if too short to be a SecTAG.
+    enc=TCI.E (confidentiality), icv=TCI.C, sci present only when TCI.SC=1;
+    sci_mac is the 6-byte system identifier that opens the SCI."""
+    if not payload or len(payload) < 6:
+        return None
+    tci_an = payload[0]
+    sc = bool(tci_an & 0x20)       # TCI.SC — explicit SCI present
+    enc = bool(tci_an & 0x08)      # TCI.E  — confidentiality on
+    icv = bool(tci_an & 0x04)      # TCI.C  — changed text / ICV present
+    an = tci_an & 0x03             # association number
+    pn = int.from_bytes(payload[2:6], 'big')
+    sci = sci_mac = None
+    if sc:
+        if len(payload) < 14:
+            return None
+        sci = payload[6:14]
+        sci_mac = ':'.join('%02x' % b for b in sci[:6])
+    return {'an': an, 'pn': pn, 'enc': enc, 'icv': icv,
+            'sci': (sci.hex() if sci else None), 'sci_mac': sci_mac,
+            'src': _mac_norm(src_mac)}
+
+
+def _eapol_parse(payload):
+    """Parse an EAPOL header (bytes AFTER the 0x888E EtherType) into
+    {version, ptype, body_len} or None. ptype: 0=EAP 1=Start 2=Logoff 3=Key
+    4=ASF-Alert 5=MKA (802.1X-2010 MACsec Key Agreement)."""
+    if not payload or len(payload) < 2:
+        return None
+    return {'version': payload[0], 'ptype': payload[1],
+            'body_len': int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0}
+
+
+def _l2sec_scan_frames(frames):
+    """Analyse an ordered list of (src_mac, ethertype, payload_bytes) link-security
+    frames and return a deduped findings list. Stateful across the list: per secure
+    association (SCI|src, AN) it tracks the last PN for regression and whether the SA
+    was ever encrypted for downgrade; EAPOL Logoff/Start frames are counted for the
+    DoS/flood signals. Separated from capture so the self-test can drive it directly."""
+    findings, seen = [], set()
+    sa_pn = {}            # (assoc_key, an) -> last PN
+    sa_enc = {}           # (assoc_key, an) -> ever-encrypted (bool)
+    macsec_channels = set()
+    logoff_srcs, logoff_total = set(), 0
+    start_total = 0
+    eapol_auth = False
+    mka_members = set()
+
+    def add(code, severity, src, detail):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({'code': code, 'severity': severity,
+                         'src': src, 'detail': detail})
+
+    for src_mac, ethertype, payload in frames:
+        if ethertype == _MACSEC_ETHERTYPE:
+            tag = _macsec_parse(src_mac, payload)
+            if not tag:
+                continue
+            src = tag['src']
+            assoc = (tag['sci'] or src, tag['an'])
+            if tag['sci']:
+                if tag['sci'] not in macsec_channels:
+                    macsec_channels.add(tag['sci'])
+                    add('MACSEC-013', 'info', src,
+                        f"MACsec (802.1AE) secure channel {tag['sci_mac']} active on the "
+                        f"segment (AN {tag['an']}, {'encrypted' if tag['enc'] else 'integrity-only'})")
+                # SCI system-identifier must equal the transmitting source MAC.
+                if tag['sci_mac'] and src and tag['sci_mac'] != src:
+                    add('MACSEC-011', 'high', src,
+                        f"MACsec SCI {tag['sci_mac']} does not match the transmitting "
+                        f"source MAC {src} — the secure channel claims an identity the "
+                        f"frame itself contradicts (spoofed secure channel)")
+            # PN must increase within a secure association; a repeat or roll-back
+            # is a replay (replay protection disabled, or an active replay).
+            last = sa_pn.get(assoc)
+            if last is not None and tag['pn'] <= last:
+                add('MACSEC-010', 'high', src,
+                    f"MACsec packet number regressed ({last} -> {tag['pn']}) inside secure "
+                    f"association {assoc[0]}/AN{tag['an']} — replayed or rolled-back PN "
+                    f"(replay protection off, or an active replay)")
+            sa_pn[assoc] = max(last or 0, tag['pn'])
+            # Confidentiality downgrade: an SA once encrypted now integrity-only.
+            if sa_enc.get(assoc) and not tag['enc']:
+                add('MACSEC-012', 'high', src,
+                    f"MACsec confidentiality downgrade on {assoc[0]}/AN{tag['an']}: a "
+                    f"secure association previously seen encrypted is now integrity-only "
+                    f"(TCI.E cleared) — forced cipher-off")
+            sa_enc[assoc] = sa_enc.get(assoc, False) or tag['enc']
+        elif ethertype == _EAPOL_ETHERTYPE:
+            e = _eapol_parse(payload)
+            if not e:
+                continue
+            src = _mac_norm(src_mac)
+            pt = e['ptype']
+            if pt == 2:                         # EAPOL-Logoff
+                logoff_total += 1
+                if src:
+                    logoff_srcs.add(src)
+            elif pt == 1:                       # EAPOL-Start
+                start_total += 1
+            elif pt == 5:                       # EAPOL-MKA (802.1X-2010)
+                if src:
+                    mka_members.add(src)
+            elif pt in (0, 3):                  # EAP / EAPOL-Key
+                eapol_auth = True
+
+    # EAPOL post-pass aggregates.
+    if logoff_total >= _EAPOL_LOGOFF_MIN:
+        src = sorted(logoff_srcs)[0] if logoff_srcs else '?'
+        add('EAPOL-010', 'high', src,
+            f"{logoff_total} EAPOL-Logoff frame(s) from {len(logoff_srcs)} source(s) in "
+            f"one window — spoofed Logoff force-deauthenticates the 802.1X port "
+            f"(port-access denial of service)")
+    if start_total >= _EAPOL_START_FLOOD:
+        add('EAPOL-011', 'medium', '?',
+            f"{start_total} EAPOL-Start frames in one window — 802.1X supplicant "
+            f"impersonation / port-access flood")
+    if eapol_auth:
+        add('EAPOL-012', 'info', '?',
+            "802.1X port authentication (EAPOL) active on the segment")
+    for m in sorted(mka_members):
+        add('MKA-010', 'info', m,
+            f"MACsec Key Agreement (MKA) participant {m} observed — 802.1X-2010 "
+            f"key-agreement plane active")
+    return findings
+
+
+def _l2sec_capture(interface, seconds):
+    """Passively capture the link-security control plane (MACsec/EAPOL/MKA) and
+    return _l2sec_scan_frames() findings. Best-effort: returns [] when
+    tcpdump/scapy is unavailable or nothing matched. Emits no frames."""
+    if not _have('tcpdump') or not _have_scapy():
+        return []
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return []
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap')
+    os.close(fd)
+    _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
+          '-s', '256', '-c', '5000', '-w', path, _L2SEC_BPF],
+         timeout=int(seconds) + 8)
+    frames = []
+    try:
+        from scapy.all import rdpcap, Ether
+        try:
+            pkts = rdpcap(path)
+        except Exception:
+            return []
+        for pk in pkts:
+            if not isinstance(pk, Ether):
+                continue
+            et = int(pk.type) if pk.type is not None else 0
+            payload = bytes(pk.payload)
+            frames.append((pk.src, et, payload))
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return _l2sec_scan_frames(frames)
+
 # Locally-administered VM / container prefixes — tracked apart from privacy
 # randomization so virtual NICs don't inflate the randomized count or look like
 # a spoof. Keyed by the leading octets (lowercase, colon-separated).
@@ -1536,13 +1735,19 @@ def do_mac_watch_reset():
     return {'success': True, 'reset': True}
 
 
-def do_mac_watch(scan=True, interface=None):
-    """Detect current + past MAC spoofing/cloning and randomization, and track
-    devices that rotate randomized MACs. Detection-only; nothing is spoofed.
+def do_mac_watch(scan=True, interface=None, l2sec=False, l2sec_seconds=_L2SEC_CAPTURE_S):
+    """Detect current + past MAC spoofing/cloning and randomization, track devices
+    that rotate randomized MACs, and (opt-in) watch the link-security control plane.
+    Detection-only; nothing is spoofed and no frames are emitted.
 
     scan=True adds an arp-scan sweep (active but harmless) to widen coverage
     beyond whatever is already in the neighbour table; scan=False reads the
-    neighbour table only (works unprivileged, no traffic generated)."""
+    neighbour table only (works unprivileged, no traffic generated).
+
+    l2sec=True adds a short passive sniff of MACsec (802.1AE), 802.1X-EAPOL and
+    MKA — the one L2 identity plane the neighbour table never sees — folding
+    replay / spoofed-secure-channel / cipher-downgrade / 802.1X-DoS signals into
+    the verdict. Off by default so the background/e-Paper path stays fast."""
     now = time.time()
     gw = _default_gateway()
     gw_mac = _neigh_mac(gw) if gw else None
@@ -1783,11 +1988,34 @@ def do_mac_watch(scan=True, interface=None):
             f"{e['embedded_mac']}, but the NDP cache binds it to {e['mac']} — a "
             f"MAC-identity contradiction (spoof; proxy-NDP can also explain it)")
 
-    if spoofed or clones or hi_events or fhrp_hijacks:
+    # (8) L2-security control plane (opt-in passive sniff) — MACsec/EAPOL/MKA.
+    # The neighbour table never carries these EtherTypes, so this is the only way
+    # to see a replayed/spoofed secure channel, a forced cipher-downgrade, or an
+    # 802.1X Logoff deauth DoS. Best-effort: silently empty without tcpdump/scapy.
+    l2sec_findings = []
+    if l2sec:
+        cap_iface = interface if _valid_iface(interface or '') else (scan_iface or _default_route_iface())
+        l2sec_findings = _l2sec_capture(cap_iface, l2sec_seconds)
+    l2sec_hi = [f for f in l2sec_findings if f['severity'] == 'high']
+    l2sec_med = [f for f in l2sec_findings if f['severity'] == 'medium']
+    for f in l2sec_findings:
+        if f['severity'] != 'info':
+            reasons.append(f"{f['detail']} [{f['code']}]")
+    l2sec = {
+        'ran': bool(l2sec),
+        'findings': l2sec_findings,
+        'high': len(l2sec_hi),
+        'medium': len(l2sec_med),
+        'macsec': len([f for f in l2sec_findings if f['code'].startswith('MACSEC-')]),
+        'eapol': len([f for f in l2sec_findings if f['code'].startswith('EAPOL-')]),
+        'mka': len([f for f in l2sec_findings if f['code'].startswith('MKA-')]),
+    }
+
+    if spoofed or clones or hi_events or fhrp_hijacks or l2sec_hi:
         verdict = 'spoofed'
-    elif tracks or randomized or fhrp_virtuals:
-        verdict = 'suspicious' if tracks else ('fhrp' if fhrp_virtuals and not randomized
-                                               else 'randomization')
+    elif tracks or randomized or fhrp_virtuals or l2sec_med:
+        verdict = ('suspicious' if tracks or l2sec_med
+                   else ('fhrp' if fhrp_virtuals and not randomized else 'randomization'))
     if eui64_mismatches and verdict in ('clean', 'randomization', 'fhrp'):
         verdict = 'suspicious'
 
@@ -1805,10 +2033,13 @@ def do_mac_watch(scan=True, interface=None):
             'fhrp_hijacks': len(fhrp_hijacks),
             'ipv6_bindings': len(v6_bindings),
             'eui64_mismatch': len(eui64_mismatches),
+            'l2sec_high': l2sec['high'],
+            'l2sec_medium': l2sec['medium'],
         },
         'spoofed': spoofed,
         'clones': clones,
         'fhrp': fhrp,
+        'l2sec': l2sec,
         'ipv6': {'bindings': v6_bindings, 'eui64_mismatches': eui64_mismatches},
         # Every MAC seen this pass, worst class first, so the UI can list them.
         'observed_macs': sorted(
@@ -4558,6 +4789,56 @@ def _mac_selftest():
                           'pass': ok6.get('summary', {}).get('eui64_mismatch') == 0})
     finally:
         g.update(saved)
+
+    # L2-security control plane (MAC Watch v4): drive the pure parse/detect path
+    # with crafted MACsec / EAPOL / MKA frames — no wire, no root. Each tuple is
+    # (src_mac, ethertype, payload_after_ethertype), exactly what capture yields.
+    def _sectag(tci_an, pn, sci_mac=None):
+        p = bytes([tci_an, 0x00]) + int(pn).to_bytes(4, 'big')
+        if sci_mac is not None:
+            p += bytes(int(x, 16) for x in sci_mac.split(':')) + b'\x00\x01'
+        return p
+
+    def _eapol(ptype, version=2):
+        return bytes([version, ptype, 0x00, 0x00])
+
+    ME, EE = _MACSEC_ETHERTYPE, _EAPOL_ETHERTYPE
+    SA, SB = 'aa:bb:cc:dd:ee:01', 'aa:bb:cc:dd:ee:02'
+    TCI_ENC = 0x20 | 0x08 | 0x04      # SC + E + C, AN 0
+    TCI_INT = 0x20 | 0x04             # SC + C (integrity-only), AN 0
+
+    def l2(name, frames, want_codes, want_absent=()):
+        found = {f['code'] for f in _l2sec_scan_frames(frames)}
+        ok = all(c in found for c in want_codes) and not (set(want_absent) & found)
+        scenarios.append({'name': name, 'expect': '+'.join(want_codes) or 'clean',
+                          'got': ','.join(sorted(found)) or 'none', 'pass': ok})
+
+    # PN regression inside one SA (100 -> 50) is a replay.
+    l2('l2sec-macsec-pn-replay',
+       [(SA, ME, _sectag(TCI_ENC, 100, SA)), (SA, ME, _sectag(TCI_ENC, 50, SA))],
+       ['MACSEC-010', 'MACSEC-013'])
+    # SCI system-identifier (SB) != transmitting source MAC (SA) -> spoofed channel.
+    l2('l2sec-macsec-sci-spoof',
+       [(SA, ME, _sectag(TCI_ENC, 10, SB))], ['MACSEC-011'])
+    # Confidentiality downgrade: encrypted then integrity-only on one SA.
+    l2('l2sec-macsec-downgrade',
+       [(SA, ME, _sectag(TCI_ENC, 10, SA)), (SA, ME, _sectag(TCI_INT, 11, SA))],
+       ['MACSEC-012'])
+    # Clean MACsec: monotone PN, matching SCI, encryption stays on -> inventory only.
+    l2('l2sec-macsec-clean',
+       [(SA, ME, _sectag(TCI_ENC, 10, SA)), (SA, ME, _sectag(TCI_ENC, 11, SA))],
+       ['MACSEC-013'], want_absent=('MACSEC-010', 'MACSEC-011', 'MACSEC-012'))
+    # EAPOL-Logoff burst -> port-deauth DoS.
+    l2('l2sec-eapol-logoff-dos',
+       [(SA, EE, _eapol(2)), (SB, EE, _eapol(2)), (SA, EE, _eapol(2))],
+       ['EAPOL-010'])
+    # EAPOL-Start flood -> access flood.
+    l2('l2sec-eapol-start-flood',
+       [(SA, EE, _eapol(1))] * _EAPOL_START_FLOOD, ['EAPOL-011'])
+    # MKA (EAPOL type 5) participant inventory; a lone Logoff must NOT fire the DoS.
+    l2('l2sec-mka-inventory',
+       [(SA, EE, _eapol(5)), (SB, EE, _eapol(2))],
+       ['MKA-010'], want_absent=('EAPOL-010',))
 
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
@@ -28932,11 +29213,15 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/mac-watch', methods=['GET'])
     def net_mac_watch():
         # scan=0 reads the neighbour table only (no arp-scan sweep, silent);
-        # default runs an arp-scan sweep to widen coverage.
+        # default runs an arp-scan sweep to widen coverage. l2sec=1 adds the opt-in
+        # passive MACsec/EAPOL/MKA sniff (link-security control plane).
         scan = request.args.get('scan', '1') not in ('0', 'false', 'no')
         iface = (request.args.get('interface') or '').strip() or None
-        _log(f"net/mac-watch scan={scan}")
-        return jsonify(do_mac_watch(scan=scan, interface=iface))
+        l2sec = request.args.get('l2sec', '0') in ('1', 'true', 'yes')
+        secs = _clamp_int(request.args.get('l2sec_seconds'), _L2SEC_CAPTURE_S, 2, 30)
+        _log(f"net/mac-watch scan={scan} l2sec={l2sec}")
+        return jsonify(do_mac_watch(scan=scan, interface=iface,
+                                    l2sec=l2sec, l2sec_seconds=secs))
 
     @app.route('/api/net/mac-watch-reset', methods=['POST'])
     def net_mac_watch_reset():

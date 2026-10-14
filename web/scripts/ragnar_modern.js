@@ -12044,7 +12044,10 @@ async function runMacWatch(scan) {
     out.innerHTML = '<p class="text-sm text-gray-400">' + (scan ? ('Sweeping ' + (iface ? escapeHtml(iface) : 'the default segment') + ' (arp-scan)…') : 'Reading neighbour table…') + '</p>';
     try {
         _macWatchFillIfaces();
-        const d = await fetchAPI('/api/net/mac-watch?scan=' + (scan ? '1' : '0') + (iface ? '&interface=' + encodeURIComponent(iface) : ''));
+        const l2cb = document.getElementById('macwatch-l2sec');
+        const l2sec = !!(l2cb && l2cb.checked);
+        if (l2sec) out.innerHTML = '<p class="text-sm text-gray-400">' + (scan ? 'Sweeping' : 'Reading') + ' + sniffing MACsec / 802.1X / MKA…</p>';
+        const d = await fetchAPI('/api/net/mac-watch?scan=' + (scan ? '1' : '0') + (iface ? '&interface=' + encodeURIComponent(iface) : '') + (l2sec ? '&l2sec=1' : ''));
         if (!d || d.success === false) {
             out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + '</p>';
             return;
@@ -12069,7 +12072,32 @@ async function runMacWatch(scan) {
             chip(s.tracks || 0, ' tracked devices') +
             chip(s.fhrp_virtual || 0, ' FHRP virtual') +
             chip(s.fhrp_hijacks || 0, ' FHRP hijacks', true) +
+            ((d.l2sec && d.l2sec.ran) ? chip(s.l2sec_high || 0, ' L2-sec high', true) : '') +
             '</div>';
+
+        // L2-security control plane (MACsec / 802.1X-EAPOL / MKA) — opt-in sniff.
+        const l2 = d.l2sec || {};
+        if (l2.ran) {
+            const SEV = { high: 'text-red-300', medium: 'text-amber-300', info: 'text-sky-300' };
+            const fnd = l2.findings || [];
+            const abuse = fnd.filter(f => f.severity !== 'info');
+            const inv = fnd.filter(f => f.severity === 'info');
+            if (abuse.length) {
+                html += '<p class="text-xs uppercase text-red-400 mt-3 mb-1">L2 security — MACsec / 802.1X / MKA</p>' +
+                    '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                    abuse.map(f => `<li><span class="font-mono ${SEV[f.severity] || 'text-gray-300'}">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            if (inv.length) {
+                html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">L2 security inventory (in use — expected)</p>' +
+                    '<ul class="text-xs text-gray-400 list-disc pl-5">' +
+                    inv.map(f => `<li><span class="font-mono text-sky-300">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            if (!fnd.length) {
+                html += '<p class="text-xs text-gray-500 mt-3">L2-security sniff ran — no MACsec / 802.1X / MKA frames observed in the window.</p>';
+            }
+        }
 
         // Spoofed / disguised-vendor MACs
         if (d.spoofed && d.spoofed.length) {

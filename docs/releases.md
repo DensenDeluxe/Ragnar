@@ -4,6 +4,16 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): MAC Watch v4 — passive MACsec / 802.1X-EAPOL / MKA L2-security plane
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Added the one genuinely new v4 capability to the in-app `do_mac_watch`: a passive sniff of the link-security control plane.** The existing watcher is neighbour-table + `arp-scan` based, so it already covers 11 of the v4 drop's 14 detectors (disguised-vendor OUI, iface identity-change, FHRP gateway-pin, duplicate-MAC clone, randomization inventory, device tracking, EUI-64 mismatch, FHRP awareness). The three it structurally could **not** see — MACsec, 802.1X/EAPOL and MKA — ride dedicated EtherTypes that never reach the ARP/NDP caches, so this release adds an **opt-in** short `tcpdump` capture (`l2sec=1`, no frames emitted) that parses the 802.1AE SecTAG and EAPOL headers directly off the wire. (The RF-only v4 detectors — `dot11_seq_discontinuity`, `rssi_bimodal` — need 802.11 monitor mode and stay out of scope for the wired watcher; `syslog_forensic` is standalone-store only.)
+- **8 new posture codes**, folded into the existing clean/randomization/fhrp/suspicious/spoofed verdict: **MACSEC-010** PN regression inside a secure association (replay), **MACSEC-011** SCI system-identifier ≠ transmitting source MAC (spoofed secure channel), **MACSEC-012** confidentiality downgrade (`TCI.E` cleared on a once-encrypted SA), **MACSEC-013** MACsec channel inventory, **EAPOL-010** EAPOL-Logoff burst (802.1X port-deauth DoS), **EAPOL-011** EAPOL-Start flood, **EAPOL-012** 802.1X-in-use inventory, **MKA-010** MKA participant inventory. A HIGH L2-security finding escalates the verdict to **spoofed**.
+- **MAC Watch carries no CVEs** — these are passive posture signals, not CVE probes; the CVE index is unchanged (no `gen_cve_list` / CVE.md regen).
+- **Self-test:** the `mac` suite grows to **25 scenarios** (7 new L2-security legs driving the pure MACsec/EAPOL/MKA parse+detect path: PN-replay, SCI-spoof, downgrade, clean-monotone, logoff-DoS, start-flood, MKA-inventory — all green). **Live-validated** end-to-end in a sealed network namespace: crafted MACsec + EAPOL frames replayed over a veth pair, captured by the real `do_mac_watch(l2sec=True)` on the far end — all 6 expected codes came back off the wire and the verdict escalated to `spoofed`.
+- **UI:** MAC Watch card gains an **L2 security** opt-in checkbox and an `L2-sec high` summary chip; findings render split into an abuse section (red, with code tags) and an in-use inventory section (sky-blue). Mobile-friendly (verified at 390 px). Cache-bust `?v=20261014-mac-v4-l2sec`.
+- **Docs:** [nettools.md › MAC Watch](nettools.md).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): BGP Path Watch v5 — FRR bgp_attr_encap CVE-2024-44070 posture (+1 named CVE)
 *branch `feature/lldp-watch-v3` (shared)*
 

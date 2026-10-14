@@ -2888,10 +2888,14 @@
                                     <p class="text-sm text-gray-400 mb-3">Also inventories privacy-randomized MACs on the segment, and <strong>tracks</strong> a device that rotates through several randomized addresses — following it across the MACs it hides behind. Adds <strong>HSRP/VRRP/GLBP virtual-MAC awareness</strong>: it recognizes first-hop-redundancy virtual MACs so a shared gateway MAC that legitimately moves between routers on failover never reads as a spoof/clone — and flags the inverse, an FHRP redundancy VIP suddenly answered by a <em>non-virtual</em> MAC, as a gateway hijack (the arp_guard / FHRP-Watch cross-pivot). Reads the neighbour table (+ optional arp-scan sweep); history persists so past events survive restarts. Cross-MAC tracking here is IP-anchored (capture-free); true fingerprint tracking needs monitor mode. <strong>IPv6 / NDP:</strong> it also collects MAC↔IPv6 bindings from the NDP neighbour cache and runs the v6-native identity check — <strong>eui64_mismatch</strong>, where a SLAAC EUI-64 address embeds its owner's MAC but the cache binds it to a <em>different</em> MAC (a MAC-identity contradiction; proxy-NDP can also explain it). The v6 side is kept separate from the v4 clone logic on purpose — a healthy IPv6 host holds a link-local plus several SLAAC/temporary globals on one MAC, so "many IPs per MAC" is normal for v6 and never reads as a clone.</p>
                                 </div>
                             </div>
+                            <p class="text-sm text-gray-400 mb-3"><strong>L2 security (opt-in passive sniff):</strong> tick <em>L2 security</em> to add a short, harmless capture of the link-security control plane the neighbour table never sees — <strong>MACsec (802.1AE)</strong>, <strong>802.1X / EAPOL</strong> and <strong>MKA</strong>. It flags a MACsec packet-number that rolls backwards inside a secure association (replay), a secure-channel SCI whose system-identifier contradicts the frame's own source MAC (spoofed channel), a confidentiality downgrade (a once-encrypted association now integrity-only), and an EAPOL-Logoff burst that force-deauthenticates an 802.1X port (port-access DoS) — and inventories the MACsec / 802.1X / MKA that is legitimately in use.</p>
                             <div class="flex flex-wrap items-center gap-2">
                                 <select id="macwatch-iface" title="Interface for the arp-scan sweep — pick your WiFi or LAN NIC to scan that subnet" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
                                     <option value="">Auto (default route)</option>
                                 </select>
+                                <label class="inline-flex items-center gap-2 text-sm text-gray-300 bg-slate-800 border border-slate-700 rounded px-3 py-2 whitespace-nowrap" title="Opt-in: add a short passive MACsec / 802.1X-EAPOL / MKA sniff to this scan (no frames are sent)">
+                                    <input type="checkbox" id="macwatch-l2sec" class="accent-Ragnar-600"> L2 security
+                                </label>
                                 <button onclick="runMacWatch(true)" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan (arp-scan sweep)</button>
                                 <button onclick="runMacWatch(false)" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Read the kernel neighbour table only — no traffic generated">Quick (neighbour table)</button>
                                 <button onclick="macWatchReset()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Clear the MAC-watch history (first/last-seen, per-IP history, change events)">Reset history</button>
@@ -9532,7 +9536,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261014-cfm-v5-evc"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261014-mac-v4-l2sec"></script>
 
 
 
