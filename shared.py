@@ -908,6 +908,7 @@ class SharedData:
             "pushover_notify_device_lost": False,
             "pushover_notify_device_back_online": False,
             "pushover_notify_wardrive_upload": True,  # summary after each auto-uploaded wardrive
+            "pushover_notify_adsb_upload": True,       # summary after each ADS-B auto-upload to Wardrift
             "pushover_notify_cellular": True,  # uplink failover to / restore from a tethered cellular hotspot
 
             "__title_rusense_pushover__": "RuSense Sensing Alerts",
@@ -1017,7 +1018,13 @@ class SharedData:
             # display can be shown with no SDR attached. 404s when off, so it
             # stays out of sight until deliberately switched on. Env
             # RAGNAR_SDR_DEMO=1 also enables it without persisting to config.
-            "sdr_demo": False
+            "sdr_demo": False,
+
+            # ADS-B -> Wardrift (Aircraft Watch). The radar logs the unique
+            # aircraft seen each UTC day; these control auto-uploading that day's
+            # sightings to Wardrift via the signed-in account. Off by default.
+            "adsb_wardrift_auto": False,
+            "adsb_wardrift_interval_min": 30,   # minutes between auto-uploads while receiving
         }
 
     def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):

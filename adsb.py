@@ -50,6 +50,14 @@ _SBS_PORT = 30003          # dump1090 --net BaseStation (SBS) output
 _STALE_S = 60              # drop an aircraft not heard from in this long
 _MAX_AIRCRAFT = 500
 
+# Per-UTC-day log of the UNIQUE aircraft seen, so a day's sightings can be
+# uploaded (e.g. to Wardrift's Aircraft Watch, which counts each ICAO once per
+# UTC day). The live tracker above only keeps what is overhead right now; this
+# is the durable accumulation. One JSONL file per UTC day, one row per new ICAO
+# (first time it is heard that day) with its observation time.
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "adsb")
+_OBS_RETAIN_DAYS = 21      # prune day-logs older than this on day rollover
+
 
 def _dump_bin():
     for name in _DUMP_CANDIDATES:
@@ -575,6 +583,9 @@ class AdsbTracker:
         self._connected = False    # SBS socket connected to dump1090
         self._sbs_lines = 0        # raw lines received on 30003 (reception proof)
         self._stderr_tail = ""     # last bit of dump1090 stderr (device errors)
+        self._obs_day = None       # UTC date (YYYYMMDD) the obs set belongs to
+        self._obs_seen = set()     # ICAOs already logged for self._obs_day
+        self._obs_cs = set()       # ICAOs whose callsign is already logged today
 
     def _diag(self):
         """A human hint distinguishing 'no reception' from a real fault."""
@@ -639,6 +650,7 @@ class AdsbTracker:
     def _ingest(self, rec):
         if not rec:
             return
+        new_obs = None
         with self._lock:
             self._msgs += 1
             cur = self._planes.get(rec["icao"])
@@ -649,7 +661,40 @@ class AdsbTracker:
                 self._planes[rec["icao"]] = cur
             for k, v in rec.items():
                 cur[k] = v
-            cur["_seen"] = time.time()
+            now = time.time()
+            cur["_seen"] = now
+            new_obs = self._note_observation(cur, now)
+        if new_obs is not None:
+            _append_observation(new_obs.pop("_day"), new_obs)
+
+    def _note_observation(self, plane, now):
+        """Caller holds the lock. Returns a record to persist (incl. ``_day``),
+        or None. A record is written the first time an ICAO is heard that UTC
+        day, and once more when its callsign first becomes known (it usually
+        arrives in a later message than the first position/all-call), so the
+        export can carry callsigns. observations() merges these rows per ICAO.
+        The day sets roll over at UTC midnight and are seeded from disk, so a
+        mid-day restart neither re-logs aircraft nor re-logs known callsigns."""
+        day = time.strftime("%Y%m%d", time.gmtime(now))
+        if day != self._obs_day:
+            self._obs_day = day
+            self._obs_seen, self._obs_cs = _load_day_seen(day)
+            _prune_old_days(day)
+        icao = plane["icao"]
+        cs = (plane.get("callsign") or "").strip()
+        if icao not in self._obs_seen:
+            self._obs_seen.add(icao)
+            if cs:
+                self._obs_cs.add(icao)
+            obs = {"_day": day, "icao": icao, "ts": int(now)}
+            for k in ("callsign", "alt", "lat", "lon", "gs", "track"):
+                if plane.get(k) is not None:
+                    obs[k] = plane[k]
+            return obs
+        if cs and icao not in self._obs_cs:
+            self._obs_cs.add(icao)
+            return {"_day": day, "icao": icao, "ts": int(now), "callsign": cs}
+        return None
 
     def start(self):
         with self._lock:
@@ -777,6 +822,167 @@ class AdsbTracker:
                         pass
                 self._proc = None
         return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Per-UTC-day unique-aircraft log + SBS export (for Wardrift Aircraft Watch)
+# --------------------------------------------------------------------------
+
+def _obs_path(day):
+    return os.path.join(_DATA_DIR, "day_%s.jsonl" % day)
+
+
+def _append_observation(day, obs):
+    """Append one observation (dict with icao/ts/...) to the day's JSONL log."""
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        with open(_obs_path(day), "a") as fh:
+            fh.write(json.dumps(obs, separators=(",", ":")) + "\n")
+    except Exception:
+        pass            # logging sightings must never break the live tracker
+
+
+def _load_day_seen(day):
+    """(icaos_logged, icaos_with_callsign) for ``day`` — seeds the dedup sets so
+    a restart neither re-logs aircraft nor re-logs callsigns already recorded."""
+    seen, with_cs = set(), set()
+    try:
+        with open(_obs_path(day)) as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                icao = o.get("icao")
+                if not icao:
+                    continue
+                seen.add(icao)
+                if (o.get("callsign") or "").strip():
+                    with_cs.add(icao)
+    except OSError:
+        pass
+    return seen, with_cs
+
+
+def _load_day_icaos(day):
+    """The set of ICAOs logged for ``day`` (unique-count helper)."""
+    return _load_day_seen(day)[0]
+
+
+def _prune_old_days(keep_day):
+    """Drop day-logs older than _OBS_RETAIN_DAYS (relative to keep_day)."""
+    try:
+        import datetime
+        cutoff = (datetime.datetime.strptime(keep_day, "%Y%m%d")
+                  - datetime.timedelta(days=_OBS_RETAIN_DAYS)).strftime("%Y%m%d")
+        for name in os.listdir(_DATA_DIR):
+            if name.startswith("day_") and name.endswith(".jsonl") and name[4:12] < cutoff:
+                try:
+                    os.remove(os.path.join(_DATA_DIR, name))
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def _utc_today():
+    return time.strftime("%Y%m%d", time.gmtime())
+
+
+def observations(day=None):
+    """Deduped list of aircraft observed on ``day`` (UTC, default today): one
+    record per ICAO (the first time it was heard), newest-first by ts."""
+    day = day or _utc_today()
+    best = {}
+    try:
+        with open(_obs_path(day)) as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                icao = o.get("icao")
+                if not icao:
+                    continue
+                cur = best.get(icao)
+                if cur is None:
+                    best[icao] = o
+                    continue
+                # Keep the earliest observation time; fill in any missing fields
+                # (callsign/position) from whichever row has them.
+                if (o.get("ts") or 0) < (cur.get("ts") or 0):
+                    cur["ts"] = o["ts"]
+                for k, v in o.items():
+                    if cur.get(k) is None and v is not None:
+                        cur[k] = v
+    except OSError:
+        return []
+    return sorted(best.values(), key=lambda o: o.get("ts") or 0, reverse=True)
+
+
+def day_icao_count(day=None):
+    """Number of unique aircraft (ICAO) logged on ``day`` (UTC, default today)."""
+    return len(_load_day_icaos(day or _utc_today()))
+
+
+def available_days():
+    """UTC days (YYYYMMDD) that have a sightings log, newest first."""
+    try:
+        days = [n[4:12] for n in os.listdir(_DATA_DIR)
+                if n.startswith("day_") and n.endswith(".jsonl")]
+    except OSError:
+        return []
+    return sorted(days, reverse=True)
+
+
+def _sbs_line(obs):
+    """One SBS/BaseStation MSG row for an observation. Transmission type matches
+    the fields present: 3 (airborne position) with lat/lon, 1 (identification)
+    with a callsign, else 8 (surveillance) carrying just ICAO + time. Wardrift
+    keys eligible aircraft on the hex ident (field 5) and the message time
+    (fields 7/8), neither of which needs a receiver position."""
+    g = time.gmtime(obs.get("ts") or time.time())
+    date = time.strftime("%Y/%m/%d", g)
+    tm = time.strftime("%H:%M:%S.000", g)
+    lat, lon, cs = obs.get("lat"), obs.get("lon"), (obs.get("callsign") or "").strip()
+    if lat is not None and lon is not None:
+        ttype = 3
+    elif cs:
+        ttype = 1
+    else:
+        ttype = 8
+    f = [""] * 22
+    f[0] = "MSG"
+    f[1] = str(ttype)
+    f[2] = "1"
+    f[3] = "1"
+    f[4] = str(obs["icao"]).upper()
+    f[5] = "1"
+    f[6], f[7], f[8], f[9] = date, tm, date, tm
+    if cs:
+        f[10] = cs
+    if obs.get("alt") is not None:
+        f[11] = str(obs["alt"])
+    if obs.get("gs") is not None:
+        f[12] = str(obs["gs"])
+    if obs.get("track") is not None:
+        f[13] = str(obs["track"])
+    if lat is not None:
+        f[14] = str(lat)
+    if lon is not None:
+        f[15] = str(lon)
+    return ",".join(f)
+
+
+def export_sbs(day=None):
+    """SBS/BaseStation log of ``day``'s unique aircraft, with the
+    ``# timezone=UTC`` header Wardrift expects. Empty string if nothing logged."""
+    obs = observations(day)
+    if not obs:
+        return ""
+    lines = ["# timezone=UTC"]
+    lines += [_sbs_line(o) for o in sorted(obs, key=lambda o: o.get("ts") or 0)]
+    return "\n".join(lines) + "\n"
 
 
 _tracker = AdsbTracker()

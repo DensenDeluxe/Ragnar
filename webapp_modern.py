@@ -16349,6 +16349,298 @@ def wardrift_dashboard():
 
 
 # ---------------------------------------------------------------------------
+# ADS-B -> Wardrift (Aircraft Watch). The radar (adsb.py) logs the UNIQUE
+# aircraft seen each UTC day; this uploads that day's SBS log to Wardrift
+# through the SAME signed-in /v1/wardrive/logs endpoint the wardrive route uses
+# (Wardrift auto-detects the format and credits aircraft without making a ground
+# route). Each ICAO counts once per account per UTC day across uploads, so the
+# day's growing SBS can be re-sent safely. Like the wardrive one: a manual
+# upload button, an optional auto-upload (periodic while receiving), and a
+# Pushover summary once the upload has a final verdict.
+# ---------------------------------------------------------------------------
+_ADSB_WARDRIFT_LOCK = threading.Lock()
+_adsb_wardrift = {'worker': None, 'next_run': 0.0, 'started': 0.0}
+
+
+def _adsb_state_path():
+    import adsb
+    return os.path.join(adsb._DATA_DIR, 'wardrift.json')
+
+
+def _adsb_state_load():
+    try:
+        with open(_adsb_state_path()) as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _adsb_state_save(st):
+    try:
+        import adsb
+        os.makedirs(adsb._DATA_DIR, exist_ok=True)
+        tmp = _adsb_state_path() + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(st, f)
+        os.replace(tmp, _adsb_state_path())
+    except Exception as e:
+        logger.error(f"adsb wardrift state save failed: {e}")
+
+
+def _adsb_record(day, **fields):
+    with _ADSB_WARDRIFT_LOCK:
+        st = _adsb_state_load()
+        day_rec = st.setdefault(day, {})
+        day_rec.update(fields)
+        day_rec['at'] = time.time()
+        _adsb_state_save(st)
+        return dict(day_rec)
+
+
+def _upload_wardrift_adsb(sbs_text, token):
+    """POST the day's SBS log to Wardrift. Same async flow as the wardrive route:
+    a 202 with an upload_id that is judged a few minutes later."""
+    import requests
+    r = requests.post(_wardrift_base() + '/v1/wardrive/logs',
+                      headers={'Authorization': f'Bearer {token}'},
+                      files={'file': ('ragnar_adsb.sbs', sbs_text, 'text/plain')},
+                      timeout=180)
+    body = _wardrift_body(r)
+    if r.status_code == 401:
+        return {'ok': False, 'status': 401, 'error': 'Wardrift session expired - sign in again',
+                'response': body}
+    if r.status_code == 409 and body.get('error') == 'duplicate_route':
+        return {'ok': True, 'status': 409, 'duplicate': True, 'response': body}
+    return {'ok': bool(r.ok and (body.get('accepted', r.ok) or body.get('upload_id'))),
+            'status': r.status_code, 'response': body}
+
+
+def _adsb_upload_summary(day, rec, count):
+    """(title, message) for an ADS-B upload result."""
+    from datetime import datetime
+    try:
+        nice = datetime.strptime(day, '%Y%m%d').strftime('%d %b')
+    except ValueError:
+        nice = day
+    state = rec.get('state')
+    head = f'ADS-B {nice} · {count} aircraft today'
+    if state == 'ok':
+        extra = []
+        if rec.get('aircraft') is not None:
+            extra.append(f"{rec['aircraft']} accepted")
+        if rec.get('exp'):
+            extra.append(f"+{rec['exp']} XP")
+        if rec.get('currency'):
+            extra.append(f"+{rec['currency']} currency")
+        title = 'Ragnar — ADS-B uploaded'
+        body = head + ('\n' + ', '.join(extra) if extra else '')
+    elif state == 'duplicate':
+        title = 'Ragnar — ADS-B uploaded'
+        body = head + '\nAlready on Wardrift (no new credit)'
+    else:
+        title = 'Ragnar — ADS-B upload failed'
+        body = head + '\n' + (rec.get('message') or 'upload failed')
+    return title, body
+
+
+def _adsb_wardrift_follow(day, upload_id, token, notify):
+    """Poll the Wardrift upload to its verdict, store it, and (for auto-uploads)
+    send a Pushover summary. Runs in a background thread."""
+    import requests
+    import adsb
+    deadline = time.time() + 45 * 60
+    result = None
+    while time.time() < deadline:
+        time.sleep(20)
+        try:
+            r = requests.get(_wardrift_base() + '/v1/wardrive/uploads/' + upload_id,
+                             headers={'Authorization': f'Bearer {token}'}, timeout=20)
+            body = _wardrift_body(r)
+        except Exception:
+            continue
+        status = body.get('status')
+        if status in ('pending', 'processing'):
+            continue
+        if status == 'succeeded':
+            res = body.get('result') or {}
+            result = _adsb_record(day, state='ok', upload_id=upload_id,
+                                  aircraft=res.get('aircraft_count', res.get('adsb_count')),
+                                  exp=res.get('adsb_exp') or res.get('awarded_exp') or 0,
+                                  currency=res.get('adsb_currency') or res.get('awarded_currency') or 0,
+                                  message='')
+        elif status == 'failed':
+            result = _adsb_record(day, state='failed', upload_id=upload_id,
+                                  message=str(body.get('error') or 'Wardrift rejected the upload')[:300])
+        else:
+            result = _adsb_record(day, state='unknown', upload_id=upload_id,
+                                  message=f'unexpected status: {status}')
+        break
+    else:
+        result = _adsb_record(day, state='unknown', upload_id=upload_id,
+                              message='Wardrift never reported a result')
+    if notify and result is not None:
+        try:
+            po = _rusense_pushover()
+            if po is not None:
+                title, msg = _adsb_upload_summary(day, result, adsb.day_icao_count(day))
+                po.notify_adsb_upload(msg, title=title)
+        except Exception as e:
+            logger.error(f"adsb upload pushover failed: {e}")
+
+
+def _adsb_wardrift_upload(day=None, reason='manual', notify=None):
+    """Build the day's SBS and upload it. Returns a result dict. For auto-uploads
+    (reason='auto') a Pushover summary is sent once the verdict is in."""
+    import adsb
+    day = day or adsb._utc_today()
+    if notify is None:
+        notify = (reason == 'auto')
+    token = (shared_data.config.get('wardrift_session_token') or '').strip()
+    if not token:
+        return {'ok': False, 'error': 'Not signed in to Wardrift'}
+    count = adsb.day_icao_count(day)
+    if count == 0:
+        _adsb_record(day, state='skipped', message='No aircraft logged for this day')
+        return {'ok': False, 'error': 'No aircraft logged for this day', 'count': 0}
+    sbs = adsb.export_sbs(day)
+    res = _upload_wardrift_adsb(sbs, token)
+    body = res.get('response') or {}
+    if not res.get('ok'):
+        rec = _adsb_record(day, state='failed', count=count,
+                           message=res.get('error') or body.get('message') or f"HTTP {res.get('status')}")
+        return {'ok': False, 'error': rec['message'], 'count': count}
+    if res.get('duplicate'):
+        _adsb_record(day, state='duplicate', count=count)
+        return {'ok': True, 'duplicate': True, 'count': count}
+    upload_id = body.get('upload_id')
+    _adsb_record(day, state='processing', count=count, upload_id=upload_id, uploaded_count=count)
+    if upload_id:
+        threading.Thread(target=_adsb_wardrift_follow, args=(day, upload_id, token, notify),
+                         daemon=True, name='adsb-wardrift-follow').start()
+    return {'ok': True, 'processing': True, 'count': count, 'upload_id': upload_id}
+
+
+def _adsb_wardrift_worker():
+    import adsb
+    while True:
+        try:
+            cfg_on = bool(shared_data.config.get('adsb_wardrift_auto'))
+            try:
+                interval = max(5, int(shared_data.config.get('adsb_wardrift_interval_min', 30)))
+            except (TypeError, ValueError):
+                interval = 30
+            running = bool(adsb.status().get('running'))
+            if cfg_on and running and time.time() >= _adsb_wardrift['next_run']:
+                day = adsb._utc_today()
+                count = adsb.day_icao_count(day)
+                last = (_adsb_state_load().get(day) or {}).get('uploaded_count', 0)
+                if count > last and (shared_data.config.get('wardrift_session_token') or '').strip():
+                    logger.info(f"adsb auto-upload: {count} aircraft for {day} (was {last})")
+                    _adsb_wardrift_upload(day, reason='auto')
+                _adsb_wardrift['next_run'] = time.time() + interval * 60
+        except Exception as e:
+            logger.error(f"adsb wardrift worker error: {e}")
+        time.sleep(30)
+
+
+def _adsb_wardrift_start_worker():
+    w = _adsb_wardrift['worker']
+    if w is None or not w.is_alive():
+        _adsb_wardrift['worker'] = threading.Thread(target=_adsb_wardrift_worker, daemon=True,
+                                                    name='adsb-wardrift')
+        _adsb_wardrift['worker'].start()
+
+
+@app.route('/api/adsb/wardrift', methods=['GET', 'POST'])
+def adsb_wardrift():
+    """ADS-B -> Wardrift status / settings.
+
+    GET  -> signed-in state, today's unique aircraft, recent per-day results,
+            and the auto-upload settings.
+    POST -> save auto (bool) / interval_min (int). Uses the shared Wardrift
+            sign-in; there is no separate key.
+    """
+    try:
+        import adsb
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            if 'auto' in data:
+                shared_data.config['adsb_wardrift_auto'] = bool(data['auto'])
+            if 'interval_min' in data:
+                try:
+                    shared_data.config['adsb_wardrift_interval_min'] = min(max(int(data['interval_min']), 5), 1440)
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'interval_min must be minutes (5-1440)'}), 400
+            shared_data.save_config()
+            if shared_data.config.get('adsb_wardrift_auto'):
+                _adsb_wardrift['next_run'] = 0.0
+                _adsb_wardrift_start_worker()
+        today = adsb._utc_today()
+        st = _adsb_state_load()
+        days = []
+        for d in adsb.available_days()[:7]:
+            rec = st.get(d) or {}
+            days.append({'day': d, 'aircraft': adsb.day_icao_count(d),
+                         'state': rec.get('state'), 'message': rec.get('message', ''),
+                         'exp': rec.get('exp'), 'at': rec.get('at')})
+        return jsonify({
+            'signed_in': bool((shared_data.config.get('wardrift_session_token') or '').strip()),
+            'username': shared_data.config.get('wardrift_username', ''),
+            'today': today,
+            'today_aircraft': adsb.day_icao_count(today),
+            'auto': bool(shared_data.config.get('adsb_wardrift_auto', False)),
+            'interval_min': int(shared_data.config.get('adsb_wardrift_interval_min', 30)),
+            'pushover_ready': _pushover_ready(),
+            'days': days,
+        })
+    except Exception as e:
+        logger.error(f"adsb wardrift config error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/adsb/wardrift/upload', methods=['POST'])
+def adsb_wardrift_upload():
+    """Upload a day's aircraft to Wardrift (body: {"day": "YYYYMMDD"} optional)."""
+    try:
+        import adsb
+        data = request.get_json(silent=True) or {}
+        day = str(data.get('day') or adsb._utc_today())
+        if not re.match(r'^\d{8}$', day):
+            return jsonify({'error': 'day must be YYYYMMDD'}), 400
+        res = _adsb_wardrift_upload(day, reason='manual')
+        if not res.get('ok'):
+            code = 422 if res.get('count') == 0 else (401 if 'signed in' in (res.get('error') or '') else 502)
+            return jsonify({'success': False, **res}), code
+        return jsonify({'success': True, **res})
+    except Exception as e:
+        logger.error(f"adsb wardrift upload error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/adsb/export')
+def adsb_export():
+    """Download a day's aircraft as an SBS/BaseStation log (?day=YYYYMMDD)."""
+    try:
+        import adsb
+        day = str(request.args.get('day') or adsb._utc_today())
+        if not re.match(r'^\d{8}$', day):
+            return jsonify({'error': 'day must be YYYYMMDD'}), 400
+        sbs = adsb.export_sbs(day)
+        if not sbs:
+            return jsonify({'error': 'No aircraft logged for this day'}), 404
+        from flask import Response
+        return Response(sbs, mimetype='text/plain', headers={
+            'Content-Disposition': f'attachment; filename="ragnar_adsb_{day}.sbs"'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+if shared_data.config.get('adsb_wardrift_auto'):
+    _adsb_wardrift_start_worker()
+
+
+
+# ---------------------------------------------------------------------------
 # Wardrift mesh reporter - Ragnar as the uplink for a Meshtastic node.
 #
 # Stock Meshtastic firmware can't call Wardrift itself, so Ragnar reads the
