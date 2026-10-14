@@ -204,6 +204,9 @@ NAMES = {
     'CVE-2021-1368': 'UDLD port-channel RCE', 'CVE-2021-34714': 'UDLD reload DoS',
     'CVE-2025-20154': 'TWAMP server OOB array-access reload', 'CVE-2021-34720': 'IP SLA/TWAMP socket memory exhaustion',
     'CVE-2025-20188': 'IOS-XE WLC OOB AP-image hardcoded-JWT upload (10.0)', 'CVE-2026-20133': 'Catalyst SD-WAN Manager API flaw',
+    'CVE-2018-15439': 'SB switch default privileged account re-enabled', 'CVE-2025-20311': 'Catalyst 9000 crafted-frame egress port block',
+    'CVE-2025-20313': 'IOS-XE secure boot bypass', 'CVE-2025-20314': 'IOS-XE secure boot bypass',
+    'CVE-2025-20327': 'IE Switch Device Manager crafted-URL DoS',
     'CVE-2023-20024': 'Cisco SB switch web-UI DoS', 'CVE-2023-20156': 'Cisco SB switch web-UI DoS',
     'CVE-2023-20157': 'Cisco SB switch web-UI DoS', 'CVE-2023-20158': 'Cisco SB switch web-UI DoS',
     'CVE-2023-20162': 'Cisco SB switch web-UI info disclosure',
@@ -224,8 +227,14 @@ NAMES = {
 def tracked_files():
     out = subprocess.run(['git', 'ls-files', '*.py', '*.js', '*.html'], cwd=ROOT,
                          capture_output=True, text=True, check=True).stdout.split()
-    # Never scan this script: its NAMES table would count as a detector.
-    return [p for p in out if p != 'scripts/gen_cve_list.py']
+    # Never scan this script: its NAMES table would count as a detector. And never
+    # scan the vendored BGP Pathwatch v6 passive tiers: they ship self-test-only
+    # (no live Ragnar capture adapter/route — see #959), so the parser CVEs their
+    # own test corpus names must keep the BGP/SR-MPLS watchers' intended CONTEXT
+    # (posture-advisory) classification, not be miscounted as live-detected here.
+    return [p for p in out
+            if p != 'scripts/gen_cve_list.py'
+            and not p.startswith('python/bgp_pathwatch/')]
 
 
 def nd_owner(name):

@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **355** distinct CVE IDs
-- **305** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **360** distinct CVE IDs
+- **310** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **41** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -32,14 +32,14 @@ detector works is in [nettools.md](nettools.md).
 | 2015 | 11 |
 | 2016 | 6 |
 | 2017 | 6 |
-| 2018 | 12 |
+| 2018 | 13 |
 | 2019 | 15 |
 | 2020 | 30 |
 | 2021 | 37 |
 | 2022 | 29 |
 | 2023 | 45 |
 | 2024 | 52 |
-| 2025 | 40 |
+| 2025 | 44 |
 | 2026 | 46 |
 
 ## By detector
@@ -55,7 +55,7 @@ detector works is in [nettools.md](nettools.md).
 | BLE Pentest (active) | 6 |
 | CDP Watch | 27 |
 | CFM Watch | 4 |
-| Cisco Guard | 33 |
+| Cisco Guard | 38 |
 | Comware Guard | 2 |
 | Dell Guard | 2 |
 | DHCP Guardian | 2 |
@@ -155,6 +155,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2018-7445](https://nvd.nist.gov/vuln/detail/CVE-2018-7445) |  | detected | MikroTik Guard | — |
 | [CVE-2018-14847](https://nvd.nist.gov/vuln/detail/CVE-2018-14847) | Winbox arbitrary file read | detected | MikroTik Guard | — |
 | [CVE-2018-14880](https://nvd.nist.gov/vuln/detail/CVE-2018-14880) | tcpdump OSPFv3 parser over-read | context only | OSPF Watch | — |
+| [CVE-2018-15439](https://nvd.nist.gov/vuln/detail/CVE-2018-15439) | SB switch default privileged account re-enabled | detected | Cisco Guard | — |
 | [CVE-2019-0033](https://nvd.nist.gov/vuln/detail/CVE-2019-0033) |  | context only | ARP Watch | — |
 | [CVE-2019-3977](https://nvd.nist.gov/vuln/detail/CVE-2019-3977) |  | detected | MikroTik Guard | — |
 | [CVE-2019-3979](https://nvd.nist.gov/vuln/detail/CVE-2019-3979) |  | detected | MikroTik Guard | — |
@@ -376,8 +377,12 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-20164](https://nvd.nist.gov/vuln/detail/CVE-2025-20164) |  | detected | Cisco Guard | — |
 | [CVE-2025-20188](https://nvd.nist.gov/vuln/detail/CVE-2025-20188) | IOS-XE WLC OOB AP-image hardcoded-JWT upload (10.0) | detected | Cisco Guard | — |
 | [CVE-2025-20241](https://nvd.nist.gov/vuln/detail/CVE-2025-20241) |  | detected | Cisco Guard | — |
+| [CVE-2025-20311](https://nvd.nist.gov/vuln/detail/CVE-2025-20311) | Catalyst 9000 crafted-frame egress port block | detected | Cisco Guard | — |
 | [CVE-2025-20312](https://nvd.nist.gov/vuln/detail/CVE-2025-20312) |  | detected | Cisco Guard | — |
+| [CVE-2025-20313](https://nvd.nist.gov/vuln/detail/CVE-2025-20313) | IOS-XE secure boot bypass | detected | Cisco Guard | — |
+| [CVE-2025-20314](https://nvd.nist.gov/vuln/detail/CVE-2025-20314) | IOS-XE secure boot bypass | detected | Cisco Guard | — |
 | [CVE-2025-20315](https://nvd.nist.gov/vuln/detail/CVE-2025-20315) | CAPWAP malformed header | detected | Cisco Guard | — |
+| [CVE-2025-20327](https://nvd.nist.gov/vuln/detail/CVE-2025-20327) | IE Switch Device Manager crafted-URL DoS | detected | Cisco Guard | — |
 | [CVE-2025-20352](https://nvd.nist.gov/vuln/detail/CVE-2025-20352) |  | detected | Cisco Guard | — |
 | [CVE-2025-20700](https://nvd.nist.gov/vuln/detail/CVE-2025-20700) | Airoha RACE | active check | BLE Pentest (active) | — |
 | [CVE-2025-20701](https://nvd.nist.gov/vuln/detail/CVE-2025-20701) | Airoha RACE | active check | BLE Pentest (active) | — |

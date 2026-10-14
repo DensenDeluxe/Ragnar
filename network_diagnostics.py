@@ -20392,7 +20392,10 @@ _CISCO_GUARD_BPF = (
     'udp port 4341 or udp port 4342 or '
     'tcp port 862 or udp port 862 or udp port 1967 or '
     'tcp port 23 or tcp port 80 or '
-    'tcp port 8080 or tcp port 8443 or ' + _CISCO_VXLAN_TRILL_BPF + ' or '
+    'tcp port 8080 or tcp port 8443 or '
+    # v8: cleartext model-driven-telemetry ports (gNMI/gRPC dial-out) for CG-117 —
+    # IOS-XE `gnxi server` 50052, IOS-XR gRPC 57400, and the mis-set-cleartext 9339.
+    'tcp port 50052 or tcp port 57400 or tcp port 9339 or ' + _CISCO_VXLAN_TRILL_BPF + ' or '
     + _GUARD_IP6_EXTHDR_BPF)
 # `udp port 4789` admits VXLAN (v4 and v6 underlay) so JNPR-061 can inspect the
 # VXLAN/overlayd header for the CVE-2021-0254 structural anomaly. Unlike the Cisco
@@ -20749,7 +20752,15 @@ _CISCO_SMB_NOT_VULN_RE = re.compile(
 # RCE (4×9.8) + DoS (4×8.6) + info-disclosure — the full CG-113 cluster.
 _CISCO_SMB_CVES = ('CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
                    'CVE-2023-20189', 'CVE-2023-20024', 'CVE-2023-20156',
-                   'CVE-2023-20157', 'CVE-2023-20158', 'CVE-2023-20162')
+                   'CVE-2023-20157', 'CVE-2023-20158', 'CVE-2023-20162',
+                   # v8: the EOL SB 200/300/500 family also carries the default
+                   # privileged-account re-enable (CG-012 in ciscoguard v8).
+                   'CVE-2018-15439')
+
+# --- Model-driven telemetry (CG-117, v8): the RFC 9113 §3.4 cleartext HTTP/2
+# connection preface — the definitive marker that a gNMI/gRPC telemetry plane is
+# running unencrypted (over TLS, h2 is ALPN-negotiated and no preface is visible).
+_CISCO_H2_PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
 
 # --- LISP (CG-107/240/241, CVE-2024-20311): control UDP/4342, data UDP/4341.
 _CISCO_LISP_PORTS = (4341, 4342)
@@ -21272,13 +21283,17 @@ def _cisco_analyze(records):
             if re.search(rb'^(GET|POST|PUT|HEAD)\s', r['payload'][:8]):
                 add('CG-103', 'HTTP_WEB_UI_CLEARTEXT', 'HIGH', 'EXPOSURE', src,
                     ['CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
-                     'CVE-2023-20189', 'CVE-2025-20164'], {'dst': dst, 'port': r['dport']})
-                # Oversized request line = SMB-switch overflow shape (no reassembly).
+                     'CVE-2023-20189', 'CVE-2025-20164', 'CVE-2025-20327'],
+                    {'dst': dst, 'port': r['dport'],
+                     'note': 'cleartext device web UI — also the Industrial Ethernet '
+                     'Switch Device Manager plane (CVE-2025-20164 priv-esc / '
+                     'CVE-2025-20327 crafted-URL DoS)'})
+                # Oversized request line = SMB-switch / IE-Device-Manager overflow shape.
                 line = r['payload'].split(b'\r\n', 1)[0]
                 if len(line) > 4096:
                     add('CG-260', 'WEB_UI_OVERSIZED_FIELD', 'MEDIUM', 'ATTACK', src,
                         ['CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
-                         'CVE-2023-20189'], {'request_line_len': len(line)})
+                         'CVE-2023-20189', 'CVE-2025-20327'], {'request_line_len': len(line)})
 
         # --- Cisco Small Business switch web UI exposed (May 2023 cluster) ---
         # The switch's model appears in the HTTP response banner (Server header /
@@ -21300,6 +21315,21 @@ def _cisco_analyze(records):
                     dst or src, ['CVE-2026-20133'],
                     {'note': 'Catalyst SD-WAN Manager (vManage) API path observed — '
                      'verify against CVE-2026-20133'})
+
+        # --- Model-driven telemetry in cleartext (CG-117, v8; no CVE) ---
+        # Cleartext gNMI/gRPC dial-out (IOS-XE `gnxi server` 50052, IOS-XR gRPC
+        # 57400, or a mis-set 9339). The DEFINITIVE marker is the RFC 9113 §3.4
+        # HTTP/2 connection preface, which is only ever sent for cleartext HTTP/2
+        # with prior knowledge — over TLS h2 is negotiated by ALPN and no preface
+        # is visible, so observing it is a statement of fact, not a heuristic. The
+        # payload itself is never decoded (the YANG→protobuf dictionary is
+        # per-device). TLS telemetry stays silent here — that is tlswatch's subject.
+        if r['proto'] == 'TCP' and _CISCO_H2_PREFACE in (r['payload'] or b'')[:64]:
+            add('CG-117', 'MDT_TELEMETRY_CLEARTEXT', 'HIGH', 'EXPOSURE', dst or src,
+                [], {'dst': dst, 'port': r['dport'], 'marker': 'http2-preface',
+                     'confidence': 'definitive',
+                     'note': 'cleartext HTTP/2 (gNMI/gRPC model-driven telemetry) — '
+                     'operational state on the wire unencrypted; payload never decoded'})
 
         # --- TWAMP / OWAMP control + IP SLA (CG-014/114/115/116/294, v7) ---
         if r['proto'] in ('TCP', 'UDP') and (r['dport'] == _TWAMP_PORT
@@ -21435,8 +21465,10 @@ def _cisco_analyze(records):
         # --- VLAN tag-stack anomaly (Catalyst 9000 control-plane DoS shape) ---
         if r['vlan_tags'] > _CISCO_MAX_VLAN_TAGS:
             add('CG-220', 'VLAN_TAG_STACK_ANOMALY', 'HIGH', 'ATTACK', src or dst,
-                ['CVE-2024-20434'], {'vlan_tags': r['vlan_tags'],
-                                     'threshold': _CISCO_MAX_VLAN_TAGS})
+                ['CVE-2024-20434', 'CVE-2025-20311'],
+                {'vlan_tags': r['vlan_tags'], 'threshold': _CISCO_MAX_VLAN_TAGS,
+                 'note': 'anomalous VLAN-tag stack — Catalyst 9000 control-plane DoS '
+                 '(CVE-2024-20434) / crafted-frame egress port block (CVE-2025-20311)'})
 
     # POSTURE version screening → CG-004 / CG-005 (tracked CVE trains; a NOTE,
     # never a verdict — verify THIS device). A train below its fixed release, or
@@ -21446,6 +21478,15 @@ def _cisco_analyze(records):
         add('CG-004', 'IOS_XE_VERSION_IN_CVE_RANGE', 'MEDIUM', 'POSTURE', None,
             list(_CISCO_IOSXE_CVES), {'version': iosxe_ver, 'reason': ix_why,
              'note': 'verify THIS device against the advisory'})
+    # v8: secure-boot bypass (CVE-2025-20313 / CVE-2025-20314) is a local/physical
+    # vector with no wire signature, so whenever an IOS-XE device is identified it
+    # is surfaced as an advisory-only INFO note (never a verdict) — same honesty as
+    # ciscoguard v8's CG-008.
+    if iosxe_ver:
+        add('CG-008', 'SECURE_BOOT_ADVISORY_ONLY', 'INFO', 'POSTURE', None,
+            ['CVE-2025-20313', 'CVE-2025-20314'],
+            {'version': iosxe_ver, 'note': 'IOS-XE secure-boot bypass is a local/'
+             'physical vector (no wire signature) — advisory only, verify THIS device'})
     if nxos_ver and nx_hit:
         add('CG-005', 'NXOS_VERSION_IN_CVE_RANGE', 'MEDIUM', 'POSTURE', None,
             list(_CISCO_NXOS_CVES), {'version': nxos_ver, 'reason': nx_why,
@@ -24637,6 +24678,43 @@ def _cisco_selftest():
     scenarios.append({'name': 'cisco-capwap-runt', 'expect': 'CG-292, no CG-112',
                       'got': str(sorted(_cwr)),
                       'pass': 'CG-292' in _cwr and 'CG-112' not in _cwr})
+
+    # v8: model-driven telemetry in cleartext (CG-117). The RFC 9113 HTTP/2 preface
+    # on a gNMI/gRPC port is the definitive cleartext marker.
+    check('cisco-mdt-cleartext',
+          [_guard_rec(proto='TCP', src='10.0.0.9', sport=50000, dst='10.0.0.1',
+                      dport=50052, payload=_CISCO_H2_PREFACE + b'\x00\x00\x00\x04')],
+          'exposure', ['CG-117'])
+    # a TLS-looking handshake on the same port must NOT fire CG-117 (that's tlswatch).
+    r_mdt = _cisco_analyze([_guard_rec(proto='TCP', dport=9339,
+                            payload=b'\x16\x03\x01\x00\x50' + b'\x00' * 40)])
+    scenarios.append({'name': 'cisco-mdt-tls-silent', 'expect': 'no CG-117',
+                      'got': str(sorted({f['code'] for f in r_mdt['findings']})),
+                      'pass': 'CG-117' not in {f['code'] for f in r_mdt['findings']}})
+    # v8: an observed IOS-XE device surfaces the secure-boot advisory (CG-008, INFO)
+    # naming CVE-2025-20313 / CVE-2025-20314.
+    r_sb = _cisco_analyze([_guard_rec(dissect='Cisco IOS-XE Software, Version 17.12.3')])
+    scenarios.append({'name': 'cisco-secureboot-advisory', 'expect': 'CG-008 + CVE-2025-20313',
+                      'got': str(sorted({f['code'] for f in r_sb['findings']})),
+                      'pass': any(f['code'] == 'CG-008' and 'CVE-2025-20313' in f['cves']
+                                  for f in r_sb['findings'])})
+    # v8: the IE Switch Device Manager web UI DoS (CVE-2025-20327) folds into CG-103.
+    scenarios.append({'name': 'cisco-ie-devicemgr-cve', 'expect': 'CG-103 names CVE-2025-20327',
+                      'got': '', 'pass': any('CVE-2025-20327' in f['cves']
+                      for f in _cisco_analyze([_guard_rec(proto='TCP', dport=80,
+                          payload=b'GET / HTTP/1.1\r\nHost: x\r\n\r\n')])['findings']
+                      if f['code'] == 'CG-103')})
+    # v8: the Catalyst 9000 crafted-frame egress block (CVE-2025-20311) folds into CG-220.
+    scenarios.append({'name': 'cisco-vlan-egress-cve', 'expect': 'CG-220 names CVE-2025-20311',
+                      'got': '', 'pass': any('CVE-2025-20311' in f['cves']
+                      for f in _cisco_analyze([_guard_rec(proto='TCP', dport=80,
+                          vlan_tags=4)])['findings'] if f['code'] == 'CG-220')})
+    # v8: the EOL SMB switch default-account re-enable (CVE-2018-15439) folds into CG-113.
+    scenarios.append({'name': 'cisco-smb-defaultacct-cve', 'expect': 'CG-113 names CVE-2018-15439',
+                      'got': '', 'pass': any('CVE-2018-15439' in f['cves']
+                      for f in _cisco_analyze([_guard_rec(proto='TCP', src='10.0.0.5',
+                          sport=80, dst='10.0.0.9', dport=51000, payload=_smb_resp)])['findings']
+                      if f['code'] == 'CG-113')})
 
     # --- Scapy end-to-end: craft SNMP default-community -> pcap -> tcpdump -X. ---
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}

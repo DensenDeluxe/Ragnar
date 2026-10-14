@@ -3784,6 +3784,23 @@ verify the Out-of-Band AP-Image-Download feature against **CVE-2025-20188** (10.
 hardcoded-JWT arbitrary file upload) — gated on the WLC identity, not a bare 8443 flow.
 **SD-WAN (`CG-106`):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`,
 `vmanage`) in cleartext HTTP → **CVE-2026-20133**.
+**v8 additions:** **`CG-117` model-driven telemetry in cleartext** — the definitive
+marker is the RFC 9113 §3.4 **HTTP/2 connection preface** (`PRI * HTTP/2.0…`), which is
+only ever sent for cleartext HTTP/2 with prior knowledge (over TLS, h2 is ALPN-negotiated
+and no preface is visible), so observing it on a gNMI/gRPC dial-out port (IOS-XE `gnxi
+server` 50052, IOS-XR gRPC 57400, or a mis-set-cleartext 9339, now admitted by the BPF)
+is a statement of fact that operational state is on the wire unencrypted — **no CVE**, the
+payload is never decoded (the YANG→protobuf dictionary is per-device), and TLS telemetry
+stays silent (that is TLS Watch's subject). **`CG-008` secure-boot advisory** — whenever
+an IOS-XE device is identified, the secure-boot bypass (**CVE-2025-20313 / CVE-2025-20314**)
+is surfaced as an advisory-only INFO note, because it is a local/physical vector with no
+wire signature. The **IE Switch Device Manager** web-UI DoS (**CVE-2025-20327**) folds into
+`CG-103`/`CG-260`, the **Catalyst 9000 crafted-frame egress block** (**CVE-2025-20311**)
+into `CG-220`, and the **EOL SB switch default-privileged-account re-enable**
+(**CVE-2018-15439**) into the `CG-113` SMB cluster. Still deferred with reasons: `CG-222`
+(ETHERNET_LENGTH_FIELD_LIE — an 802.3 length datum tcpdump's IP-onward hex can't carry),
+the IS-IS byte codes (covered by [IS-IS Scanner](#is-is-scanner)), and CVE-2024-20271 /
+CVE-2024-20314 (no public packet signature, per the module).
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 
