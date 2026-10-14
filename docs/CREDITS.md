@@ -223,12 +223,14 @@ behind them is Solarflere's work.
   violations, and it correlates the CVE-2025-52961 load pattern. That second one is labelled
   low confidence, because its trigger is valid traffic. Two CVEs are named only and stay
   context: CVE-2014-3223, the Huawei Y.1731 DoS, never published its trigger field, and
-  CVE-2023-20233, a Cisco IOS XR CFM bug, falls below the bar. Its other 88 codes cover
+  CVE-2023-20233, a Cisco IOS XR CFM bug, falls below the bar. Its other 105 codes cover
   forged APS protection switching (forced switch, lockout, uncorroborated Signal Fail),
-  forged AIS / CCM, moved or duplicate MEPs, linktrace sweeps, and a full **ERPS / G.8032
-  ring-protection** class (R-APS opcode 40): a forged RPL owner, two ring blocks, a ring
-  left open, off-VLAN R-APS, flush storms and revision downgrades, armed against an
-  operator-declared ring. None of them names a CVE.
+  forged AIS / CCM, moved or duplicate MEPs, linktrace sweeps, a full **ERPS / G.8032
+  ring-protection** class (R-APS opcode 40, armed against an operator-declared ring) and, in
+  v3→v5, **Y.1731 measurement & maintenance** abuse (forged loss/delay, TST), **transport**
+  anomalies (CFM tunnelled where it should not be, e.g. inside VXLAN) and an **E-LMI**
+  cross-plane class (MEF 16, EtherType 0x88EE): the UNI's CE-VLAN→EVC status checked against
+  CFM's continuity picture, armed against an operator-declared EVC. None of them names a CVE.
 - **Beyond the CVE corpus** — not every module needs a CVE to earn its place. **OAM Watch**
   covers IEEE 802.3ah Link OAM, where no CVE clears the bar. It is still a one-frame link
   blackhole: a forged Loopback Control frame puts the peer into remote loopback and discards

@@ -167,7 +167,8 @@ check("R-APS DNF decodes", frame.body["dnf"] is True)
 check("R-APS BPR decodes false when clear", frame.body["bpr"] is False)
 check("R-APS Node ID decodes", frame.body["node_id"] == mk.MAC_B)
 check("R-APS body is 32 octets per spec",
-      cw.OPCODE_BODY[cw.OP_RAPS] == cw.RAPS_BODY_LEN == 32)
+      cw.OPCODE_MIN_BODY[cw.OP_RAPS] == cw.RAPS_BODY_LEN == 32 and
+      cw.OPCODE_FTO[cw.OP_RAPS] == 32)
 check("conforming R-APS raises no structural defect",
       not cw.parse_cfm(mk.eth_ring(mk.MAC_A, mk.raps(3, 0)), 0,
                        0.0).structural)
@@ -202,6 +203,205 @@ check("padded truncated R-APS is indistinguishable from an all-zero body "
       "(documented limit, not a defect)",
       bool(padded.body) and not padded.structural,
       str(padded.structural))
+
+# ---- Y.1731 measurement, maintenance, and the opcode table --------------
+check("RFM, SFM and GNM are named, not reported as unassigned",
+      all(o in cw.OPCODE_NAMES for o in (cw.OP_RFM, cw.OP_SFM, cw.OP_GNM)))
+check("GNM is in the Y.1731 overlay set and RFM/SFM are not",
+      cw.OP_GNM in cw.Y1731_OPCODES and
+      cw.OP_RFM not in cw.Y1731_OPCODES and
+      cw.OP_SFM not in cw.Y1731_OPCODES,
+      "opcodes 0-31 are IEEE 802.1's range, 32-63 are ITU-T's")
+for op, name in ((cw.OP_RFM, "RFM"), (cw.OP_SFM, "SFM"),
+                 (cw.OP_GNM, "GNM")):
+    fr = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                             mk.cfm(3, op, 0, 4, b"\x00\x00\x00\x01",
+                                    mk.END), vlans=((0x8100, 100),)),
+                      0, 0.0)
+    check("%s raises no unassigned-opcode defect" % name,
+          not any(c == "CFM-007" for c, _ in fr.structural),
+          str(fr.structural))
+
+# First TLV Offset is asserted only where the mandated value is
+# established. Wireshark and scapy disagree for the OUI-bearing opcodes
+# and GNM, so CFM-010 must stay silent there or it fires on every
+# conforming frame.
+for op in sorted(cw.OUI_OPCODES | {cw.OP_GNM}):
+    check("no First TLV Offset is asserted for opcode %d" % op,
+          op not in cw.OPCODE_FTO)
+    body = (b"\x00\x11\x22\x07" if op in cw.OUI_OPCODES else b"\x01")
+    for fto in (0, 4, 10, 13):
+        fr = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                                 mk.cfm(3, op, 0, fto, body, mk.END),
+                                 vlans=((0x8100, 100),)), 0, 0.0)
+        check("opcode %d with offset %d raises no CFM-010" % (op, fto),
+              not any(c == "CFM-010" for c, _ in fr.structural),
+              str(fr.structural))
+check("the established offsets are still enforced",
+      any(c == "CFM-010" for c, _ in cw.parse_cfm(
+          mk.eth(mk.D3, mk.MAC_A, mk.cfm(3, 43, 0, 99,
+                                         b"\x00" * 12, mk.END),
+                 vlans=((0x8100, 100),)), 0, 0.0).structural))
+check("OUI-bearing opcodes require 4 body octets",
+      all(cw.OPCODE_MIN_BODY[o] == 4 for o in cw.OUI_OPCODES))
+
+# Delay timestamps: 4-octet seconds then 4-octet nanoseconds, stride 8.
+# Four fill DMM/DMR's 32-octet body and two fill 1DM's 16, which is what
+# fixes the stride at 8 rather than the 10 a 48-bit seconds field needs.
+dmr = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                          mk.dm(3, 46, (0x11111110, 200000000),
+                                (0x11111111, 200000001),
+                                (0x11111112, 200000002),
+                                (0x11111113, 200000003)),
+                          vlans=((0x8100, 100),)), 0, 0.0)
+st = dmr.body["timestamps"]
+check("DMR carries four timestamps", len(st) == 4)
+check("timestamp seconds and nanoseconds split at 4 octets each",
+      st["TxTimeStampf"]["seconds"] == 0x11111110 and
+      st["TxTimeStampf"]["nanos"] == 200000000 and
+      st["RxTimeStampb"]["seconds"] == 0x11111113,
+      str({k: (v["seconds"], v["nanos"]) for k, v in st.items()}))
+odm = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                          mk.dm(3, 45, (5, 0), (6, 0)),
+                          vlans=((0x8100, 100),)), 0, 0.0)
+check("1DM carries two timestamps", len(odm.body["timestamps"]) == 2)
+
+slm = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                          mk.sl(3, 55, 10, 0xDEADBEEF, 1000),
+                          vlans=((0x8100, 100),)), 0, 0.0)
+check("SLM decodes source MEP, test ID and TxFCf",
+      slm.body["src_mep_id"] == 10 and
+      slm.body["test_id"] == 0xDEADBEEF and
+      slm.body["tx_fcf"] == 1000)
+check("SLM leaves the SLR-only fields unread",
+      slm.body["rsp_mep_id"] is None and slm.body["tx_fcb"] is None,
+      "those octets are reserved in an SLM")
+slr = cw.parse_cfm(mk.eth(mk.D3, mk.MAC_A,
+                          mk.sl(3, 54, 10, 0xDEADBEEF, 1000, rsp_mep=20,
+                                txfcb=7), vlans=((0x8100, 100),)), 0, 0.0)
+check("SLR decodes the responder MEP and TxFCb",
+      slr.body["rsp_mep_id"] == 20 and slr.body["tx_fcb"] == 7)
+
+# ---- E-LMI (MEF 16) ---------------------------------------------------
+# Layout confirmed by probing Wireshark's E-LMI dissector: UNI Status
+# carries a map-type octet then sub-IEs, and EVC Status carries a 2-octet
+# reference, a status octet, then sub-IEs.
+el = cw.parse_elmi(mk.elmi(snd=5, rcv=4, evcs=((7, 0x02), (9, 0x04))),
+                   0, 0.0)
+check("E-LMI parses at EtherType 0x88EE", el is not None)
+check("E-LMI version and message type decode",
+      el.version == 1 and el.msg_type == cw.ELMI_MSG_STATUS)
+check("E-LMI sequence numbers decode",
+      el.snd_seq == 5 and el.rcv_seq == 4)
+check("E-LMI UNI identifier decodes from its sub-element",
+      el.uni_id == b"UNI-1", str(el.uni_id))
+check("E-LMI decodes both EVC status elements",
+      [(e["reference"], e["status"]) for e in el.evcs] ==
+      [(7, 0x02), (9, 0x04)], str(el.evcs))
+check("E-LMI names the EVC status values",
+      el.evcs[0]["status_name"] == "Active" and
+      el.evcs[1]["status_name"] == "Partially Active")
+check("a conforming E-LMI frame raises no structural defect",
+      not el.structural, str(el.structural))
+check("a CFM frame is not mistaken for E-LMI",
+      cw.parse_elmi(mk.eth(mk.D3, mk.MAC_A, mk.ccm(3, 10)), 0, 0.0) is None)
+check("an E-LMI frame is not mistaken for CFM",
+      cw.parse_cfm(mk.elmi(), 0, 0.0) is None)
+for label, frame in (
+        ("a bad protocol version", mk.elmi(version=3)),
+        ("an unknown message type", mk.elmi(msg=0x11)),
+        ("an undefined EVC status", mk.elmi(evcs=((7, 0x09),))),
+        ("a destination outside the E-LMI group",
+         mk.elmi(dst=mk.MAC_B))):
+    check("E-LMI rejects %s" % label,
+          bool(cw.parse_elmi(frame, 0, 0.0).structural))
+ev = cw.parse_evc("7,vlan=500,name=cust-A")
+check("--evc parses reference, VLAN and label",
+      ev.reference == 7 and ev.vlan == (500,) and ev.name() == "cust-A")
+check("--evc accepts untagged", cw.parse_evc("7,vlan=untagged").vlan == ())
+for bad_spec, why in (("7", "a missing vlan"),
+                      ("abc,vlan=500", "a non-numeric reference"),
+                      ("7,vlan=9999", "a VLAN out of range"),
+                      ("7,bogus=1", "an unknown option"),
+                      ("99999,vlan=1", "a reference out of range"),
+                      ("", "an empty specification")):
+    try:
+        cw.parse_evc(bad_spec)
+        check("--evc rejects %s" % why, False, bad_spec)
+    except ValueError:
+        check("--evc rejects %s" % why, True)
+
+# ---- EVPN-VXLAN -------------------------------------------------------
+native = mk.eth(mk.D3, mk.MAC_A, mk.ccm(3, 10), vlans=((0x8100, 500),))
+tun = mk.vxlan(native, vni=1000)
+check("CFM inside VXLAN is NOT seen without decapsulation",
+      cw.parse_cfm(tun, 0, 0.0, vxlan=False) is None,
+      "this is the blind spot the support closes")
+fr = cw.parse_cfm(tun, 0, 0.0)
+check("CFM inside VXLAN is parsed", fr is not None and
+      fr.opcode == cw.OP_CCM)
+check("the VNI is recovered", fr.vni == 1000)
+check("the inner VLAN is the customer's", fr.vlan_key == (500,))
+check("the service key separates VNI from VLAN",
+      fr.service_key == (1000, 500))
+check("native traffic uses the no-VNI marker",
+      cw.parse_cfm(native, 0, 0.0).service_key == (cw.NO_VNI, 500))
+check("split_service round-trips a service key",
+      cw.split_service(fr.service_key) == (1000, (500,)) and
+      cw.split_service((cw.NO_VNI, 500)) == (None, (500,)))
+# Malformed or non-VXLAN encapsulation must not be mistaken for a tunnel.
+for label, raw in (
+        ("a plain IPv4 UDP frame to another port",
+         mk.vxlan(native).replace(struct.pack("!H", 4789),
+                                  struct.pack("!H", 4790), 1)),
+        ("a truncated tunnel", mk.vxlan(native)[:30]),
+        ("an ARP frame", bytes.fromhex("ffffffffffff")
+         + mk.MAC_A + struct.pack("!H", 0x0806) + b"\x00" * 40)):
+    check("%s is not decapsulated" % label,
+          cw.parse_cfm(raw, 0, 0.0) is None)
+# EVPN-MPLS is deliberately NOT decapsulated.
+mpls = (bytes.fromhex("001122330044") + mk.MAC_A
+        + struct.pack("!H", 0x8847)
+        + struct.pack("!I", (16 << 12) | (1 << 8) | 64)
+        + struct.pack("!I", 0) + native)
+check("EVPN-MPLS is not decapsulated, by decision",
+      cw.parse_cfm(mpls, 0, 0.0) is None,
+      "a label stack carries no payload type; see the README boundary")
+
+# ---- the capture filter ----------------------------------------------
+# Every EtherType the module parses must be in the filter, or the kernel
+# drops it before userspace and the plane is silently invisible. That is
+# how E-LMI was first added: parser yes, filter no.
+check("both parsed EtherTypes are in the filter's watch list",
+      set(cw.WATCHED_ETHERTYPES) == {cw.ETHERTYPE_CFM, cw.ETHERTYPE_ELMI})
+for vx in (False, True):
+    blob, length = cw._bpf_blob(vxlan=vx)
+    check("the capture filter is well-formed with vxlan=%s" % vx,
+          len(blob) == length * 8 and length > 0)
+    prog = [struct.unpack_from("HBBI", blob, i * 8) for i in range(length)]
+    for etype in cw.WATCHED_ETHERTYPES:
+        check("filter tests EtherType 0x%04x at all three tag depths "
+              "(vxlan=%s)" % (etype, vx),
+              sum(1 for ins in prog
+                  if ins[0] == cw.BPF_JMP_JEQ and ins[3] == etype) == 3)
+    check("no backward jumps with vxlan=%s" % vx,
+          all(i[1] >= 0 and i[2] >= 0 for i in prog))
+check("enabling VXLAN adds the clause rather than replacing the filter",
+      cw._bpf_blob(vxlan=True)[1] > cw._bpf_blob(vxlan=False)[1])
+
+# The assembler is what keeps those offsets right, so prove it resolves
+# labels and refuses an undefined one.
+asm = cw._bpf_assemble([(cw.BPF_JMP_JA, 0, 0, "end"),
+                        (cw.BPF_RET_K, 0, 0, 0),
+                        "end",
+                        (cw.BPF_RET_K, 0, 0, cw.BPF_ACCEPT)])
+check("the BPF assembler resolves a forward label",
+      asm[0] == (cw.BPF_JMP_JA, 0, 0, 1), str(asm[0]))
+try:
+    cw._bpf_assemble([(cw.BPF_JMP_JA, 0, 0, "nowhere")])
+    check("the BPF assembler rejects an undefined label", False)
+except KeyError:
+    check("the BPF assembler rejects an undefined label", True)
 
 # ---- G.8031 / ELPS linear APS -------------------------------------------
 # Field widths confirmed empirically against Wireshark: the protection
@@ -483,6 +683,51 @@ check("the RB staleness window is tunable apart from the CFM-193 "
       cw.Config().rb_stale is not None and
       "rb_stale" in cw.Config.__dataclass_fields__ and
       "rb_window" in cw.Config.__dataclass_fields__)
+
+# The E-LMI cross-plane rule, both directions and the agreeing case.
+eng = run_pcap(os.path.join(mk.FIXDIR, "elmi.pcap"), mk.EVC_DECL)
+fired = {f.code for f in eng.results()}
+check("a contradiction between E-LMI and CFM is reported",
+      "CFM-251" in fired)
+c251 = [f for f in eng.results() if f.code == "CFM-251"][0]
+check("both directions of the contradiction are caught", c251.count >= 2,
+      "got %d; expected the Not-Active-while-healthy and the "
+      "Active-while-faulted cases" % c251.count)
+check("a replayed E-LMI frame is caught", "CFM-253" in fired)
+check("an E-LMI structural defect is caught", "CFM-252" in fired)
+check("a declared mapping does not raise the undeclared finding",
+      "CFM-254" not in fired)
+
+# Agreement must stay silent, or the rule is worthless on a live UNI.
+quiet = cw.Engine(cw.config_from_args(cw.build_parser().parse_args(
+    ["--pcap", "x"] + mk.EVC_DECL)))
+agree = [mk.eth(mk.D3, mk.MAC_A, mk.ccm(3, 10, seq=i + 1),
+                vlans=((0x8100, 500),)) for i in range(3)]
+agree.append(mk.elmi(snd=1, evcs=((7, 0x02),)))
+for i, raw in enumerate(agree):
+    quiet.feed_raw(raw, i, mk.BASE_TS + i * 0.3)
+quiet.finalize()
+agreed = {f.code for f in quiet.results()}
+check("E-LMI reporting Active while CFM is healthy stays silent",
+      "CFM-251" not in agreed, str(sorted(agreed)))
+check("the E-LMI observation itself is still recorded",
+      "CFM-250" in agreed)
+
+# Undeclared E-LMI fails loud and leaves the cross-plane rule inert.
+eng = run_pcap(os.path.join(mk.FIXDIR, "elmi_undeclared.pcap"))
+fired = {f.code for f in eng.results()}
+check("undeclared E-LMI raises CFM-254", "CFM-254" in fired)
+check("CFM-251 is inert without an EVC mapping", "CFM-251" not in fired)
+check("E-LMI structural rules stay armed without a mapping",
+      "CFM-250" in fired)
+
+# Two tenants behind different VNIs must not share per-service state.
+eng = run_pcap(os.path.join(mk.FIXDIR, "vxlan.pcap"))
+fired = {f.code for f in eng.results()}
+check("two VNIs reusing one inner VLAN do not merge their associations",
+      "CFM-040" not in fired,
+      "CFM-040 here would mean tenant state collided in the state tables")
+check("the VXLAN encapsulation is recorded", "CFM-240" in fired)
 
 # Undeclared rings must fail loud rather than look clean.
 eng = run_pcap(os.path.join(mk.FIXDIR, "raps_structural.pcap"))

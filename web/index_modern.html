@@ -3099,6 +3099,12 @@
                                 <button onclick="cfmClearRings()" class="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-gray-400 px-4 py-2 rounded text-sm whitespace-nowrap" title="Forget all declared ERPS rings">Clear rings</button>
                             </div>
                             <div id="cfm-rings" class="hidden mt-2 text-xs"></div>
+                            <div class="flex flex-wrap items-center gap-2 mt-2">
+                                <input id="cfm-evc-spec" type="text" placeholder="E-LMI EVC e.g. 7,vlan=500,name=cust-A" title="Declare an E-LMI EVC (MEF 16) to arm the CE-VLAN/EVC cross-plane rules (Class L). REFERENCE,vlan=VLAN[,name=LABEL]" class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm font-mono">
+                                <button onclick="cfmDeclareEvc()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Declare this E-LMI EVC (persists across scans)">Declare EVC</button>
+                                <button onclick="cfmClearEvcs()" class="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-gray-400 px-4 py-2 rounded text-sm whitespace-nowrap" title="Forget all declared E-LMI EVCs">Clear EVCs</button>
+                            </div>
+                            <div id="cfm-evcs" class="hidden mt-2 text-xs"></div>
                             <div id="cfm-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
@@ -9526,7 +9532,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261013-kiosk-off"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261014-cfm-v5-evc"></script>
 
 
 

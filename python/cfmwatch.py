@@ -62,7 +62,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 MODULE_NAME = "cfmwatch"
 
 # --------------------------------------------------------------------------
@@ -71,6 +71,205 @@ MODULE_NAME = "cfmwatch"
 
 ETHERTYPE_CFM = 0x8902
 VLAN_ETHERTYPES = (0x8100, 0x88A8, 0x9100, 0x9200)
+# ---- E-LMI (MEF 16), the second EtherType this module parses -----------
+#
+# E-LMI is NOT independently useful here: the only abuse angle it offers
+# is an EVC status that contradicts what CFM reports about the same
+# service, and that needs both planes. That dependency is why it lives
+# inside this module rather than beside it - the opposite of the
+# oamwatch/lacpwatch split, where each plane stood on its own.
+#
+# The vantage works out for the same reason: E-LMI runs on the PE-CE UNI,
+# and the UNI is where MEF mandates service OAM, so the two planes
+# coincide on the tap this module already claims.
+#
+# Layout confirmed by probing Wireshark's 42-field E-LMI dissector:
+#   version(1) message_type(1) then information elements
+#   IE = tag(1) length(1) value(length)
+#     0x01 Report Type      report type (1)
+#     0x02 Sequence Numbers send (1), receive (1)
+#     0x11 UNI Status       CE-VLAN/EVC map type (1) then sub-IEs
+#     0x21 EVC Status       EVC reference (2), status (1), then sub-IEs
+#   sub-IE = tag(1) length(1) value(length)
+# The internals of the EVC Map Entry sub-IE (0x63) are deliberately NOT
+# decoded: Wireshark recognises the tag but does not break out its
+# contents, so the EVC-to-VLAN join comes from an operator declaration
+# instead of a guess.
+ETHERTYPE_ELMI = 0x88EE
+ELMI_GROUP = bytes.fromhex("0180c2000007")
+ELMI_MSG_STATUS_ENQUIRY = 0x75
+ELMI_MSG_STATUS = 0x7D
+ELMI_MSG_NAMES: Dict[int, str] = {
+    ELMI_MSG_STATUS_ENQUIRY: "Status Enquiry", ELMI_MSG_STATUS: "Status",
+}
+ELMI_VERSION = 1
+ELMI_IE_REPORT_TYPE = 0x01
+ELMI_IE_SEQUENCE = 0x02
+ELMI_IE_DATA_INSTANCE = 0x03
+ELMI_IE_UNI_STATUS = 0x11
+ELMI_IE_EVC_STATUS = 0x21
+ELMI_IE_MAP = 0x22
+ELMI_IE_NAMES: Dict[int, str] = {
+    ELMI_IE_REPORT_TYPE: "Report Type",
+    ELMI_IE_SEQUENCE: "Sequence Numbers",
+    ELMI_IE_DATA_INSTANCE: "Data Instance",
+    ELMI_IE_UNI_STATUS: "UNI Status",
+    ELMI_IE_EVC_STATUS: "EVC Status",
+    ELMI_IE_MAP: "CE-VLAN ID/EVC Map",
+}
+ELMI_SUB_UNI_ID = 0x51
+ELMI_SUB_EVC_PARAMS = 0x61
+ELMI_SUB_EVC_ID = 0x62
+ELMI_SUB_EVC_MAP_ENTRY = 0x63
+ELMI_SUB_BANDWIDTH = 0x71
+ELMI_EVC_STATUS_NAMES: Dict[int, str] = {
+    0x00: "Not Active", 0x01: "New and Not Active", 0x02: "Active",
+    0x03: "New and Active", 0x04: "Partially Active",
+    0x05: "New and Partially Active",
+}
+ELMI_EVC_ACTIVE = frozenset({0x02, 0x03})
+ELMI_EVC_INACTIVE = frozenset({0x00, 0x01})
+ELMI_EVC_PARTIAL = frozenset({0x04, 0x05})
+ELMI_REPORT_TYPES: Dict[int, str] = {
+    0: "Full status", 1: "E-LMI check", 2: "Single EVC async status",
+    3: "Full status continued",
+}
+
+
+@dataclass(frozen=True)
+class Evc:
+    """An operator-declared EVC-to-service-VLAN mapping.
+
+    E-LMI names services by EVC reference; CFM state is keyed by VLAN.
+    The join between them is not reliably on the wire, so the operator
+    declares it - the same shape as the ring declaration, and undeclared
+    fails loud rather than looking clean.
+    """
+    reference: int
+    vlan: Tuple[int, ...]
+    label: str = ""
+
+    def name(self) -> str:
+        return self.label or "evc%d" % self.reference
+
+
+@dataclass
+class ElmiFrame:
+    index: int
+    ts: float
+    frame_len: int
+    dst: bytes
+    src: bytes
+    version: int
+    msg_type: int
+    ies: List[Tuple[int, bytes]] = field(default_factory=list)
+    evcs: List[Dict[str, Any]] = field(default_factory=list)
+    uni_id: Optional[bytes] = None
+    map_type: Optional[int] = None
+    report_type: Optional[int] = None
+    snd_seq: Optional[int] = None
+    rcv_seq: Optional[int] = None
+    structural: List[Tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def msg_name(self) -> str:
+        return ELMI_MSG_NAMES.get(self.msg_type, "0x%02x" % self.msg_type)
+
+    def note(self, detail: str) -> None:
+        self.structural.append(("CFM-252", detail))
+
+
+def parse_sub_ies(raw: bytes) -> List[Tuple[int, bytes]]:
+    out: List[Tuple[int, bytes]] = []
+    pos = 0
+    guard = 0
+    while pos + 2 <= len(raw) and guard < 64:
+        guard += 1
+        tag = raw[pos]
+        ln = raw[pos + 1]
+        if pos + 2 + ln > len(raw):
+            break
+        out.append((tag, raw[pos + 2:pos + 2 + ln]))
+        pos += 2 + ln
+    return out
+
+
+def parse_elmi(raw: bytes, index: int, ts: float) -> Optional[ElmiFrame]:
+    """Parse an E-LMI frame, or return None if this is not one."""
+    if len(raw) < 16:
+        return None
+    if struct.unpack_from("!H", raw, 12)[0] != ETHERTYPE_ELMI:
+        return None
+    body = raw[14:]
+    if len(body) < 2:
+        return None
+    frame = ElmiFrame(index=index, ts=ts, frame_len=len(raw), dst=raw[0:6],
+                      src=raw[6:12], version=body[0], msg_type=body[1])
+    if frame.version != ELMI_VERSION:
+        frame.note("protocol version %d, expected %d"
+                   % (frame.version, ELMI_VERSION))
+    if frame.msg_type not in ELMI_MSG_NAMES:
+        frame.note("message type 0x%02x is not Status or Status Enquiry"
+                   % frame.msg_type)
+    if frame.dst != ELMI_GROUP:
+        frame.note("destination %s, not the E-LMI group %s"
+                   % (mac_str(frame.dst), mac_str(ELMI_GROUP)))
+
+    pos = 2
+    guard = 0
+    while pos + 2 <= len(body) and guard < 128:
+        guard += 1
+        tag = body[pos]
+        ln = body[pos + 1]
+        if tag == 0 and ln == 0:
+            break                     # padding
+        if pos + 2 + ln > len(body):
+            frame.note("information element 0x%02x declares length %d, "
+                       "which overruns the frame" % (tag, ln))
+            break
+        val = body[pos + 2:pos + 2 + ln]
+        frame.ies.append((tag, val))
+        pos += 2 + ln
+
+        if tag == ELMI_IE_SEQUENCE and ln >= 2:
+            frame.snd_seq, frame.rcv_seq = val[0], val[1]
+        elif tag == ELMI_IE_REPORT_TYPE and ln >= 1:
+            frame.report_type = val[0]
+            if val[0] not in ELMI_REPORT_TYPES:
+                frame.note("report type %d is not defined" % val[0])
+        elif tag == ELMI_IE_UNI_STATUS and ln >= 1:
+            frame.map_type = val[0]
+            for stag, sval in parse_sub_ies(val[1:]):
+                if stag == ELMI_SUB_UNI_ID:
+                    frame.uni_id = sval
+        elif tag == ELMI_IE_EVC_STATUS and ln >= 3:
+            ref = struct.unpack_from("!H", val, 0)[0]
+            status = val[2]
+            evc_id = None
+            for stag, sval in parse_sub_ies(val[3:]):
+                if stag == ELMI_SUB_EVC_ID:
+                    evc_id = sval
+            if status not in ELMI_EVC_STATUS_NAMES:
+                frame.note("EVC %d carries status 0x%02x, which MEF 16 "
+                           "does not define" % (ref, status))
+            frame.evcs.append({
+                "reference": ref, "status": status,
+                "status_name": ELMI_EVC_STATUS_NAMES.get(
+                    status, "undefined(0x%02x)" % status),
+                "evc_id": evc_id,
+            })
+    return frame
+
+
+ETHERTYPE_IPV4 = 0x0800
+ETHERTYPE_IPV6 = 0x86DD
+IPPROTO_UDP = 17
+VXLAN_PORT = 4789
+VXLAN_HEADER_LEN = 8
+VXLAN_FLAG_VNI_VALID = 0x08
+# A VNI is 24 bits, so -1 can never collide with one. Used as the "no
+# encapsulation" marker in the service key.
+NO_VNI = -1
 
 # CFM class 1 group: 01-80-C2-00-00-3x where x = MD level (CCM, multicast LBM)
 # CFM class 2 group: 01-80-C2-00-00-3(8+x) where x = MD level (LTM)
@@ -81,6 +280,9 @@ OP_LBR = 2
 OP_LBM = 3
 OP_LTR = 4
 OP_LTM = 5
+OP_RFM = 6
+OP_SFM = 7
+OP_GNM = 32
 OP_AIS = 33
 OP_LCK = 35
 OP_TST = 37
@@ -103,6 +305,7 @@ OP_SLM = 55
 
 OPCODE_NAMES: Dict[int, str] = {
     OP_CCM: "CCM", OP_LBR: "LBR", OP_LBM: "LBM", OP_LTR: "LTR", OP_LTM: "LTM",
+    OP_RFM: "RFM", OP_SFM: "SFM", OP_GNM: "GNM",
     OP_AIS: "AIS", OP_LCK: "LCK", OP_TST: "TST", OP_APS: "APS", OP_RAPS: "R-APS",
     OP_MCC: "MCC", OP_LMR: "LMR", OP_LMM: "LMM", OP_1DM: "1DM", OP_DMR: "DMR",
     OP_DMM: "DMM", OP_EXR: "EXR", OP_EXM: "EXM", OP_VSR: "VSR", OP_VSM: "VSM",
@@ -110,21 +313,76 @@ OPCODE_NAMES: Dict[int, str] = {
 }
 
 # Y.1731 overlay opcodes - presence marks the ITU service-OAM layer in use.
+# The split is the opcode range itself: 0-31 are reserved for IEEE 802.1
+# (so CCM, LBM/LBR, LTM/LTR, RFM and SFM are 802.1ag), and 32-63 are
+# ITU-T's, which is why GNM at 32 belongs here and RFM/SFM at 6 and 7 do
+# not.
 Y1731_OPCODES = frozenset({
-    OP_AIS, OP_LCK, OP_TST, OP_APS, OP_RAPS, OP_MCC, OP_LMR, OP_LMM, OP_1DM,
-    OP_DMR, OP_DMM, OP_EXR, OP_EXM, OP_VSR, OP_VSM, OP_CSF, OP_1SL, OP_SLR,
-    OP_SLM,
+    OP_GNM, OP_AIS, OP_LCK, OP_TST, OP_APS, OP_RAPS, OP_MCC, OP_LMR,
+    OP_LMM, OP_1DM, OP_DMR, OP_DMM, OP_EXR, OP_EXM, OP_VSR, OP_VSM,
+    OP_CSF, OP_1SL, OP_SLR, OP_SLM,
 })
 
-# Minimum body length (octets after the 4-octet common header, before TLVs)
-# and the First TLV Offset each opcode is specified to carry.
-OPCODE_BODY: Dict[int, int] = {
+# Two DIFFERENT things, deliberately separated.
+#
+# OPCODE_MIN_BODY is how many octets of fixed fields the opcode's body
+# must contain for the PDU to be parseable at all. Established from the
+# field layout and verified empirically against Wireshark's dissector.
+#
+# OPCODE_FTO is the First TLV Offset the specification mandates, and it
+# is populated ONLY where the value is actually established. Where the
+# two independent dissectors disagree, the entry is absent and CFM-010
+# does not fire for that opcode - asserting a guess there would raise a
+# conformance defect on every conforming frame, which is the exact shape
+# of bug this module has already hit twice (CFM-008 on G.8032v2 R-APS,
+# CFM-083 on SF-P).
+#
+# Corroboration status:
+#   CCM 70, LBM/LBR 4, AIS/LCK 0  - agreed by Wireshark, scapy, and the
+#                                   IETF MPLS-TP/Y.1731 draft.
+#   LTM 17, LTR 6, APS 4, R-APS 32, TST 4, LMM 12, DMM 32, 1DM 16,
+#   SLM/SLR/1SL 16               - agreed by Wireshark and scapy.
+#   LMR 12, DMR 32               - structural symmetry with LMM/DMM:
+#                                   Wireshark decodes them through the
+#                                   SAME field names (cfm.lmm.lmr.*,
+#                                   cfm.dmm.dmr.*), so same layout. scapy
+#                                   simply omits the reply opcodes from
+#                                   its offset table.
+#   MCC, EXM, EXR, VSM, VSR, GNM - NOT ESTABLISHED. Wireshark decodes
+#                                   OUI+Sub-OpCode at a fixed position,
+#                                   implying 4; scapy declares 0 for
+#                                   EXM/EXR/VSM/VSR, 10 for MCC and 13
+#                                   for GNM. The IETF draft covers none
+#                                   of them and defers to Y.1731. So the
+#                                   minimum body is asserted (4, or 1 for
+#                                   GNM's Sub-OpCode) and the offset is
+#                                   not.
+OPCODE_MIN_BODY: Dict[int, int] = {
     OP_CCM: 70, OP_LBR: 4, OP_LBM: 4, OP_LTR: 6, OP_LTM: 17,
+    OP_RFM: 4, OP_SFM: 4, OP_GNM: 1,
     OP_AIS: 0, OP_LCK: 0, OP_TST: 4, OP_APS: 4, OP_RAPS: 32,
     OP_MCC: 4, OP_LMR: 12, OP_LMM: 12, OP_1DM: 16, OP_DMR: 32, OP_DMM: 32,
-    OP_EXR: 0, OP_EXM: 0, OP_VSR: 0, OP_VSM: 0, OP_CSF: 0,
+    OP_EXR: 4, OP_EXM: 4, OP_VSR: 4, OP_VSM: 4, OP_CSF: 0,
     OP_1SL: 16, OP_SLR: 16, OP_SLM: 16,
 }
+
+OPCODE_FTO: Dict[int, int] = {
+    OP_CCM: 70, OP_LBR: 4, OP_LBM: 4, OP_LTR: 6, OP_LTM: 17,
+    OP_AIS: 0, OP_LCK: 0, OP_CSF: 0, OP_TST: 4, OP_APS: 4, OP_RAPS: 32,
+    OP_LMM: 12, OP_LMR: 12, OP_DMM: 32, OP_DMR: 32, OP_1DM: 16,
+    OP_1SL: 16, OP_SLR: 16, OP_SLM: 16,
+}
+
+# Opcodes whose body begins with a 3-octet OUI and a 1-octet Sub-OpCode.
+OUI_OPCODES = frozenset({OP_MCC, OP_EXM, OP_EXR, OP_VSM, OP_VSR})
+# Y.1731 reserves these for experimentation; they have no business in a
+# production network.
+EXPERIMENTAL_OPCODES = frozenset({OP_EXM, OP_EXR})
+# Opcodes that carry performance-measurement state.
+MEASUREMENT_OPCODES = frozenset({OP_LMM, OP_LMR, OP_DMM, OP_DMR, OP_1DM,
+                                 OP_SLM, OP_SLR, OP_1SL})
+# PTP-style timestamps: 48-bit seconds then 32-bit nanoseconds.
+NANOS_PER_SECOND = 1000000000
 
 TLV_END = 0
 TLV_SENDER_ID = 1
@@ -895,6 +1153,129 @@ SPECS: Tuple[Spec, ...] = (
        "interconnected topology and is recorded rather than alarmed - it "
        "is what CFM-189 and CFM-190 would otherwise report as a bare "
        "flush primitive."),
+
+    _s("CFM-220", "Measurement frame from a source with no CCM history",
+       SEV_MEDIUM, "M", "MEDIUM",
+       "An LM, DM or SLM frame arrived on a service from a MAC that has "
+       "never sourced a CCM there. Performance measurement is between "
+       "established MEPs, so a measurement frame from an unknown source "
+       "is either an injected probe or a station measuring a service it "
+       "is not part of.",
+       caveat="A tap that joined after the MEPs settled, or one that "
+              "sees the measurement path but not the CCM path, produces "
+              "the same picture."),
+    _s("CFM-221", "Frame counter regression in a measurement reply",
+       SEV_MEDIUM, "M", "HIGH",
+       "A transmit or receive frame counter went backwards for one "
+       "measurement session. The counters in LMM/LMR and SLM/SLR are "
+       "monotonic by construction, so a decrease means forged or "
+       "replayed measurement traffic - which corrupts the loss figures "
+       "the NOC uses to judge the service."),
+    _s("CFM-222", "Delay-measurement timestamp field invalid", SEV_MEDIUM,
+       "M", "HIGH",
+       "A timestamp's nanoseconds field is 1,000,000,000 or greater, "
+       "which no conforming sender can produce. Structural, and it needs "
+       "no assumption about clock synchronisation."),
+    _s("CFM-223", "Delay-measurement reply timestamps inconsistent",
+       SEV_MEDIUM, "M", "MEDIUM",
+       "A DMR's own timestamps contradict each other - the frame was "
+       "received before it was sent, or returned before it arrived. One "
+       "frame carries all four, so this is judged within the frame and "
+       "needs no clock of our own.",
+       caveat="Endpoints with unsynchronised clocks legitimately produce "
+              "crossed forward and backward pairs; only an ordering "
+              "violation within the same direction is unambiguous."),
+    _s("CFM-224", "Synthetic-loss reply with no matching test", SEV_MEDIUM,
+       "M", "MEDIUM",
+       "An SLR carried a Test ID that no observed SLM requested. Either "
+       "the replies are forged, or they answer a test this tap cannot "
+       "see.",
+       caveat="A tap that sees one direction only will report this for "
+              "every legitimate reply; weight it by whether SLMs are "
+              "visible at all."),
+    _s("CFM-225", "TST frames observed", SEV_LOW, "M", "HIGH",
+       "ETH-TST test frames are in use. They carry an arbitrary-length "
+       "pattern and are the one Y.1731 opcode designed to move bulk "
+       "data, which is why the rate matters more than the presence.",
+       caveat="Legitimate during service activation testing."),
+    _s("CFM-226", "Sustained TST burst from one source", SEV_HIGH, "M",
+       "MEDIUM",
+       "One source sustained a high rate of TST frames. TST is a "
+       "bandwidth-injection primitive wearing OAM clothing: the payload "
+       "is arbitrary, the frames are unauthenticated, and they are "
+       "carried inside the customer's service.",
+       caveat="Service-activation testing to Y.1564 looks exactly like "
+              "this and is usually scheduled; correlate with a change "
+              "window."),
+    _s("CFM-227", "MCC observed", SEV_LOW, "M", "HIGH",
+       "A Maintenance Communication Channel frame was seen. MCC carries "
+       "vendor management traffic inside the OAM channel, so it is a "
+       "management path that does not appear in any routing or firewall "
+       "policy.",
+       caveat="Legitimate on vendors that use MCC for remote management "
+              "of unaddressed devices."),
+    _s("CFM-228", "Vendor-specific OAM observed", SEV_LOW, "M", "HIGH",
+       "A VSM or VSR frame was seen. The body after the OUI is "
+       "undocumented by the standard, so its content cannot be "
+       "validated - only its presence and the OUI claiming it."),
+    _s("CFM-229", "Experimental OAM opcode in production", SEV_MEDIUM, "M",
+       "HIGH",
+       "An EXM or EXR frame was seen. Y.1731 reserves these opcodes for "
+       "experimentation; they have no defined meaning and no business on "
+       "a production service, so any sighting is either a lab leak or a "
+       "hand-rolled sender."),
+    _s("CFM-230", "Measurement plane inventory", SEV_INFO, "M", "HIGH",
+       "Performance-measurement and maintenance opcodes observed, with "
+       "the sources using each, the test IDs seen, and the OUIs claiming "
+       "vendor-specific and management traffic."),
+
+    _s("CFM-240", "CFM observed inside VXLAN encapsulation", SEV_INFO, "T",
+       "HIGH",
+       "Service OAM was seen inside a VXLAN tunnel, so this tap is on the "
+       "underlay rather than on the customer's segment. Recorded because "
+       "it changes what the rest of the findings mean: the VNI is the "
+       "service identifier, and without decapsulation none of this plane "
+       "would be visible at all."),
+
+    _s("CFM-250", "E-LMI observed", SEV_INFO, "L", "HIGH",
+       "MEF 16 E-LMI is running on this segment, so the tap is at a "
+       "PE-CE UNI. Carries the EVC references the PE is reporting and "
+       "their status - the service map as the provider declares it, "
+       "alongside the one this module observes from CFM."),
+    _s("CFM-251", "EVC status contradicts the CFM state of the same "
+       "service", SEV_HIGH, "L", "MEDIUM",
+       "E-LMI tells the customer one thing about an EVC while CFM on the "
+       "mapped service says another: either the EVC is reported Active "
+       "while CFM shows a fault, so a real outage is being hidden, or it "
+       "is reported Not Active while CFM is healthy, so an outage is "
+       "being manufactured. Both are what a forged E-LMI achieves, and "
+       "neither is visible from either plane alone - which is the whole "
+       "reason E-LMI is in this module.",
+       caveat="Armed only when --evc maps the EVC reference to a service "
+              "VLAN. A fault outside the tap's visibility, or a PE that "
+              "has not yet reconverged, produces the same contradiction "
+              "briefly; weight the repeat count."),
+    _s("CFM-252", "E-LMI structural defect", SEV_MEDIUM, "L", "HIGH",
+       "An E-LMI frame violated MEF 16: a protocol version other than 1, "
+       "a message type that is neither Status nor Status Enquiry, an "
+       "information element whose length overruns the frame, an "
+       "undefined report type, an undefined EVC status value, or a "
+       "destination outside the E-LMI group address."),
+    _s("CFM-253", "E-LMI sequence number anomaly", SEV_MEDIUM, "L",
+       "MEDIUM",
+       "The send sequence number for this UNI repeated or went "
+       "backwards. E-LMI is a polled protocol whose sequence numbers are "
+       "how each side detects loss, so a repeat is a replayed frame and a "
+       "regression is a spoofed one.",
+       caveat="The counter is a single octet and wraps at 255, which is "
+              "excluded; a genuine PE restart also resets it."),
+    _s("CFM-254", "E-LMI seen with no EVC mapping declared", SEV_MEDIUM,
+       "L", "HIGH",
+       "E-LMI is present but no --evc declaration maps its EVC "
+       "references to service VLANs, so the cross-plane contradiction "
+       "rule is inert. The structural and sequence rules still apply. "
+       "This exists so an undeclared mapping fails loudly instead of "
+       "looking clean."),
 )
 
 REGISTRY: Dict[str, Spec] = {s.code: s for s in SPECS}
@@ -910,12 +1291,30 @@ CLASS_NAMES: Dict[str, str] = {
     "H": "CVE triggers",
     "P": "Posture inventory",
     "R": "ERPS / G.8032 ring protection",
+    "M": "Y.1731 measurement and maintenance",
+    "T": "Transport and encapsulation",
+    "L": "E-LMI cross-plane (MEF 16)",
 }
 
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+def split_service(key: Tuple[int, ...]) -> Tuple[Optional[int],
+                                                 Tuple[int, ...]]:
+    """Split a service key back into (vni or None, vlan tuple)."""
+    if not key:
+        return None, ()
+    vni = key[0]
+    return (None if vni == NO_VNI else vni), tuple(key[1:])
+
+
+def service_label(key: Tuple[int, ...]) -> str:
+    vni, vlans = split_service(key)
+    tag = "/".join(str(v) for v in vlans) if vlans else "untagged"
+    return ("vni%d:%s" % (vni, tag)) if vni is not None else tag
+
 
 def mac_str(raw: bytes) -> str:
     return ":".join("%02x" % b for b in raw)
@@ -957,6 +1356,7 @@ class CfmFrame:
     flags: int
     first_tlv_offset: int
     payload: bytes                       # CFM PDU, common header included
+    vni: Optional[int] = None            # set when carried inside VXLAN
     tlvs: List[Tuple[int, bytes]] = field(default_factory=list)
     structural: List[Tuple[str, str]] = field(default_factory=list)
     body: Dict[str, Any] = field(default_factory=dict)
@@ -970,12 +1370,100 @@ class CfmFrame:
     def vlan_key(self) -> Tuple[int, ...]:
         return tuple(v.vid for v in self.vlans)
 
+    @property
+    def service_key(self) -> Tuple[int, ...]:
+        """The identity every per-service state table is keyed on.
+
+        Under VXLAN the VNI is the service and the inner VLAN is the
+        customer's, so two tenants reusing VLAN 500 behind different VNIs
+        must not share maintenance-association or ring state. NO_VNI
+        marks native traffic and cannot collide with a 24-bit VNI.
+        """
+        return (self.vni if self.vni is not None else NO_VNI,) + \
+            self.vlan_key
+
     def note(self, code: str, detail: str) -> None:
         self.structural.append((code, detail))
 
 
 class ParseError(Exception):
     pass
+
+
+def strip_vxlan(raw: bytes) -> Optional[Tuple[int, bytes]]:
+    """Return (vni, inner Ethernet frame) if `raw` is VXLAN, else None.
+
+    EVPN-VXLAN carries the customer's CFM inside the tunnel, so a tap on
+    the underlay sees none of the service layer without this - the module
+    reports a clean service plane while watching an encapsulated one.
+    Confirmed as a real blind spot by test, and confirmed reachable
+    because Wireshark dissects the inner CFM through the same frame.
+
+    Only VXLAN is decapsulated. EVPN-MPLS is NOT, deliberately: a label
+    stack carries no payload type, the pseudowire control word is
+    optional, and telling an inner Ethernet frame from any other payload
+    needs heuristics this module cannot validate. That is recorded as a
+    scoped boundary rather than guessed at.
+    """
+    if len(raw) < 14:
+        return None
+    pos = 12
+    for _ in range(4):
+        if pos + 4 > len(raw):
+            return None
+        etype = struct.unpack_from("!H", raw, pos)[0]
+        if etype in VLAN_ETHERTYPES:
+            pos += 4
+            continue
+        break
+    else:
+        return None
+    if pos + 2 > len(raw):
+        return None
+    etype = struct.unpack_from("!H", raw, pos)[0]
+    pos += 2
+
+    if etype == ETHERTYPE_IPV4:
+        if pos + 20 > len(raw):
+            return None
+        vhl = raw[pos]
+        if (vhl >> 4) != 4:
+            return None
+        ihl = (vhl & 0x0F) * 4
+        if ihl < 20 or pos + ihl > len(raw):
+            return None
+        # A fragmented outer packet cannot be reassembled from one frame.
+        if struct.unpack_from("!H", raw, pos + 6)[0] & 0x3FFF:
+            return None
+        if raw[pos + 9] != IPPROTO_UDP:
+            return None
+        pos += ihl
+    elif etype == ETHERTYPE_IPV6:
+        if pos + 40 > len(raw):
+            return None
+        if raw[pos] >> 4 != 6 or raw[pos + 6] != IPPROTO_UDP:
+            return None          # extension headers are not walked here
+        pos += 40
+    else:
+        return None
+
+    if pos + 8 > len(raw):
+        return None
+    dport = struct.unpack_from("!H", raw, pos + 2)[0]
+    if dport != VXLAN_PORT:
+        return None
+    pos += 8
+
+    if pos + VXLAN_HEADER_LEN > len(raw):
+        return None
+    flags = raw[pos]
+    if not flags & VXLAN_FLAG_VNI_VALID:
+        return None
+    vni = int.from_bytes(raw[pos + 4:pos + 7], "big")
+    inner = raw[pos + VXLAN_HEADER_LEN:]
+    if len(inner) < 14:
+        return None
+    return vni, inner
 
 
 def parse_ethernet(raw: bytes) -> Optional[Tuple[bytes, bytes, List[Vlan], int, bytes]]:
@@ -1132,9 +1620,19 @@ def _walk_tlvs(frame: CfmFrame, start: int, strict_tail: bool) -> None:
 
 
 def parse_cfm(raw: bytes, index: int, ts: float,
-              strict_tail: bool = False) -> Optional[CfmFrame]:
+              strict_tail: bool = False,
+              vxlan: bool = True) -> Optional[CfmFrame]:
     """Parse one Ethernet frame into a CfmFrame, or None if it is not CFM."""
+    vni: Optional[int] = None
+    outer_len = len(raw)
     eth = parse_ethernet(raw)
+    if eth is None and vxlan:
+        tun = strip_vxlan(raw)
+        if tun is not None:
+            vni, inner = tun
+            eth = parse_ethernet(inner)
+            if eth is not None:
+                raw = inner
     if eth is None:
         return None
     dst, src, vlans, _etype, payload = eth
@@ -1145,6 +1643,7 @@ def parse_cfm(raw: bytes, index: int, ts: float,
         index=index, ts=ts, frame_len=len(raw), dst=dst, src=src, vlans=vlans,
         md_level=(b0 >> 5) & 0x7, version=b0 & 0x1F, opcode=payload[1],
         flags=payload[2], first_tlv_offset=payload[3], payload=payload,
+        vni=vni,
     )
     # Version 0 is the only value 802.1ag defines - EXCEPT for R-APS,
     # where G.8032 carries its own revision here and version 1 means
@@ -1156,17 +1655,17 @@ def parse_cfm(raw: bytes, index: int, ts: float,
     if frame.opcode not in OPCODE_NAMES:
         frame.note("CFM-007", "opcode %d unassigned" % frame.opcode)
 
-    spec_body = OPCODE_BODY.get(frame.opcode)
-    if spec_body is not None:
-        if len(payload) < 4 + spec_body:
-            frame.note("CFM-006",
-                       "%s needs %d body octets, payload carries %d"
-                       % (frame.opcode_name, spec_body, len(payload) - 4))
-        if frame.first_tlv_offset != spec_body:
-            frame.note("CFM-010",
-                       "%s specifies First TLV Offset %d, frame declares %d"
-                       % (frame.opcode_name, spec_body,
-                          frame.first_tlv_offset))
+    min_body = OPCODE_MIN_BODY.get(frame.opcode)
+    if min_body is not None and len(payload) < 4 + min_body:
+        frame.note("CFM-006",
+                   "%s needs %d body octets, payload carries %d"
+                   % (frame.opcode_name, min_body, len(payload) - 4))
+    # Only assert the offset where the mandated value is established.
+    want_fto = OPCODE_FTO.get(frame.opcode)
+    if want_fto is not None and frame.first_tlv_offset != want_fto:
+        frame.note("CFM-010",
+                   "%s specifies First TLV Offset %d, frame declares %d"
+                   % (frame.opcode_name, want_fto, frame.first_tlv_offset))
 
     _parse_body(frame)
     _walk_tlvs(frame, 4 + frame.first_tlv_offset, strict_tail)
@@ -1278,7 +1777,64 @@ def _parse_body(frame: CfmFrame) -> None:
         if avail < 12:
             return
         txf, rxf, txb = struct.unpack_from("!III", p, 4)
-        frame.body = {"tx_fcf": txf, "rx_fcf": rxf, "tx_fcb": txb}
+        frame.body = {"tx_fcf": txf, "rx_fcf": rxf, "tx_fcb": txb,
+                      "counters": {"TxFCf": txf, "RxFCf": rxf,
+                                   "TxFCb": txb}}
+    elif op in (OP_DMM, OP_DMR, OP_1DM):
+        # PTP-style timestamps: 48-bit seconds, 32-bit nanoseconds.
+        # 1DM carries the first pair only; DMM/DMR carry all four.
+        need = 16 if op == OP_1DM else 32
+        if avail < need:
+            return
+        # Each timestamp is 8 octets: 32-bit seconds then 32-bit
+        # nanoseconds. Four of them fill DMM/DMR's 32-octet body and two
+        # fill 1DM's 16 - which is what fixes the stride at 8 rather than
+        # the 10 a 48-bit seconds field would need. Verified against
+        # Wireshark's decode of a crafted frame.
+        stamps: Dict[str, Any] = {}
+        names = ("TxTimeStampf", "RxTimeStampf") if op == OP_1DM else \
+            ("TxTimeStampf", "RxTimeStampf", "TxTimeStampb", "RxTimeStampb")
+        for i, nm in enumerate(names):
+            secs, nanos = struct.unpack_from("!II", p, 4 + i * 8)
+            stamps[nm] = {"seconds": secs, "nanos": nanos,
+                          "value": secs + nanos / 1e9}
+        frame.body = {"timestamps": stamps}
+    elif op in (OP_SLM, OP_SLR, OP_1SL):
+        if avail < 16:
+            return
+        src_mep, rsp_mep, test_id, txfcf, txfcb = struct.unpack_from(
+            "!HHIII", p, 4)
+        frame.body = {
+            "src_mep_id": src_mep & 0x1FFF,
+            # Reserved in SLM and 1SL; the responder's MEP ID in SLR.
+            "rsp_mep_id": (rsp_mep & 0x1FFF) if op == OP_SLR else None,
+            "test_id": test_id,
+            "tx_fcf": txfcf,
+            # Reserved in SLM and 1SL; valid in SLR.
+            "tx_fcb": txfcb if op == OP_SLR else None,
+            "counters": ({"TxFCf": txfcf, "TxFCb": txfcb} if op == OP_SLR
+                         else {"TxFCf": txfcf}),
+        }
+    elif op == OP_TST:
+        if avail < 4:
+            return
+        frame.body = {"seq": struct.unpack_from("!I", p, 4)[0]}
+    elif op in OUI_OPCODES:
+        if avail < 4:
+            return
+        frame.body = {
+            "oui": p[4:7],
+            "oui_str": ":".join("%02x" % b for b in p[4:7]),
+            "sub_opcode": p[7],
+        }
+    elif op == OP_GNM:
+        if avail < 1:
+            return
+        frame.body = {"sub_opcode": p[4]}
+    elif op in (OP_RFM, OP_SFM):
+        if avail < 4:
+            return
+        frame.body = {"transaction_id": struct.unpack_from("!I", p, 4)[0]}
 
 
 # --------------------------------------------------------------------------
@@ -1329,6 +1885,7 @@ class Finding:
 @dataclass
 class Config:
     strict_tail: bool = False
+    vxlan: bool = True
     md_ceiling: Optional[int] = None
     rate_max: float = 50.0            # aggregate CFM frames/sec
     rate_window: float = 1.0
@@ -1362,6 +1919,17 @@ class Config:
     # question, so they must be tunable apart.
     rb_stale: float = 20.0
     ccm_loss_misses: float = 3.0      # G.8032 trigger: three missed CCMs
+    # Y.1731 measurement and maintenance
+    tst_burst: int = 20              # TST frames from one source
+    tst_window: float = 5.0
+    # E-LMI
+    evcs: Tuple[Evc, ...] = ()
+
+    def evc_for(self, reference: int) -> Optional[Evc]:
+        for evc in self.evcs:
+            if evc.reference == reference:
+                return evc
+        return None
 
     def ring_for(self, vlan: Tuple[int, ...]) -> Optional[Ring]:
         for ring in self.rings:
@@ -1419,6 +1987,9 @@ class Engine:
         self.ccm_macs: Dict[Any, set] = defaultdict(set)
         self.ccm_health: Dict[Tuple[Any, int], float] = {}
         self.ais_recent: Dict[Any, float] = {}
+        self.rdi_recent: Dict[Any, float] = {}
+        self.elmi_seq: Dict[bytes, int] = {}
+        self.inv_elmi: Dict[int, Dict[str, Any]] = {}
         self.aps_groups: Dict[Tuple[Any, int], Dict[str, Any]] = {}
         self.aps_inventory: Dict[Tuple[Any, int], Dict[str, Any]] = {}
         self.lbm_hist: Dict[bytes, deque] = defaultdict(deque)
@@ -1432,6 +2003,13 @@ class Engine:
         self.raps_hist: Dict[bytes, deque] = defaultdict(deque)
         self.flush_hist: Dict[Tuple[int, ...], deque] = defaultdict(deque)
         self.ring_ccm_quiet: Dict[Tuple[Any, int, str, int], bool] = {}
+
+        # Y.1731 measurement and maintenance state
+        self.meas_counters: Dict[Tuple[Any, bytes, int, str], int] = {}
+        self.slm_tests: Dict[Tuple[Any, int], float] = {}
+        self.tst_hist: Dict[bytes, deque] = defaultdict(deque)
+        self.inv_meas: Dict[int, Dict[str, Any]] = {}
+        self.inv_vni: Dict[int, Dict[str, Any]] = {}
 
         # posture inventory
         self.inv_levels: Dict[int, set] = defaultdict(set)
@@ -1475,8 +2053,12 @@ class Engine:
 
     def feed_raw(self, raw: bytes, index: int, ts: float) -> Optional[CfmFrame]:
         self.frames_total += 1
-        frame = parse_cfm(raw, index, ts, strict_tail=self.cfg.strict_tail)
+        frame = parse_cfm(raw, index, ts, strict_tail=self.cfg.strict_tail,
+                          vxlan=self.cfg.vxlan)
         if frame is None:
+            elmi = parse_elmi(raw, index, ts)
+            if elmi is not None:
+                self.feed_elmi(elmi)
             return None
         self.feed(frame)
         return frame
@@ -1506,6 +2088,12 @@ class Engine:
             self._aps(frame)
         elif op == OP_RAPS:
             self._raps(frame)
+        elif op in MEASUREMENT_OPCODES:
+            self._measurement(frame)
+        elif op == OP_TST:
+            self._tst(frame)
+        elif op in OUI_OPCODES:
+            self._oui_opcode(frame)
 
         self._ring_ccm_watch(frame)
         self._rates(frame)
@@ -1573,6 +2161,11 @@ class Engine:
         self.inv_opcodes[frame.opcode] += 1
         if frame.opcode in Y1731_OPCODES:
             self.inv_y1731[frame.opcode] += 1
+        if frame.vni is not None:
+            rec = self.inv_vni.setdefault(
+                frame.vni, {"vni": frame.vni, "frames": 0, "vlans": set()})
+            rec["frames"] += 1
+            rec["vlans"].add(frame.vlan_key)
 
     # -- Class C -----------------------------------------------------------
 
@@ -1583,10 +2176,11 @@ class Engine:
         mepid = body["mepid"]
         mk = body["maid_key"]
         interval = body["interval"]
-        vkey = frame.vlan_key
+        vkey = frame.service_key
         src = frame.src
 
         if body["rdi"]:
+            self.rdi_recent[vkey] = frame.ts
             self.emit("CFM-044", "%s/mep%d" % (mk, mepid),
                       "RDI asserted by MEP %d (%s)" % (mepid, mac_str(src)),
                       frame, {"mepid": mepid, "src": mac_str(src),
@@ -1653,7 +2247,7 @@ class Engine:
                       "CCM carries MAID %s where %s was established"
                       % (mk, known), frame,
                       {"observed_maid": mk, "established_maid": known,
-                       "vlan": list(vkey), "md_level": frame.md_level,
+                       "vlan": list(frame.vlan_key), "md_level": frame.md_level,
                        "src": mac_str(src)})
 
         akey = (vkey, frame.md_level, mk)
@@ -1735,7 +2329,7 @@ class Engine:
         self.inv_meps[(frame.md_level, mk, mepid)] = {
             "md_level": frame.md_level, "maid": mk, "mepid": mepid,
             "mac": mac_str(src), "interval": CCM_INTERVAL_NAMES.get(interval, "?"),
-            "vlan": list(vkey),
+            "vlan": list(frame.vlan_key),
         }
 
     # -- Class F -----------------------------------------------------------
@@ -1822,7 +2416,7 @@ class Engine:
 
     def _fault_management(self, frame: CfmFrame) -> None:
         op = frame.opcode
-        vkey = frame.vlan_key
+        vkey = frame.service_key
         period = frame.body.get("period", 0)
         name = frame.opcode_name
         src = frame.src
@@ -1832,7 +2426,7 @@ class Engine:
                       "AIS from %s at MD level %d"
                       % (mac_str(src), frame.md_level), frame,
                       {"src": mac_str(src), "md_level": frame.md_level,
-                       "vlan": list(vkey)})
+                       "vlan": list(frame.vlan_key)})
             self.ais_recent[vkey] = frame.ts
         elif op == OP_LCK:
             self.emit("CFM-062", "%s/level%d" % (str(vkey), frame.md_level),
@@ -1861,7 +2455,7 @@ class Engine:
             self.emit("CFM-061", "%s/%s" % (str(vkey), mac_str(src)),
                       "AIS injected by %s, which has never sourced a CCM on "
                       "this service" % mac_str(src), frame,
-                      {"src": mac_str(src), "vlan": list(vkey),
+                      {"src": mac_str(src), "vlan": list(frame.vlan_key),
                        "ccm_sources": sorted(mac_str(m) for m in known)})
 
         # AIS asserts a server-layer fault. If CCMs below this level are
@@ -1876,7 +2470,7 @@ class Engine:
                       "live within %.1fs"
                       % (frame.md_level, lvls, self.cfg.health_window), frame,
                       {"src": mac_str(src), "ais_level": frame.md_level,
-                       "healthy_levels": lvls, "vlan": list(vkey)})
+                       "healthy_levels": lvls, "vlan": list(frame.vlan_key)})
 
     # -- Class E -----------------------------------------------------------
 
@@ -1884,7 +2478,7 @@ class Engine:
         body = frame.body
         if not body:
             return
-        vkey = frame.vlan_key
+        vkey = frame.service_key
         gkey = (vkey, frame.md_level)
         gname = "%s/level%d" % (str(vkey), frame.md_level)
         req = body["request"]
@@ -1898,7 +2492,7 @@ class Engine:
                    "bridge_type": body["bridge_type"],
                    "requested_signal": body["requested_signal_name"],
                    "bridged_signal": body["bridged_signal_name"],
-                   "md_level": frame.md_level, "vlan": list(vkey)})
+                   "md_level": frame.md_level, "vlan": list(frame.vlan_key)})
 
         inv = self.aps_inventory.get(gkey)
         if inv is None:
@@ -2039,9 +2633,11 @@ class Engine:
         body = frame.body
         if not body:
             return
-        vkey = frame.vlan_key
+        vkey = frame.service_key
         src = frame.src
-        ring = self.cfg.ring_for(vkey)
+        # Declarations are VLAN-based, so ring matching uses the VLAN
+        # part while the state tables key on the full service.
+        ring = self.cfg.ring_for(frame.vlan_key)
         rname = ring.name() if ring else ("vlan%s" % "/".join(
             str(v) for v in vkey) if vkey else "untagged")
         req = body["request"]
@@ -2055,7 +2651,7 @@ class Engine:
                    "rb": body["rb"], "dnf": body["dnf"],
                    "bpr": body["bpr"], "revision": body["revision_name"],
                    "node_id": mac_str(body["node_id"]),
-                   "dst": mac_str(frame.dst), "vlan": list(vkey),
+                   "dst": mac_str(frame.dst), "vlan": list(frame.vlan_key),
                    "md_level": frame.md_level})
 
         # ---- declaration state: fail loud rather than look clean --------
@@ -2066,14 +2662,14 @@ class Engine:
                           "(declared: %s)"
                           % (rname, ", ".join(r.name()
                                               for r in self.cfg.rings)),
-                          frame, {"src": mac_str(src), "vlan": list(vkey),
+                          frame, {"src": mac_str(src), "vlan": list(frame.vlan_key),
                                   "declared": [r.name()
                                                for r in self.cfg.rings]})
             else:
                 self.emit("CFM-200", rname,
                           "R-APS seen on %s with no ring declared; "
                           "topology-dependent rules are inert" % rname,
-                          frame, {"src": mac_str(src), "vlan": list(vkey),
+                          frame, {"src": mac_str(src), "vlan": list(frame.vlan_key),
                                   "inert_codes": ["CFM-192", "CFM-194",
                                                   "CFM-195", "CFM-199"]})
 
@@ -2329,7 +2925,7 @@ class Engine:
         CFM-189/190 behaviour stands.
         """
         src = frame.src
-        vkey = frame.vlan_key
+        vkey = frame.service_key
 
         if ring is not None:
             parent = (self.cfg.ring_named(ring.parent)
@@ -2406,7 +3002,7 @@ class Engine:
         Same reasoning as CFM-083 for linear APS, with the ring caveat
         that a tap sees one segment of a loop.
         """
-        vkey = frame.vlan_key
+        vkey = frame.service_key
         healthy = [(lvl, ts) for (vk, lvl), ts in self.ccm_health.items()
                    if vk == vkey and frame.ts - ts <= self.cfg.health_window]
         ais_ts = self.ais_recent.get(vkey)
@@ -2431,8 +3027,8 @@ class Engine:
         """
         if not self.cfg.rings:
             return
-        vkey = frame.vlan_key
-        ring = self.cfg.ring_for(vkey)
+        vkey = frame.service_key
+        ring = self.cfg.ring_for(frame.vlan_key)
         if ring is None:
             return
         for mkey, st in self.mep.items():
@@ -2461,6 +3057,273 @@ class Engine:
                                st["interval"], "?")})
             else:
                 self.ring_ccm_quiet[mkey] = False
+
+    # -- Class L: E-LMI cross-plane ----------------------------------------
+
+    def _cfm_service_state(self, vlan: Tuple[int, ...],
+                           now: float) -> Tuple[bool, bool, List[str]]:
+        """What CFM says about a service VLAN: (degraded, healthy, why).
+
+        Matched on the VLAN part of the service key, so a service seen
+        natively and one seen inside a tunnel both count.
+        """
+        why: List[str] = []
+        degraded = False
+        healthy = False
+        for key, ts in self.ais_recent.items():
+            if split_service(key)[1] == vlan and now - ts <= \
+                    self.cfg.health_window:
+                degraded = True
+                why.append("AIS within %.1fs" % self.cfg.health_window)
+        for key, ts in self.rdi_recent.items():
+            if split_service(key)[1] == vlan and now - ts <= \
+                    self.cfg.health_window:
+                degraded = True
+                why.append("RDI within %.1fs" % self.cfg.health_window)
+        for mkey, st in self.mep.items():
+            if split_service(mkey[0])[1] != vlan:
+                continue
+            nominal = CCM_INTERVAL_SECONDS.get(st["interval"])
+            if not nominal:
+                continue
+            gap = now - st["last_ts"]
+            if gap > nominal * self.cfg.ccm_loss_misses:
+                degraded = True
+                why.append("MEP %d silent for %.2fs" % (mkey[3], gap))
+            elif gap <= nominal * self.cfg.ccm_loss_misses:
+                healthy = True
+        return degraded, (healthy and not degraded), why
+
+    def feed_elmi(self, frame: ElmiFrame) -> None:
+        self.frames_cfm += 1
+        if self.first_ts is None:
+            self.first_ts = frame.ts
+        self.last_ts = frame.ts
+        src = frame.src
+        uni = (frame.uni_id.decode("latin-1") if frame.uni_id
+               else mac_str(src))
+
+        shim = CfmFrame(index=frame.index, ts=frame.ts,
+                        frame_len=frame.frame_len, dst=frame.dst, src=src,
+                        vlans=[], md_level=0, version=0, opcode=0, flags=0,
+                        first_tlv_offset=0, payload=b"")
+
+        self.emit("CFM-250", uni,
+                  "E-LMI %s from %s, UNI %s, %d EVC(s): %s"
+                  % (frame.msg_name, mac_str(src), uni, len(frame.evcs),
+                     ", ".join("%d=%s" % (e["reference"], e["status_name"])
+                               for e in frame.evcs) or "none"), shim,
+                  {"src": mac_str(src), "uni": uni,
+                   "message": frame.msg_name,
+                   "report_type": ELMI_REPORT_TYPES.get(
+                       frame.report_type, frame.report_type),
+                   "evcs": [{"reference": e["reference"],
+                             "status": e["status_name"]}
+                            for e in frame.evcs]})
+        for e in frame.evcs:
+            rec = self.inv_elmi.setdefault(
+                e["reference"], {"reference": e["reference"],
+                                 "statuses": set(), "unis": set(),
+                                 "evc_id": None})
+            rec["statuses"].add(e["status_name"])
+            rec["unis"].add(uni)
+            if e["evc_id"]:
+                rec["evc_id"] = e["evc_id"].decode("latin-1")
+
+        for code, detail in frame.structural:
+            self.emit(code, uni, detail, shim,
+                      {"src": mac_str(src), "uni": uni,
+                       "message": frame.msg_name})
+
+        # ---- sequence numbers -------------------------------------------
+        if frame.snd_seq is not None:
+            prev = self.elmi_seq.get(src)
+            if prev is not None and frame.snd_seq <= prev and \
+                    not (prev == 255 and frame.snd_seq <= 1):
+                self.emit("CFM-253", uni,
+                          "E-LMI send sequence %d from %s did not advance "
+                          "past %d" % (frame.snd_seq, mac_str(src), prev),
+                          shim, {"src": mac_str(src), "uni": uni,
+                                 "was": prev, "now": frame.snd_seq})
+            self.elmi_seq[src] = frame.snd_seq
+
+        # ---- the cross-plane rule ---------------------------------------
+        if not self.cfg.evcs:
+            if frame.evcs:
+                self.emit("CFM-254", uni,
+                          "E-LMI reports EVC(s) %s with no --evc mapping "
+                          "declared, so the cross-plane rule is inert"
+                          % ", ".join(str(e["reference"])
+                                      for e in frame.evcs), shim,
+                          {"src": mac_str(src), "uni": uni,
+                           "references": [e["reference"]
+                                          for e in frame.evcs],
+                           "inert_codes": ["CFM-251"]})
+            return
+
+        for e in frame.evcs:
+            evc = self.cfg.evc_for(e["reference"])
+            if evc is None:
+                continue
+            degraded, healthy, why = self._cfm_service_state(evc.vlan,
+                                                             frame.ts)
+            status = e["status"]
+            ev = {"src": mac_str(src), "uni": uni, "evc": evc.name(),
+                  "reference": e["reference"],
+                  "elmi_status": e["status_name"],
+                  "vlan": list(evc.vlan), "cfm_evidence": why}
+            if status in ELMI_EVC_ACTIVE and degraded:
+                self.emit("CFM-251", "%s/%s" % (uni, evc.name()),
+                          "E-LMI reports EVC %s as %s while CFM on VLAN %s "
+                          "shows a fault (%s)"
+                          % (evc.name(), e["status_name"],
+                             "/".join(str(v) for v in evc.vlan) or
+                             "untagged", "; ".join(why)), shim, ev)
+            elif status in ELMI_EVC_INACTIVE and healthy:
+                self.emit("CFM-251", "%s/%s" % (uni, evc.name()),
+                          "E-LMI reports EVC %s as %s while CFM on VLAN %s "
+                          "is healthy"
+                          % (evc.name(), e["status_name"],
+                             "/".join(str(v) for v in evc.vlan) or
+                             "untagged"), shim, ev)
+
+    # -- Class M: Y.1731 measurement and maintenance ------------------------
+
+    def _meas_inventory(self, frame: CfmFrame, **extra: Any) -> None:
+        rec = self.inv_meas.setdefault(
+            frame.opcode, {"opcode": frame.opcode_name, "frames": 0,
+                           "sources": set(), "test_ids": set(),
+                           "ouis": set()})
+        rec["frames"] += 1
+        rec["sources"].add(mac_str(frame.src))
+        for key, val in extra.items():
+            if val is not None:
+                rec[key].add(val)
+
+    def _no_ccm_history(self, frame: CfmFrame) -> bool:
+        known = self.ccm_macs.get(frame.service_key)
+        return bool(known) and frame.src not in known
+
+    def _measurement(self, frame: CfmFrame) -> None:
+        body = frame.body
+        if not body:
+            return
+        vkey = frame.service_key
+        src = frame.src
+        name = frame.opcode_name
+        ctx = "%s/%s" % (mac_str(src), name)
+
+        self._meas_inventory(frame, test_ids=body.get("test_id"))
+
+        if self._no_ccm_history(frame):
+            self.emit("CFM-220", ctx,
+                      "%s from %s, which has never sourced a CCM on this "
+                      "service" % (name, mac_str(src)), frame,
+                      {"src": mac_str(src), "opcode": name,
+                       "vlan": list(frame.vlan_key),
+                       "ccm_sources": sorted(
+                           mac_str(m)
+                           for m in self.ccm_macs.get(vkey, ()))})
+
+        # ---- monotonic counters ----------------------------------------
+        for cname, value in (body.get("counters") or {}).items():
+            session = body.get("test_id", 0)
+            key = (vkey, src, session, "%s/%s" % (name, cname))
+            prev = self.meas_counters.get(key)
+            if prev is not None and value < prev:
+                self.emit("CFM-221", "%s/%s" % (ctx, cname),
+                          "%s %s went backwards, %d -> %d, from %s"
+                          % (name, cname, prev, value, mac_str(src)), frame,
+                          {"src": mac_str(src), "opcode": name,
+                           "counter": cname, "was": prev, "now": value,
+                           "test_id": session})
+            self.meas_counters[key] = value
+
+        # ---- delay-measurement timestamps -------------------------------
+        stamps = body.get("timestamps") or {}
+        bad = [nm for nm, v in stamps.items()
+               if v["nanos"] >= NANOS_PER_SECOND]
+        if bad:
+            self.emit("CFM-222", ctx,
+                      "%s carries out-of-range nanoseconds in %s"
+                      % (name, ", ".join(sorted(bad))), frame,
+                      {"src": mac_str(src), "opcode": name,
+                       "fields": sorted(bad),
+                       "nanos": {nm: stamps[nm]["nanos"] for nm in bad}})
+        if frame.opcode == OP_DMR and len(stamps) == 4 and not bad:
+            # Judged within the one frame. Comparing the forward pair
+            # against the backward pair would assume the two endpoints
+            # share a clock, which a DM measurement does not require, so
+            # only same-direction ordering is treated as a violation.
+            problems = []
+            if stamps["RxTimeStampb"]["value"] < \
+                    stamps["TxTimeStampb"]["value"]:
+                problems.append("RxTimeStampb precedes TxTimeStampb")
+            if stamps["RxTimeStampf"]["value"] < \
+                    stamps["TxTimeStampf"]["value"]:
+                problems.append("RxTimeStampf precedes TxTimeStampf")
+            if problems:
+                self.emit("CFM-223", ctx,
+                          "DMR timestamps contradict themselves: %s"
+                          % "; ".join(problems), frame,
+                          {"src": mac_str(src), "problems": problems,
+                           "timestamps": {nm: v["value"]
+                                          for nm, v in stamps.items()}})
+
+        # ---- synthetic loss test correlation ----------------------------
+        test_id = body.get("test_id")
+        if test_id is not None:
+            if frame.opcode in (OP_SLM, OP_1SL):
+                self.slm_tests[(vkey, test_id)] = frame.ts
+            elif frame.opcode == OP_SLR and \
+                    (vkey, test_id) not in self.slm_tests:
+                self.emit("CFM-224", "%s/test%d" % (ctx, test_id),
+                          "SLR from %s carries test ID 0x%08x, which no "
+                          "observed SLM requested"
+                          % (mac_str(src), test_id), frame,
+                          {"src": mac_str(src), "test_id": test_id,
+                           "known_tests": sorted(
+                               t for v, t in self.slm_tests if v == vkey)})
+
+    def _tst(self, frame: CfmFrame) -> None:
+        src = frame.src
+        self._meas_inventory(frame)
+        self.emit("CFM-225", mac_str(src),
+                  "TST from %s at MD level %d, sequence %s"
+                  % (mac_str(src), frame.md_level,
+                     frame.body.get("seq") if frame.body else "?"), frame,
+                  {"src": mac_str(src), "md_level": frame.md_level,
+                   "frame_len": frame.frame_len})
+        hist = self.tst_hist[src]
+        hist.append(frame.ts)
+        while hist and frame.ts - hist[0] > self.cfg.tst_window:
+            hist.popleft()
+        if len(hist) >= self.cfg.tst_burst:
+            self.emit("CFM-226", mac_str(src),
+                      "%d TST frames from %s within %.1fs"
+                      % (len(hist), mac_str(src), self.cfg.tst_window),
+                      frame, {"src": mac_str(src), "count": len(hist),
+                              "window_s": self.cfg.tst_window})
+
+    def _oui_opcode(self, frame: CfmFrame) -> None:
+        body = frame.body
+        if not body:
+            return
+        src = frame.src
+        name = frame.opcode_name
+        self._meas_inventory(frame, ouis=body["oui_str"])
+        detail = ("%s from %s, OUI %s, sub-opcode %d"
+                  % (name, mac_str(src), body["oui_str"],
+                     body["sub_opcode"]))
+        ev = {"src": mac_str(src), "opcode": name, "oui": body["oui_str"],
+              "sub_opcode": body["sub_opcode"],
+              "md_level": frame.md_level}
+        if frame.opcode in EXPERIMENTAL_OPCODES:
+            self.emit("CFM-229", mac_str(src), detail, frame, ev)
+        elif frame.opcode == OP_MCC:
+            self.emit("CFM-227", mac_str(src), detail, frame, ev)
+        else:
+            self.emit("CFM-228", mac_str(src), detail, frame, ev)
 
     # -- Class G -----------------------------------------------------------
 
@@ -2531,14 +3394,55 @@ class Engine:
                 "Y.1731 opcodes present: %s" % ", ".join(names), ts,
                 {"opcodes": {OPCODE_NAMES.get(o, str(o)): c
                              for o, c in sorted(self.inv_y1731.items())}})
+        if self.inv_elmi:
+            rows = [{"reference": r["reference"],
+                     "evc_id": r["evc_id"],
+                     "statuses": sorted(r["statuses"]),
+                     "unis": sorted(r["unis"])}
+                    for _, r in sorted(self.inv_elmi.items())]
+            self.emit_static(
+                "CFM-250", "tap",
+                "E-LMI reported %d EVC(s): %s"
+                % (len(rows), "; ".join(
+                    "%d%s %s" % (r["reference"],
+                                 " (%s)" % r["evc_id"] if r["evc_id"]
+                                 else "", "/".join(r["statuses"]))
+                    for r in rows)), ts, {"evcs": rows})
+        if self.inv_vni:
+            rows = [{"vni": r["vni"], "frames": r["frames"],
+                     "vlans": sorted(list(v) for v in r["vlans"])}
+                    for _, r in sorted(self.inv_vni.items())]
+            self.emit_static(
+                "CFM-240", "tap",
+                "CFM seen inside VXLAN on %s"
+                % ", ".join("VNI %d (%d frames)" % (r["vni"], r["frames"])
+                            for r in rows), ts, {"vnis": rows})
+        if self.inv_meas:
+            rows = []
+            for op, rec in sorted(self.inv_meas.items()):
+                rows.append({
+                    "opcode": rec["opcode"], "frames": rec["frames"],
+                    "sources": sorted(rec["sources"]),
+                    "test_ids": ["0x%08x" % t
+                                 for t in sorted(rec["test_ids"])],
+                    "ouis": sorted(rec["ouis"]),
+                })
+            self.emit_static(
+                "CFM-230", "tap",
+                "; ".join("%s x%d from %d source(s)%s"
+                          % (r["opcode"], r["frames"], len(r["sources"]),
+                             " OUI " + ",".join(r["ouis"])
+                             if r["ouis"] else "")
+                          for r in rows), ts, {"opcodes": rows})
         if self.aps_inventory:
             groups = []
             for (vkey, lvl), inv in sorted(
                     self.aps_inventory.items(),
                     key=lambda kv: (str(kv[0][0]), kv[0][1])):
+                g_vni, g_vlans = split_service(vkey)
                 groups.append({
-                    "group": "%s/level%d" % (str(vkey), lvl),
-                    "vlan": list(vkey), "md_level": lvl,
+                    "group": "%s/level%d" % (service_label(vkey), lvl),
+                    "vlan": list(g_vlans), "vni": g_vni, "md_level": lvl,
                     "nodes": {mac_str(m): sorted(v)
                               for m, v in inv["nodes"].items()},
                     "requests": sorted(inv["requests"]),
@@ -2555,13 +3459,12 @@ class Engine:
         if self.raps_rings:
             rings = []
             for vkey, st in sorted(self.raps_rings.items()):
-                ring = self.cfg.ring_for(vkey)
+                r_vni, r_vlans = split_service(vkey)
+                ring = self.cfg.ring_for(r_vlans)
                 rings.append({
-                    "ring": ring.name() if ring else (
-                        "vlan%s" % "/".join(str(v) for v in vkey)
-                        if vkey else "untagged"),
+                    "ring": ring.name() if ring else service_label(vkey),
                     "declared": ring is not None,
-                    "vlan": list(vkey),
+                    "vlan": list(r_vlans), "vni": r_vni,
                     "nodes": sorted(mac_str(m) for m in st["nodes"]),
                     "rb_claimants": sorted(mac_str(m) for m in st["rb"]),
                     "requests": sorted(st["requests"]),
@@ -2667,32 +3570,137 @@ def read_pcap(path: str) -> Iterator[Tuple[float, bytes]]:
             yield sec + frac / divisor, data
 
 
-# Kernel-side prefilter: EtherType 0x8902 at the outer position or behind
-# up to two VLAN tags. Keeps a carrier tap from copying every frame on the
-# segment into userspace.
-_BPF_CFM = [
-    (0x28, 0, 0, 12),
-    (0x15, 13, 0, ETHERTYPE_CFM),
-    (0x15, 3, 0, 0x8100),
-    (0x15, 2, 0, 0x88A8),
-    (0x15, 1, 0, 0x9100),
-    (0x06, 0, 0, 0),
-    (0x28, 0, 0, 16),
-    (0x15, 7, 0, ETHERTYPE_CFM),
-    (0x15, 3, 0, 0x8100),
-    (0x15, 2, 0, 0x88A8),
-    (0x15, 1, 0, 0x9100),
-    (0x06, 0, 0, 0),
-    (0x28, 0, 0, 20),
-    (0x15, 1, 0, ETHERTYPE_CFM),
-    (0x06, 0, 0, 0),
-    (0x06, 0, 0, 0x40000),
-]
+# Kernel-side prefilter. Accepts the two EtherTypes this module parses -
+# CFM (0x8902) and E-LMI (0x88EE) - at the outer position or behind up to
+# two VLAN tags, so a carrier tap does not copy every frame on the segment
+# into userspace.
+#
+# Built by a tiny label-resolving assembler rather than written out with
+# literal jump offsets. Hand-computed offsets are how the VXLAN splice
+# first went wrong, and the program now has three tag depths times two
+# EtherTypes plus an optional tunnel clause; that is too many branches to
+# keep correct by hand.
+#
+# What this program CANNOT do is match CFM inside VXLAN: the inner
+# EtherType sits behind a variable-length IP header, so its offset is not
+# fixed. When VXLAN is enabled the filter therefore also admits UDP to
+# port 4789 and userspace decides, which is why enabling it on a busy
+# underlay costs copies. Without that clause the kernel drops every
+# encapsulated frame and the live path reports the service plane clean.
+
+BPF_LD_H_ABS = 0x28
+BPF_LD_B_ABS = 0x30
+BPF_LDX_B_MSH = 0xB1
+BPF_LD_H_IND = 0x48
+BPF_JMP_JA = 0x05
+BPF_JMP_JEQ = 0x15
+BPF_JMP_JSET = 0x45
+BPF_RET_K = 0x06
+BPF_ACCEPT = 0x40000
+BPF_REJECT = 0
+
+WATCHED_ETHERTYPES = (ETHERTYPE_CFM, ETHERTYPE_ELMI)
 
 
-def _bpf_blob() -> Tuple[bytes, int]:
-    prog = b"".join(struct.pack("HBBI", *ins) for ins in _BPF_CFM)
-    return prog, len(_BPF_CFM)
+def _bpf_assemble(src: List[Any]) -> List[Tuple[int, int, int, int]]:
+    """Resolve symbolic labels into a BPF instruction list.
+
+    Each entry is either a string label or a tuple whose jt/jf/k may be
+    label names. Offsets are computed relative to the following
+    instruction, which is what the BPF jump encoding means.
+    """
+    labels: Dict[str, int] = {}
+    body: List[Tuple[Any, Any, Any, Any]] = []
+    for item in src:
+        if isinstance(item, str):
+            labels[item] = len(body)
+        else:
+            body.append(item)
+    out: List[Tuple[int, int, int, int]] = []
+    for idx, (code, jt, jf, k) in enumerate(body):
+        def off(target: Any) -> int:
+            if isinstance(target, str):
+                if target not in labels:
+                    raise KeyError("undefined BPF label %r" % target)
+                return labels[target] - (idx + 1)
+            return int(target)
+        if code == BPF_JMP_JA:
+            out.append((code, 0, 0, off(k)))
+        elif code in (BPF_JMP_JEQ, BPF_JMP_JSET):
+            out.append((code, off(jt), off(jf), int(k)))
+        else:
+            out.append((code, int(jt), int(jf), int(k)))
+    for ins in out:
+        if ins[1] < 0 or ins[2] < 0 or (ins[0] == BPF_JMP_JA and ins[3] < 0):
+            raise ValueError("backward BPF jump: %r" % (ins,))
+    return out
+
+
+def _bpf_ethertype_program() -> List[Any]:
+    """Accept the watched EtherTypes at each VLAN tag depth."""
+    src: List[Any] = []
+    depths = 3
+    for depth in range(depths):
+        src.append((BPF_LD_H_ABS, 0, 0, 12 + depth * 4))
+        for etype in WATCHED_ETHERTYPES:
+            src.append((BPF_JMP_JEQ, "accept", 0, etype))
+        if depth + 1 < depths:
+            for tpid in VLAN_ETHERTYPES:
+                src.append((BPF_JMP_JEQ, "depth%d" % (depth + 1), 0, tpid))
+            src.append((BPF_JMP_JA, 0, 0, "reject"))
+            src.append("depth%d" % (depth + 1))
+        else:
+            src.append((BPF_JMP_JA, 0, 0, "reject"))
+    src.append("accept")
+    src.append((BPF_RET_K, 0, 0, BPF_ACCEPT))
+    src.append("reject")
+    return src
+
+
+def _bpf_vxlan_program() -> List[Any]:
+    """Accept IPv4/IPv6 UDP to the VXLAN port, in label form."""
+    return [
+        (BPF_LD_H_ABS, 0, 0, 12),                     # ldh  ethertype
+        (BPF_JMP_JEQ, 0, "v6", ETHERTYPE_IPV4),
+        (BPF_LD_B_ABS, 0, 0, 23),                     # ldb  ip protocol
+        (BPF_JMP_JEQ, 0, "drop", IPPROTO_UDP),
+        (BPF_LD_H_ABS, 0, 0, 20),                     # ldh  fragment field
+        (BPF_JMP_JSET, "drop", 0, 0x1FFF),            # a fragment is useless
+        (BPF_LDX_B_MSH, 0, 0, 14),                    # x = 4 * IHL
+        (BPF_LD_H_IND, 0, 0, 16),                     # ldh  [x + 16] dport
+        (BPF_JMP_JEQ, "accept", "drop", VXLAN_PORT),
+        "v6",
+        (BPF_JMP_JEQ, 0, "drop", ETHERTYPE_IPV6),
+        (BPF_LD_B_ABS, 0, 0, 20),                     # ldb  next header
+        (BPF_JMP_JEQ, 0, "drop", IPPROTO_UDP),        # no EH walk here
+        (BPF_LD_H_ABS, 0, 0, 56),                     # ldh  dport
+        (BPF_JMP_JEQ, 0, "drop", VXLAN_PORT),
+        "accept",
+        (BPF_RET_K, 0, 0, BPF_ACCEPT),
+        "drop",
+        (BPF_RET_K, 0, 0, BPF_REJECT),
+    ]
+
+
+def _bpf_source(vxlan: bool) -> List[Any]:
+    """The whole filter in label form: EtherTypes, then the reject target.
+
+    The EtherType program has three reject points, one per tag depth, and
+    they all branch to the single `reject` label. That label is either a
+    plain drop or the first instruction of the tunnel clause, so enabling
+    VXLAN redirects every one of them at once instead of relying on a
+    trailing instruction being the only exit.
+    """
+    src = _bpf_ethertype_program()
+    if vxlan:
+        return src + _bpf_vxlan_program()
+    return src + [(BPF_RET_K, 0, 0, BPF_REJECT)]
+
+
+def _bpf_blob(vxlan: bool = False) -> Tuple[bytes, int]:
+    prog = _bpf_assemble(_bpf_source(vxlan))
+    blob = b"".join(struct.pack("HBBI", *ins) for ins in prog)
+    return blob, len(prog)
 
 
 class StopSignal:
@@ -2761,6 +3769,7 @@ def live_capture(iface: str, promisc: bool = True,
                  duration: Optional[float] = None,
                  count: Optional[int] = None,
                  should_stop: Optional[Any] = None,
+                 vxlan: bool = True,
                  on_warn: Optional[Any] = None) -> Iterator[Tuple[float, bytes]]:
     """Yield (timestamp, frame) from a live interface. Receive only."""
     import ctypes
@@ -2776,7 +3785,7 @@ def live_capture(iface: str, promisc: bool = True,
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
                          socket.htons(ETH_P_ALL))
     try:
-        prog, length = _bpf_blob()
+        prog, length = _bpf_blob(vxlan=vxlan)
         buf = ctypes.create_string_buffer(prog)
         fprog = struct.pack("HxxxxxxP" if ctypes.sizeof(ctypes.c_void_p) == 8
                             else "HxxP", length, ctypes.addressof(buf))
@@ -2967,6 +3976,11 @@ def build_parser() -> argparse.ArgumentParser:
     tun.add_argument("--md-ceiling", type=int, metavar="L",
                      help="highest MD level legitimate at this tap; arms "
                           "CFM-021")
+    tun.add_argument("--no-vxlan", action="store_true",
+                     help="do not look inside VXLAN. By default CFM carried "
+                          "in an EVPN-VXLAN tunnel is decapsulated, because "
+                          "a tap on the underlay otherwise sees none of the "
+                          "service layer and reports it clean")
     tun.add_argument("--strict-tail", action="store_true",
                      help="treat a 4-octet non-zero tail on a minimum-length "
                           "frame as data rather than a captured FCS")
@@ -2979,6 +3993,9 @@ def build_parser() -> argparse.ArgumentParser:
                      metavar="N", help="LBMs from one source before CFM-101")
     tun.add_argument("--data-tlv-max", type=int, default=Config.data_tlv_max,
                      metavar="OCTETS", help="Data TLV size before CFM-105")
+    tun.add_argument("--tst-burst", type=int, default=Config.tst_burst,
+                     metavar="N", help="TST frames from one source before "
+                                       "CFM-226")
     tun.add_argument("--aps-churn", type=int, default=Config.aps_churn_min,
                      metavar="N", help="APS state changes before CFM-085")
 
@@ -3008,6 +4025,18 @@ def build_parser() -> argparse.ArgumentParser:
     erps.add_argument("--raps-flush-burst", type=int,
                       default=Config.raps_flush_burst, metavar="N",
                       help="Event/Flush messages before CFM-190")
+    elmi = p.add_argument_group(
+        "E-LMI (MEF 16)",
+        "E-LMI names services by EVC reference while CFM state is keyed "
+        "by VLAN, and the join is not reliably on the wire. Declare it to "
+        "arm the cross-plane contradiction rule; undeclared fails loud "
+        "(CFM-254) and the structural rules stay armed.")
+    elmi.add_argument(
+        "--evc", action="append", default=[], metavar="SPEC",
+        help="map an EVC to a service VLAN: REFERENCE,vlan=VLAN"
+             "[,name=LABEL]. VLAN may be a VLAN id, 'untagged', or an "
+             "outer/inner pair as OUTER/INNER. Repeatable.")
+
     erps.add_argument("--rb-stale", type=float, default=Config.rb_stale,
                       metavar="S",
                       help="seconds after which an observed RPL-blocked "
@@ -3024,6 +4053,46 @@ def parse_mac(text: str) -> bytes:
     if len(raw) != 12:
         raise ValueError("bad MAC %r" % text)
     return bytes.fromhex(raw)
+
+
+def parse_evc(spec: str) -> Evc:
+    """Parse one --evc declaration: REFERENCE,vlan=VLAN[,name=LABEL]."""
+    parts = [x.strip() for x in spec.split(",") if x.strip()]
+    if not parts:
+        raise ValueError("empty --evc specification")
+    try:
+        ref = int(parts[0], 10)
+    except ValueError:
+        raise ValueError("EVC reference %r is not numeric" % parts[0])
+    if not 0 <= ref <= 65535:
+        raise ValueError("EVC reference %d out of range 0..65535" % ref)
+    vlan: Optional[Tuple[int, ...]] = None
+    label = ""
+    for part in parts[1:]:
+        if "=" not in part:
+            raise ValueError("EVC option %r needs key=value" % part)
+        key, val = part.split("=", 1)
+        key = key.strip().lower()
+        if key == "vlan":
+            text = val.strip()
+            if text.lower() in ("untagged", "none", "-"):
+                vlan = ()
+            else:
+                try:
+                    vlan = tuple(int(v, 10) for v in text.split("/") if v)
+                except ValueError:
+                    raise ValueError("EVC vlan %r is not numeric" % text)
+                for v in vlan:
+                    if not 0 <= v <= 4095:
+                        raise ValueError("VLAN id %d out of range" % v)
+        elif key == "name":
+            label = val.strip()
+        else:
+            raise ValueError("unknown EVC option %r; expected vlan or name"
+                             % key)
+    if vlan is None:
+        raise ValueError("an --evc declaration needs vlan=VLAN")
+    return Evc(reference=ref, vlan=vlan, label=label)
 
 
 def parse_ring(spec: str) -> Ring:
@@ -3116,13 +4185,16 @@ def parse_ring(spec: str) -> Ring:
 def config_from_args(args: argparse.Namespace) -> Config:
     return Config(
         strict_tail=args.strict_tail,
+        vxlan=not args.no_vxlan,
         md_ceiling=args.md_ceiling,
         rate_max=args.rate_max,
         src_rate_max=args.src_rate_max,
         lbm_burst=args.lbm_burst,
         data_tlv_max=args.data_tlv_max,
         aps_churn_min=args.aps_churn,
+        tst_burst=args.tst_burst,
         rings=tuple(parse_ring(spec) for spec in args.ring),
+        evcs=tuple(parse_evc(spec) for spec in args.evc),
         raps_rate_max=args.raps_rate_max,
         raps_churn_min=args.raps_churn,
         raps_flush_burst=args.raps_flush_burst,
@@ -3153,7 +4225,8 @@ def run(args: argparse.Namespace) -> int:
             for ts, raw in live_capture(
                     args.iface, promisc=not args.no_promisc,
                     duration=args.duration, count=args.count,
-                    should_stop=stopper, on_warn=warn):
+                    should_stop=stopper, vxlan=engine.cfg.vxlan,
+                    on_warn=warn):
                 engine.feed_raw(raw, index, ts)
                 index += 1
         except KeyboardInterrupt:

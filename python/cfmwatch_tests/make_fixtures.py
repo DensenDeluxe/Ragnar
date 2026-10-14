@@ -164,6 +164,84 @@ def eth_ring(src: bytes, payload: bytes, dst: bytes | None = None) -> bytes:
                vlans=RING_VLAN)
 
 
+# ---- Y.1731 measurement and maintenance ---------------------------------
+
+def dm_stamps(*pairs: Tuple[int, int]) -> bytes:
+    """Y.1731 delay timestamps: 32-bit seconds then 32-bit nanoseconds,
+    8 octets each, so DMM/DMR carry four in 32 and 1DM two in 16."""
+    return b"".join(struct.pack("!II", s, n) for s, n in pairs)
+
+
+def lm(level: int, reply: bool, txfcf: int, rxfcf: int = 0,
+       txfcb: int = 0) -> bytes:
+    return cfm(level, 42 if reply else 43, 0, 12,
+               struct.pack("!III", txfcf, rxfcf, txfcb), END)
+
+
+def dm(level: int, opcode: int, *pairs: Tuple[int, int]) -> bytes:
+    body = dm_stamps(*pairs)
+    return cfm(level, opcode, 0, len(body), body, END)
+
+
+def sl(level: int, opcode: int, src_mep: int, test_id: int, txfcf: int,
+       rsp_mep: int = 0, txfcb: int = 0) -> bytes:
+    return cfm(level, opcode, 0, 16,
+               struct.pack("!HHIII", src_mep, rsp_mep, test_id, txfcf,
+                           txfcb), END)
+
+
+def tst(level: int, seq: int, pad: int = 0) -> bytes:
+    body = struct.pack("!I", seq)
+    tail = tlv(32, b"\x00" * pad) if pad else b""
+    return cfm(level, 37, 0, 4, body, tail + END)
+
+
+def oui_pdu(level: int, opcode: int, oui: bytes = b"\x00\x11\x22",
+            sub: int = 7, data: bytes = b"") -> bytes:
+    return cfm(level, opcode, 0, 4, oui + bytes([sub]), data + END)
+
+
+def vxlan(inner: bytes, vni: int = 1000, src_ip: bytes = b"\x0a\x00\x00\x01",
+          dst_ip: bytes = b"\x0a\x00\x00\x02") -> bytes:
+    """Wrap an inner Ethernet frame in EVPN-VXLAN, as a tap on the
+    underlay of a VXLAN fabric would see it."""
+    vx = struct.pack("!BBHI", 0x08, 0, 0, (vni << 8))
+    udp = struct.pack("!HHHH", 40000, 4789, 8 + len(vx) + len(inner), 0)
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0,
+                     20 + len(udp) + len(vx) + len(inner), 1, 0, 64, 17, 0,
+                     src_ip, dst_ip)
+    return (bytes.fromhex("001122330044") + bytes.fromhex("001122330055")
+            + struct.pack("!H", 0x0800) + ip + udp + vx + inner)
+
+
+# ---- E-LMI (MEF 16) ------------------------------------------------------
+
+ELMI_GROUP = bytes.fromhex("0180c2000007")
+
+
+def elmi_ie(tag: int, val: bytes) -> bytes:
+    return bytes([tag, len(val)]) + val
+
+
+def elmi(msg: int = 0x7D, version: int = 1, snd: int = 1, rcv: int = 0,
+         evcs: Tuple[Tuple[int, int], ...] = ((7, 0x02),),
+         uni: bytes = b"UNI-1", dst: bytes | None = None,
+         src: bytes | None = None) -> bytes:
+    body = bytes([version, msg])
+    body += elmi_ie(0x02, bytes([snd, rcv]))
+    body += elmi_ie(0x01, bytes([0]))
+    body += elmi_ie(0x11, bytes([0x02]) + elmi_ie(0x51, uni))
+    for ref, status in evcs:
+        body += elmi_ie(0x21, struct.pack("!H", ref) + bytes([status])
+                        + elmi_ie(0x62, b"EVC-%d" % ref))
+    f = (dst or ELMI_GROUP) + (src or MAC_A) + struct.pack("!H", 0x88EE) \
+        + body
+    return f + b"\x00" * max(0, 60 - len(f))
+
+
+EVC_DECL = ["--evc", "7,vlan=500,name=cust-A"]
+
+
 def write_pcap(path: str, frames: List[Tuple[float, bytes]]) -> None:
     with open(path, "wb") as fh:
         fh.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 1))
@@ -203,7 +281,7 @@ D5 = cfm_group(5)
 
 
 @scenario("baseline", ["CFM-080", "CFM-093", "CFM-160", "CFM-161",
-                       "CFM-162", "CFM-163"])
+                       "CFM-162", "CFM-163", "CFM-230"])
 def _baseline():
     f = []
     t = 0.0
@@ -370,6 +448,177 @@ def _aps():
     f.append((t, eth(D3, MAC_A, aps(3, 3))))      # CFM-086 reserved code
     t += 0.4
     f.append((t, eth(D3, MAC_X, aps(3, 0))))      # CFM-084 new source MAC
+    return f
+
+
+@scenario("measurement",
+          ["CFM-160", "CFM-161", "CFM-162", "CFM-163", "CFM-220", "CFM-221",
+           "CFM-222", "CFM-223", "CFM-224", "CFM-230"])
+def _measurement():
+    """Y.1731 performance measurement: LM, DM and SL.
+
+    The CCM run at the front is what arms CFM-220 - a measurement frame
+    from a MAC with no CCM history on the service.
+    """
+    f = []
+    t = 0.0
+    for i in range(3):
+        f.append((t, eth(D3, MAC_A, ccm(3, 10, seq=i + 1))))
+        t += 0.4
+    # loss measurement, then a counter that goes backwards (CFM-221)
+    f.append((t, eth(D3, MAC_A, lm(3, False, 100))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_A, lm(3, True, 200, 150, 140))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_A, lm(3, True, 190, 150, 140))))
+    t += 0.3
+    # one-way delay, then a DMR with an out-of-range nanoseconds field
+    f.append((t, eth(D3, MAC_A, dm(3, 45, (100, 0), (100, 500000)))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_A, dm(3, 46, (100, 0), (101, 0), (102, 0),
+                                   (103, 1500000000)))))
+    t += 0.3
+    # a DMR whose backward pair is reversed (CFM-223)
+    f.append((t, eth(D3, MAC_A, dm(3, 46, (100, 0), (101, 0), (105, 0),
+                                   (104, 0)))))
+    t += 0.3
+    # synthetic loss: a test is requested, then a reply for another
+    f.append((t, eth(D3, MAC_A, sl(3, 55, 10, 0xAAAA0001, 10))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_B, sl(3, 54, 10, 0xBBBB0002, 10, rsp_mep=20,
+                                   txfcb=5))))
+    t += 0.3
+    # a measurement frame from a MAC that never sourced a CCM (CFM-220)
+    f.append((t, eth(D3, MAC_X, lm(3, False, 1))))
+    return f
+
+
+@scenario("maintenance",
+          ["CFM-160", "CFM-163", "CFM-225", "CFM-226", "CFM-227", "CFM-228",
+           "CFM-229", "CFM-230", "CFM-162"])
+def _maintenance():
+    """TST, MCC, VSM/VSR and the experimental opcodes.
+
+    TST is the one Y.1731 opcode built to move bulk data, so the burst is
+    the finding rather than the presence.
+    """
+    f = []
+    t = 0.0
+    for i in range(22):
+        f.append((t, eth(D3, MAC_X, tst(3, i, pad=64))))
+        t += 0.1
+    f.append((t, eth(D3, MAC_A, oui_pdu(3, 41, b"\x00\x19\xa7", 1))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_A, oui_pdu(3, 51))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_B, oui_pdu(3, 50))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_X, oui_pdu(3, 49, sub=9))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_X, oui_pdu(3, 48, sub=9))))
+    return f
+
+
+@scenario("opcodes",
+          ["CFM-160", "CFM-162", "CFM-163"])
+def _opcodes():
+    """The three opcodes that used to be reported as unassigned.
+
+    RFM (6), SFM (7) and GNM (32) are defined by 802.1Q/Y.1731. Before
+    they were added to the opcode table every one of them raised CFM-007,
+    and MCC/EXM/VSM raised CFM-010 for declaring the offset they are
+    supposed to declare. This fixture is the regression guard: it must
+    stay free of both.
+    """
+    f = []
+    t = 0.0
+    f.append((t, eth(D3, MAC_A, cfm(3, 6, 0, 4, struct.pack("!I", 1), END))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_A, cfm(3, 7, 0, 4, struct.pack("!I", 2), END))))
+    t += 0.3
+    f.append((t, eth(D3, MAC_A, cfm(3, 32, 0, 13, bytes([1]), END))))
+    return f
+
+
+@scenario("elmi",
+          ["CFM-060", "CFM-061", "CFM-160", "CFM-161", "CFM-162", "CFM-163",
+           "CFM-230", "CFM-250", "CFM-251", "CFM-252", "CFM-253"],
+          args=EVC_DECL)
+def _elmi():
+    """E-LMI cross-plane contradiction.
+
+    The agreeing case comes first and must stay silent, then each
+    direction of the contradiction: Active while CFM shows a fault, and
+    Not Active while CFM is healthy. Neither is visible from either plane
+    alone, which is why E-LMI is in this module at all.
+    """
+    f = []
+    t = 0.0
+    V = ((0x8100, 500),)
+    for i in range(3):
+        f.append((t, eth(D3, MAC_A, ccm(3, 10, seq=i + 1), vlans=V)))
+        t += 0.4
+    # agreeing: Active and healthy -> no contradiction
+    f.append((t, elmi(snd=1, evcs=((7, 0x02),))))
+    t += 0.4
+    # contradiction one way: reported Not Active while CFM is healthy
+    f.append((t, elmi(snd=2, evcs=((7, 0x00),))))
+    t += 0.4
+    # a real fault appears, and E-LMI keeps reporting Active
+    f.append((t, eth(D3, MAC_X, ais(3, period=4), vlans=V)))
+    t += 0.3
+    f.append((t, elmi(snd=3, evcs=((7, 0x02),))))
+    t += 0.4
+    # a replayed frame: the send sequence does not advance
+    f.append((t, elmi(snd=3, evcs=((7, 0x02),))))
+    t += 0.4
+    # structural: bad version, undefined EVC status, wrong destination
+    f.append((t, elmi(snd=4, version=3, evcs=((7, 0x09),), dst=MAC_B)))
+    # a measurement frame so the inventory code is exercised too
+    t += 0.4
+    f.append((t, eth(D3, MAC_A, lm(3, False, 10), vlans=V)))
+    return f
+
+
+@scenario("elmi_undeclared", ["CFM-250", "CFM-254"])
+def _elmi_undeclared():
+    """E-LMI with no --evc mapping: fails loud rather than looking clean,
+    and the cross-plane rule stays inert."""
+    f = []
+    t = 0.0
+    for i in range(3):
+        f.append((t, elmi(snd=i + 1, evcs=((7, 0x02), (9, 0x04)))))
+        t += 0.4
+    return f
+
+
+@scenario("vxlan",
+          ["CFM-160", "CFM-161", "CFM-162", "CFM-163", "CFM-230",
+           "CFM-240"])
+def _vxlan():
+    """CFM inside EVPN-VXLAN, as seen from a tap on the underlay.
+
+    Without decapsulation none of this is visible and the module reports
+    the service plane clean. The second VNI reuses the SAME inner VLAN on
+    purpose: the two tenants must not share maintenance-association
+    state, which is what the VNI in the service key prevents. CFM-040
+    firing would mean they had merged.
+    """
+    f = []
+    t = 0.0
+    for i in range(3):
+        f.append((t, vxlan(eth(D3, MAC_A, ccm(3, 10, seq=i + 1),
+                               vlans=((0x8100, 500),)), vni=1000)))
+        t += 0.4
+    # a different tenant, same inner VLAN, different MAID
+    for i in range(3):
+        f.append((t, vxlan(eth(D3, MAC_B, ccm(3, 20, seq=i + 1,
+                                              m=maid(ma_name=b"MA-T2")),
+                               vlans=((0x8100, 500),)), vni=2000)))
+        t += 0.4
+    # and a measurement frame inside the tunnel
+    f.append((t, vxlan(eth(D3, MAC_A, lm(3, False, 50),
+                           vlans=((0x8100, 500),)), vni=1000)))
     return f
 
 

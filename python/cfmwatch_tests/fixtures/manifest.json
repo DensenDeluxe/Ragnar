@@ -9,7 +9,8 @@
       "CFM-160",
       "CFM-161",
       "CFM-162",
-      "CFM-163"
+      "CFM-163",
+      "CFM-230"
     ],
     "args": []
   },
@@ -123,6 +124,98 @@
       "CFM-161",
       "CFM-162",
       "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "measurement",
+    "pcap": "measurement.pcap",
+    "frames": 12,
+    "expect": [
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163",
+      "CFM-220",
+      "CFM-221",
+      "CFM-222",
+      "CFM-223",
+      "CFM-224",
+      "CFM-230"
+    ],
+    "args": []
+  },
+  {
+    "name": "maintenance",
+    "pcap": "maintenance.pcap",
+    "frames": 27,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163",
+      "CFM-225",
+      "CFM-226",
+      "CFM-227",
+      "CFM-228",
+      "CFM-229",
+      "CFM-230"
+    ],
+    "args": []
+  },
+  {
+    "name": "opcodes",
+    "pcap": "opcodes.pcap",
+    "frames": 3,
+    "expect": [
+      "CFM-160",
+      "CFM-162",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "elmi",
+    "pcap": "elmi.pcap",
+    "frames": 10,
+    "expect": [
+      "CFM-060",
+      "CFM-061",
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163",
+      "CFM-230",
+      "CFM-250",
+      "CFM-251",
+      "CFM-252",
+      "CFM-253"
+    ],
+    "args": [
+      "--evc",
+      "7,vlan=500,name=cust-A"
+    ]
+  },
+  {
+    "name": "elmi_undeclared",
+    "pcap": "elmi_undeclared.pcap",
+    "frames": 3,
+    "expect": [
+      "CFM-250",
+      "CFM-254"
+    ],
+    "args": []
+  },
+  {
+    "name": "vxlan",
+    "pcap": "vxlan.pcap",
+    "frames": 7,
+    "expect": [
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163",
+      "CFM-230",
+      "CFM-240"
     ],
     "args": []
   },

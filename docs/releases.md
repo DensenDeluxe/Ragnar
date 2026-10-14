@@ -4,6 +4,16 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): CFM Watch v5 — Y.1731 measurement/transport + E-LMI cross-plane (+17 codes)
+*branch `feature/lldp-watch-v3` (shared with LLDP v3 et al.)*
+
+- **Re-vendored the Solarflere `cfmwatch` engine to v5 (v1.1.0)** (`python/cfmwatch.py` 148→192 KB) with its updated tests and fixtures (6 new: `elmi`, `elmi_undeclared`, `measurement`, `maintenance`, `opcodes`, `vxlan`). The in-app `do_cfm_watch` adapter is generic over `engine.findings`, so the new codes flow through. **No new CVEs** → CVE index unchanged at **342 named / 299 detected**.
+- **107 finding codes now (was 90), across thirteen classes** — three new: **M** (Y.1731 measurement & maintenance — forged loss/delay, TST, on-demand opcodes), **T** (transport/encapsulation — CFM tunnelled where it should not be, e.g. VXLAN), and **L** (E-LMI cross-plane, MEF 16).
+- **E-LMI (`CFM-250`..`254`)** runs the UNI's EVC status plane on **EtherType 0x88EE** — the capture BPF now admits it alongside CFM's 0x8902, and the frame count uses `frames_cfm` (which counts CFM + E-LMI, not junk). Like ERPS rings, it is declaration-dependent: a new **`do_cfm_evc`** action (declare/list/remove/clear), `GET|POST /api/net/cfm-evc`, a `cfm-evc` CLI and a card EVC-declaration control arm the cross-plane rules (`CFM-251`..`253`) against an operator-declared EVC; with none declared, E-LMI presence is reported as `CFM-254`.
+- **Self-test:** the `cfm` suite grows to **24 scenarios** (all 26 fixtures to their manifest codes, covering all 107; the EVC-declaration store path), then runs the module's own **284-check conformance** and the Wireshark + scapy cross-check out of process.
+- **Live-validated** in a sealed netns: the E-LMI fixture replayed with `tcpreplay` fires `CFM-251`/`252`/`253` through the real `tcpdump` capture path with an EVC declared (0x88EE admitted), verdict `attack`.
+- **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch) (classes M/T/L, EVC declaration, 107 codes), [CREDITS.md](CREDITS.md), card EVC control.
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): LLDP Watch v3 — DCBX class (+10 codes, Data Center Bridging abuse)
 *branch `feature/lldp-watch-v3`*
 

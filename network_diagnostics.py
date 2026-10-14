@@ -26468,7 +26468,10 @@ _cfmw_lock = threading.Lock()
 _cfmw_engines = {}                 # iface -> persistent cfmwatch Engine
 # 0x8902 untagged, behind one tag, or behind QinQ (libpcap's `vlan` also reads the
 # kernel-offloaded tag).
-_CFMW_BPF = 'ether proto 0x8902 or (vlan and (ether proto 0x8902 or (vlan and ether proto 0x8902)))'
+# CFM is EtherType 0x8902; E-LMI (MEF 16, class L) is 0x88EE on the UNI. Admit both,
+# untagged and behind one/two VLAN tags (802.1Q / QinQ).
+_CFMW_ET = '(ether proto 0x8902 or ether proto 0x88ee)'
+_CFMW_BPF = ('%s or (vlan and (%s or (vlan and %s)))' % (_CFMW_ET, _CFMW_ET, _CFMW_ET))
 _CFMW_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
 
 
@@ -26496,13 +26499,13 @@ def _cfmw_analyze(pcap, engine):
     with a running count, so a row's count here is this scan's delta."""
     cw = _cfmw_import()
     before = {k: f.count for k, f in engine.findings.items()}
-    frames = 0
+    before_cfm = engine.frames_cfm   # counts CFM (0x8902) AND E-LMI (0x88EE), not junk
     for i, (ts, raw) in enumerate(cw.read_pcap(pcap)):
         try:
-            if engine.feed_raw(raw, i, ts) is not None:
-                frames += 1
+            engine.feed_raw(raw, i, ts)
         except Exception:
             continue              # one hostile frame must never kill the scan
+    frames = engine.frames_cfm - before_cfm
     if frames:
         engine.finalize()         # posture inventory roll-up (CFM-160..163)
     rows = []
@@ -26580,7 +26583,8 @@ def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=F
         if not os.path.isfile(pcap):
             return {'success': False, 'error': 'pcap not found: %s' % pcap}
         seconds = 0
-        engine = cw.Engine(cw.Config(md_ceiling=ceiling, rings=_cfmw_rings()))
+        engine = cw.Engine(cw.Config(md_ceiling=ceiling, rings=_cfmw_rings(),
+                                     evcs=_cfmw_evcs()))
     else:
         iface = interface if _valid_iface(interface or '') else _capture_iface()
         if not iface:
@@ -26611,11 +26615,14 @@ def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=F
         with _cfmw_lock:
             if engine is None:
                 rings = _cfmw_rings()
+                evcs = _cfmw_evcs()
                 engine = _cfmw_engines.get(iface)
                 if engine is None:
-                    engine = _cfmw_engines[iface] = cw.Engine(cw.Config(rings=rings))
+                    engine = _cfmw_engines[iface] = cw.Engine(
+                        cw.Config(rings=rings, evcs=evcs))
                 engine.cfg.md_ceiling = ceiling
                 engine.cfg.rings = rings
+                engine.cfg.evcs = evcs
             rows, frames = _cfmw_analyze(pcap, engine)
             inventory = _cfmw_inventory(engine)
     except Exception as e:
@@ -26689,23 +26696,105 @@ _CFMW_STORE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'data', 'cfm_watch.json')
 
 
-def _cfmw_load_ring_specs():
+def _cfmw_store_load():
     try:
         with open(_CFMW_STORE) as fh:
-            specs = (json.load(fh) or {}).get('rings') or []
-        return [s for s in specs if isinstance(s, str) and s.strip()]
+            return json.load(fh) or {}
     except (OSError, ValueError):
-        return []
+        return {}
 
 
-def _cfmw_save_ring_specs(specs):
+def _cfmw_load_specs(key):
+    specs = (_cfmw_store_load().get(key)) or []
+    return [s for s in specs if isinstance(s, str) and s.strip()]
+
+
+def _cfmw_save_specs(key, specs):
     try:
+        d = _cfmw_store_load()
+        d[key] = list(specs)
         os.makedirs(os.path.dirname(_CFMW_STORE), exist_ok=True)
         with open(_CFMW_STORE, 'w') as fh:
-            json.dump({'rings': list(specs)}, fh, indent=2)
+            json.dump(d, fh, indent=2)
         return True
     except OSError:
         return False
+
+
+def _cfmw_load_ring_specs():
+    return _cfmw_load_specs('rings')
+
+
+def _cfmw_save_ring_specs(specs):
+    return _cfmw_save_specs('rings', specs)
+
+
+def _cfmw_load_evc_specs():
+    return _cfmw_load_specs('evcs')
+
+
+def _cfmw_save_evc_specs(specs):
+    return _cfmw_save_specs('evcs', specs)
+
+
+def _cfmw_evcs():
+    """Declared EVC specs -> parsed Evc objects (a spec that no longer parses is
+    skipped, never fatal)."""
+    cw = _cfmw_import()
+    out = []
+    for s in _cfmw_load_evc_specs():
+        try:
+            out.append(cw.parse_evc(s))
+        except Exception:
+            continue
+    return tuple(out)
+
+
+def _cfmw_evc_list(specs, cw):
+    out = []
+    for s in specs:
+        try:
+            e = cw.parse_evc(s)
+            out.append({'spec': s, 'name': e.label or ('evc%d' % e.reference), 'ok': True})
+        except Exception as e:
+            out.append({'spec': s, 'ok': False, 'error': str(e)})
+    return out
+
+
+def do_cfm_evc(action='list', spec=None):
+    """Declare / list / remove the E-LMI EVCs (MEF 16) whose CE-VLAN→EVC join CFM
+    Watch should police. A spec is `REFERENCE,vlan=VLAN[,name=LABEL]`. Declaring an
+    EVC arms the Class L cross-plane rules (an E-LMI EVC status that contradicts the
+    CFM continuity picture on the same service); with none declared, E-LMI presence
+    is still reported but the join cannot be checked."""
+    cw = _cfmw_import()
+    spec = (str(spec).strip() if spec is not None else '')
+    with _cfmw_lock:
+        specs = _cfmw_load_evc_specs()
+        if action == 'declare':
+            if not spec:
+                return {'success': False, 'error': 'no EVC specification given'}
+            try:
+                evc = cw.parse_evc(spec)
+            except Exception as e:
+                return {'success': False, 'error': 'invalid EVC specification: %s' % e}
+            if spec not in specs:
+                specs.append(spec)
+                _cfmw_save_evc_specs(specs)
+            _cfmw_engines.clear()
+            return {'success': True, 'declared': spec,
+                    'name': evc.label or ('evc%d' % evc.reference),
+                    'evcs': _cfmw_evc_list(specs, cw)}
+        if action == 'remove':
+            new = [s for s in specs if s != spec]
+            _cfmw_save_evc_specs(new)
+            _cfmw_engines.clear()
+            return {'success': True, 'evcs': _cfmw_evc_list(new, cw)}
+        if action == 'clear':
+            _cfmw_save_evc_specs([])
+            _cfmw_engines.clear()
+            return {'success': True, 'evcs': []}
+        return {'success': True, 'evcs': _cfmw_evc_list(specs, cw)}
 
 
 def _cfmw_rings():
@@ -26771,7 +26860,7 @@ def _cfmw_selftest():
     """Adapter scenarios over the vendored engine with the upstream fixture corpus
     (offline, no root): every fixture must fire exactly its manifest code set through
     this adapter, plus verdict, CVE tagging and cross-scan persistence. Then the
-    module's own tiers out-of-process: the 173-check conformance harness and, with
+    module's own tiers out-of-process: the 284-check conformance harness and, with
     scapy + tshark present, the dual-dissector cross-check. (The upstream fuzz tier
     scans its own directory's copy of the module and is not run in-app.)"""
     import importlib.util
@@ -26797,9 +26886,9 @@ def _cfmw_selftest():
     split = {}
     for s in cw.SPECS:
         split[s.severity] = split.get(s.severity, 0) + 1
-    check('registry: 90 codes (3 critical / 34 high / 35 medium / 9 low / 9 info)',
-          len(cw.SPECS) == 90 and split == {'CRITICAL': 3, 'HIGH': 34, 'MEDIUM': 35,
-                                            'LOW': 9, 'INFO': 9})
+    check('registry: 107 codes (3 critical / 36 high / 44 medium / 12 low / 12 info)',
+          len(cw.SPECS) == 107 and split == {'CRITICAL': 3, 'HIGH': 36, 'MEDIUM': 44,
+                                             'LOW': 12, 'INFO': 12})
 
     def fixture(name):
         e = next(x for x in manifest if x['name'] == name)
@@ -26807,9 +26896,11 @@ def _cfmw_selftest():
         ceiling = args[args.index('--md-ceiling') + 1] if '--md-ceiling' in args else None
         rings = tuple(cw.parse_ring(args[i + 1])
                       for i, a in enumerate(args) if a == '--ring')
+        evcs = tuple(cw.parse_evc(args[i + 1])
+                     for i, a in enumerate(args) if a == '--evc')
         rows, n = _cfmw_analyze(os.path.join(fdir, e['pcap']),
                                 cw.Engine(cw.Config(md_ceiling=_cfmw_ceiling(ceiling),
-                                                    rings=rings)))
+                                                    rings=rings, evcs=evcs)))
         return e, rows, n
 
     def codes(rows):
@@ -26824,7 +26915,7 @@ def _cfmw_selftest():
             bad.append(e['name'])
     check('all %d fixtures fire exactly their manifest codes through the adapter%s'
           % (len(manifest), (' (bad: %s)' % ', '.join(bad)) if bad else ''), not bad)
-    check('the fixture corpus covers all 90 codes', len(fired) == 90)
+    check('the fixture corpus covers all 107 codes', len(fired) == 107)
 
     _e, rows, n = fixture('baseline')
     check('baseline (settled CCMs, APS No Request, LMM): inventory only -> clean',
@@ -26910,6 +27001,27 @@ def _cfmw_selftest():
               'CFM-200' in codes(rows))
     finally:
         _cfmw_save_ring_specs(_saved_rings)
+        _cfmw_engines.clear()
+
+    # E-LMI EVC-declaration store (Class L, v5): a declared EVC arms the cross-plane
+    # rules; with none declared E-LMI presence surfaces as CFM-254 (undeclared).
+    _saved_evcs = _cfmw_load_evc_specs()
+    try:
+        _ed = do_cfm_evc('declare', '7,vlan=500,name=cust-A')
+        _pe = _cfmw_evcs()
+        check('do_cfm_evc declare persists + parses an EVC spec',
+              _ed.get('success') and len(_pe) == 1)
+        rows, _n = _cfmw_analyze(os.path.join(fdir, 'elmi.pcap'),
+                                 cw.Engine(cw.Config(evcs=_cfmw_evcs())))
+        check('declared EVC (loaded from store) arms Class L cross-plane codes',
+              bool({'CFM-251', 'CFM-252', 'CFM-253'} & codes(rows)))
+        do_cfm_evc('clear')
+        rows, _n = _cfmw_analyze(os.path.join(fdir, 'elmi_undeclared.pcap'),
+                                 cw.Engine(cw.Config(evcs=_cfmw_evcs())))
+        check('undeclared E-LMI -> CFM-254 (declare-your-EVC posture)',
+              'CFM-254' in codes(rows))
+    finally:
+        _cfmw_save_evc_specs(_saved_evcs)
         _cfmw_engines.clear()
 
     # Out-of-process tiers: the upstream harnesses import cfmwatch from their own
@@ -29199,6 +29311,20 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Ring specification too long')
         _log(f"net/cfm-ring {action}")
         return jsonify(do_cfm_ring(action, spec))
+
+    @app.route('/api/net/cfm-evc', methods=['GET', 'POST'])
+    def net_cfm_evc():
+        if request.method == 'GET':
+            return jsonify(do_cfm_evc('list'))
+        data = request.get_json(silent=True) or {}
+        action = (data.get('action') or 'list').strip()
+        if action not in ('declare', 'remove', 'clear', 'list'):
+            return _bad('Invalid action')
+        spec = data.get('spec')
+        if spec is not None and len(str(spec)) > 300:
+            return _bad('EVC specification too long')
+        _log(f"net/cfm-evc {action}")
+        return jsonify(do_cfm_evc(action, spec))
 
     @app.route('/api/net/ble-watch', methods=['GET'])
     def net_ble_watch():
@@ -32012,6 +32138,15 @@ def _cli(argv=None):
                      help='VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,name=LABEL]')
     cr_.add_argument('--json', action='store_true', help='emit JSON')
 
+    ce_ = sub.add_parser('cfm-evc',
+                         help='declare / list / remove E-LMI EVCs (MEF 16) so CFM Watch '
+                              'can police the CE-VLAN/EVC cross-plane (Class L, CFM-250..254)')
+    ce_.add_argument('action', nargs='?', default='list',
+                     choices=['list', 'declare', 'remove', 'clear'])
+    ce_.add_argument('spec', nargs='?', default=None,
+                     help='REFERENCE,vlan=VLAN[,name=LABEL]')
+    ce_.add_argument('--json', action='store_true', help='emit JSON')
+
     lw_ = sub.add_parser('lldp-watch',
                          help='passive LLDP (802.1AB) scan: malformed-TLV CVE shapes, '
                               'vulnerable-family screening, flood / forged neighbour')
@@ -32760,6 +32895,24 @@ def _cli(argv=None):
                           + ('' if rg.get('ok', True) else f"  (INVALID: {rg.get('error')})"))
                 else:
                     print(f"  {rg}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'cfm-evc':
+        r = do_cfm_evc(args.action, args.spec)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            evcs = r.get('evcs') or []
+            if not evcs:
+                print('no E-LMI EVCs declared')
+            for ev in evcs:
+                if isinstance(ev, dict):
+                    print(f"  {ev.get('name', '?')}: {ev['spec']}"
+                          + ('' if ev.get('ok', True) else f"  (INVALID: {ev.get('error')})"))
+                else:
+                    print(f"  {ev}")
         return 0 if r.get('success') else 1
 
     if args.cmd == 'lldp-watch':

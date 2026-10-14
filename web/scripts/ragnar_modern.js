@@ -1514,6 +1514,7 @@ function showNetworkSubtab(name, layer) {
         _fillIfaceSel('oam-iface');
         _fillIfaceSel('cfm-iface');
         cfmLoadRings();
+        cfmLoadEvcs();
         _certFillIfaces();
         _tlsFillIfaces();
         _lldpFillIfaces();
@@ -10154,6 +10155,47 @@ async function cfmRemoveRing(spec) {
 async function cfmClearRings() {
     if (!confirm('Forget all declared ERPS rings? Ring-topology rules go quiet until you declare one again.')) return;
     try { _cfmRenderRings(await postAPI('/api/net/cfm-ring', { action: 'clear' })); addConsoleMessage('ERPS rings cleared', 'info'); }
+    catch (e) { addConsoleMessage('Clear failed: ' + e.message, 'error'); }
+}
+function _cfmRenderEvcs(d) {
+    const box = document.getElementById('cfm-evcs');
+    if (!box) return;
+    const evcs = (d && d.evcs) || [];
+    if (!evcs.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-gray-500 mb-1">Declared E-LMI EVCs (cross-plane rules armed):</div>' +
+        evcs.map(r => {
+            const ok = r.ok !== false;
+            const name = escapeHtml(r.name || '?');
+            const spec = escapeHtml(r.spec || '');
+            const warn = ok ? '' : ` <span class="text-red-400">(invalid: ${escapeHtml(r.error || '')})</span>`;
+            return `<div class="flex items-center gap-2 py-0.5">
+                <span class="font-mono ${ok ? 'text-sky-300' : 'text-red-400'}">${name}</span>
+                <span class="font-mono text-gray-500 flex-1 min-w-0 truncate" title="${spec}">${spec}</span>${warn}
+                <button onclick="cfmRemoveEvc('${spec.replace(/'/g, "\\'")}')" class="text-gray-500 hover:text-red-300 whitespace-nowrap" title="Remove this EVC">✕</button>
+            </div>`;
+        }).join('');
+}
+async function cfmLoadEvcs() {
+    try { _cfmRenderEvcs(await fetchAPI('/api/net/cfm-evc')); } catch (e) { /* non-fatal */ }
+}
+async function cfmDeclareEvc() {
+    const el = document.getElementById('cfm-evc-spec');
+    const spec = el && el.value ? el.value.trim() : '';
+    if (!spec) { addConsoleMessage('Enter an E-LMI EVC spec first (e.g. 7,vlan=500,name=cust-A)', 'warn'); return; }
+    try {
+        const d = await postAPI('/api/net/cfm-evc', { action: 'declare', spec });
+        if (d && d.success) { if (el) el.value = ''; addConsoleMessage('E-LMI EVC declared: ' + (d.name || spec), 'info'); _cfmRenderEvcs(d); }
+        else { addConsoleMessage('Declare failed: ' + ((d && d.error) || 'invalid EVC'), 'error'); }
+    } catch (e) { addConsoleMessage('Declare failed: ' + e.message, 'error'); }
+}
+async function cfmRemoveEvc(spec) {
+    try { _cfmRenderEvcs(await postAPI('/api/net/cfm-evc', { action: 'remove', spec })); }
+    catch (e) { addConsoleMessage('Remove failed: ' + e.message, 'error'); }
+}
+async function cfmClearEvcs() {
+    if (!confirm('Forget all declared E-LMI EVCs? Cross-plane rules go quiet until you declare one again.')) return;
+    try { _cfmRenderEvcs(await postAPI('/api/net/cfm-evc', { action: 'clear' })); addConsoleMessage('E-LMI EVCs cleared', 'info'); }
     catch (e) { addConsoleMessage('Clear failed: ' + e.message, 'error'); }
 }
 // ---- LLDP Watch (802.1AB malformed-TLV CVE shapes / screening / flood) ------
