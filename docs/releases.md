@@ -4,6 +4,13 @@
 
 ### 2026-10-14
 
+#### [#954](https://github.com/PierreGode/Ragnar/pull/954) — fix(test): Liebert Guard live-loopback self-test skips cleanly without CAP_NET_RAW
+*branch `fix/liebert-live-selftest-cap-net-raw`*
+
+- **Test-harness fix only — the detector was always healthy.** Liebert Guard's Tier-4 live-loopback leg (`test_liebert_guard.py`) opens its `AF_PACKET` sniff socket inside a child thread. Without `CAP_NET_RAW` that raises `PermissionError` **in the thread**, where the leg's own `PermissionError`/`OSError` skip-handler (which only wraps the main thread) can't see it — so the capture returned `[]` and was scored as a bogus **FAIL** (`live loopback v4/v6 -> exactly one LG-001 (got [])`) instead of a **SKIP**. This surfaced only when the suite ran as a non-root user; under the `ragnar` service (root, with `CAP_NET_RAW`) the leg ran and passed.
+- **Fix:** probe the `AF_PACKET` socket in the **main** thread at the top of `live_case()`, so a capability-less environment is classified **SKIPPED** (the author's documented intent — "the documented total must not depend on the kernel"), while a capable environment still runs the real capture and asserts exactly one `LG-001`.
+- **Validated:** as a non-root user → `198 passed, 0 failed | live tier: v4/v6 SKIPPED (no CAP_NET_RAW)`; as root → `198 passed, 0 failed | live tier: v4/v6 ran and passed`. In-app `_liebert_selftest` now `success=True`. No detector, CVE-index or docs change.
+
 #### [#953](https://github.com/PierreGode/Ragnar/pull/953) — docs(releases): correct the CDP Watch v5 / Cisco Guard v7 changelog PR reference
 *branch `fix/releases-pr-952-number`*
 

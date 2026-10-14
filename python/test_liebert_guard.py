@@ -224,6 +224,13 @@ for tok in (r"\.send\(", r"\.sendto\(", r"\.sendall\(", r"\.sendmsg\(", r"scapy"
 
 # ---------------- Tier 4: live loopback (needs CAP_NET_RAW) ----------------
 def live_case(fam):
+    # Probe CAP_NET_RAW in THIS (main) thread first. lg.live opens its AF_PACKET
+    # socket inside a child thread, so a missing capability would raise there and
+    # never reach the caller's PermissionError/OSError handler — surfacing as a
+    # bogus "got []" FAIL instead of a SKIP. Opening (and closing) the same socket
+    # here lets that handler classify a capability-less environment as SKIPPED,
+    # while an environment that can capture (root / CAP_NET_RAW) still runs the leg.
+    socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)).close()
     af = socket.AF_INET if fam == "v4" else socket.AF_INET6
     host = "127.0.0.1" if fam == "v4" else "::1"
     srv = socket.socket(af, socket.SOCK_STREAM)
