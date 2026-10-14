@@ -1324,6 +1324,205 @@ _MAC_EVENTS_CAP = 200
 # One MAC bound to at least this many distinct IPs at once is a clone candidate.
 _MAC_CLONE_MIN_IPS = 2
 
+# --------------------------------------------------------------------------
+# L2-security passive sniff (MAC Watch v4) — MACsec / 802.1X-EAPOL / MKA.
+#
+# The neighbour-table/arp-scan model above cannot see the link-security control
+# plane: MACsec (802.1AE), 802.1X port authentication (EAPOL) and the MACsec Key
+# Agreement protocol (MKA, EAPOL type 5) ride dedicated EtherTypes that never
+# reach the ARP/NDP caches. A short, OPT-IN passive capture (no frames are ever
+# emitted) parses the SecTAG and EAPOL headers directly off the wire and folds
+# the findings into the same verdict:
+#   * MACSEC-010  PN regression inside one secure association — a replayed or
+#                 rolled-back packet number (replay protection off, or an active
+#                 replay).                                                   HIGH
+#   * MACSEC-011  SCI system-identifier != transmitting source MAC — the secure
+#                 channel claims an identity the frame's own source contradicts
+#                 (spoofed secure channel).                                  HIGH
+#   * MACSEC-012  confidentiality downgrade — an SA seen encrypted (TCI.E=1)
+#                 now arriving integrity-only (E=0): forced cipher-off.      HIGH
+#   * MACSEC-013  MACsec secure channel observed (inventory).               INFO
+#   * EAPOL-010   EAPOL-Logoff burst — spoofed Logoff frames force-deauth the
+#                 port (802.1X denial of service).                          HIGH
+#   * EAPOL-011   EAPOL-Start flood — supplicant-impersonation / access DoS. MEDIUM
+#   * EAPOL-012   802.1X port authentication observed (inventory).          INFO
+#   * MKA-010     MACsec Key Agreement (MKA) participant observed (inventory).INFO
+# MAC Watch carries no CVEs; these are passive posture signals, not CVE probes.
+_MACSEC_ETHERTYPE = 0x88E5
+_EAPOL_ETHERTYPE = 0x888E
+_L2SEC_BPF = 'ether proto 0x88e5 or ether proto 0x888e'
+_L2SEC_CAPTURE_S = 6               # default passive-sniff window (opt-in)
+# EAPOL abuse thresholds (per capture window).
+_EAPOL_LOGOFF_MIN = 3              # >= this many Logoff frames -> deauth DoS
+_EAPOL_START_FLOOD = 8             # >= this many Start frames -> access flood
+
+
+def _macsec_parse(src_mac, payload):
+    """Parse an 802.1AE SecTAG (the bytes AFTER the 0x88E5 EtherType) into
+    {an, pn, enc, icv, sci, sci_mac} or None if too short to be a SecTAG.
+    enc=TCI.E (confidentiality), icv=TCI.C, sci present only when TCI.SC=1;
+    sci_mac is the 6-byte system identifier that opens the SCI."""
+    if not payload or len(payload) < 6:
+        return None
+    tci_an = payload[0]
+    sc = bool(tci_an & 0x20)       # TCI.SC — explicit SCI present
+    enc = bool(tci_an & 0x08)      # TCI.E  — confidentiality on
+    icv = bool(tci_an & 0x04)      # TCI.C  — changed text / ICV present
+    an = tci_an & 0x03             # association number
+    pn = int.from_bytes(payload[2:6], 'big')
+    sci = sci_mac = None
+    if sc:
+        if len(payload) < 14:
+            return None
+        sci = payload[6:14]
+        sci_mac = ':'.join('%02x' % b for b in sci[:6])
+    return {'an': an, 'pn': pn, 'enc': enc, 'icv': icv,
+            'sci': (sci.hex() if sci else None), 'sci_mac': sci_mac,
+            'src': _mac_norm(src_mac)}
+
+
+def _eapol_parse(payload):
+    """Parse an EAPOL header (bytes AFTER the 0x888E EtherType) into
+    {version, ptype, body_len} or None. ptype: 0=EAP 1=Start 2=Logoff 3=Key
+    4=ASF-Alert 5=MKA (802.1X-2010 MACsec Key Agreement)."""
+    if not payload or len(payload) < 2:
+        return None
+    return {'version': payload[0], 'ptype': payload[1],
+            'body_len': int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0}
+
+
+def _l2sec_scan_frames(frames):
+    """Analyse an ordered list of (src_mac, ethertype, payload_bytes) link-security
+    frames and return a deduped findings list. Stateful across the list: per secure
+    association (SCI|src, AN) it tracks the last PN for regression and whether the SA
+    was ever encrypted for downgrade; EAPOL Logoff/Start frames are counted for the
+    DoS/flood signals. Separated from capture so the self-test can drive it directly."""
+    findings, seen = [], set()
+    sa_pn = {}            # (assoc_key, an) -> last PN
+    sa_enc = {}           # (assoc_key, an) -> ever-encrypted (bool)
+    macsec_channels = set()
+    logoff_srcs, logoff_total = set(), 0
+    start_total = 0
+    eapol_auth = False
+    mka_members = set()
+
+    def add(code, severity, src, detail):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({'code': code, 'severity': severity,
+                         'src': src, 'detail': detail})
+
+    for src_mac, ethertype, payload in frames:
+        if ethertype == _MACSEC_ETHERTYPE:
+            tag = _macsec_parse(src_mac, payload)
+            if not tag:
+                continue
+            src = tag['src']
+            assoc = (tag['sci'] or src, tag['an'])
+            if tag['sci']:
+                if tag['sci'] not in macsec_channels:
+                    macsec_channels.add(tag['sci'])
+                    add('MACSEC-013', 'info', src,
+                        f"MACsec (802.1AE) secure channel {tag['sci_mac']} active on the "
+                        f"segment (AN {tag['an']}, {'encrypted' if tag['enc'] else 'integrity-only'})")
+                # SCI system-identifier must equal the transmitting source MAC.
+                if tag['sci_mac'] and src and tag['sci_mac'] != src:
+                    add('MACSEC-011', 'high', src,
+                        f"MACsec SCI {tag['sci_mac']} does not match the transmitting "
+                        f"source MAC {src} — the secure channel claims an identity the "
+                        f"frame itself contradicts (spoofed secure channel)")
+            # PN must increase within a secure association; a repeat or roll-back
+            # is a replay (replay protection disabled, or an active replay).
+            last = sa_pn.get(assoc)
+            if last is not None and tag['pn'] <= last:
+                add('MACSEC-010', 'high', src,
+                    f"MACsec packet number regressed ({last} -> {tag['pn']}) inside secure "
+                    f"association {assoc[0]}/AN{tag['an']} — replayed or rolled-back PN "
+                    f"(replay protection off, or an active replay)")
+            sa_pn[assoc] = max(last or 0, tag['pn'])
+            # Confidentiality downgrade: an SA once encrypted now integrity-only.
+            if sa_enc.get(assoc) and not tag['enc']:
+                add('MACSEC-012', 'high', src,
+                    f"MACsec confidentiality downgrade on {assoc[0]}/AN{tag['an']}: a "
+                    f"secure association previously seen encrypted is now integrity-only "
+                    f"(TCI.E cleared) — forced cipher-off")
+            sa_enc[assoc] = sa_enc.get(assoc, False) or tag['enc']
+        elif ethertype == _EAPOL_ETHERTYPE:
+            e = _eapol_parse(payload)
+            if not e:
+                continue
+            src = _mac_norm(src_mac)
+            pt = e['ptype']
+            if pt == 2:                         # EAPOL-Logoff
+                logoff_total += 1
+                if src:
+                    logoff_srcs.add(src)
+            elif pt == 1:                       # EAPOL-Start
+                start_total += 1
+            elif pt == 5:                       # EAPOL-MKA (802.1X-2010)
+                if src:
+                    mka_members.add(src)
+            elif pt in (0, 3):                  # EAP / EAPOL-Key
+                eapol_auth = True
+
+    # EAPOL post-pass aggregates.
+    if logoff_total >= _EAPOL_LOGOFF_MIN:
+        src = sorted(logoff_srcs)[0] if logoff_srcs else '?'
+        add('EAPOL-010', 'high', src,
+            f"{logoff_total} EAPOL-Logoff frame(s) from {len(logoff_srcs)} source(s) in "
+            f"one window — spoofed Logoff force-deauthenticates the 802.1X port "
+            f"(port-access denial of service)")
+    if start_total >= _EAPOL_START_FLOOD:
+        add('EAPOL-011', 'medium', '?',
+            f"{start_total} EAPOL-Start frames in one window — 802.1X supplicant "
+            f"impersonation / port-access flood")
+    if eapol_auth:
+        add('EAPOL-012', 'info', '?',
+            "802.1X port authentication (EAPOL) active on the segment")
+    for m in sorted(mka_members):
+        add('MKA-010', 'info', m,
+            f"MACsec Key Agreement (MKA) participant {m} observed — 802.1X-2010 "
+            f"key-agreement plane active")
+    return findings
+
+
+def _l2sec_capture(interface, seconds):
+    """Passively capture the link-security control plane (MACsec/EAPOL/MKA) and
+    return _l2sec_scan_frames() findings. Best-effort: returns [] when
+    tcpdump/scapy is unavailable or nothing matched. Emits no frames."""
+    if not _have('tcpdump') or not _have_scapy():
+        return []
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return []
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap')
+    os.close(fd)
+    _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
+          '-s', '256', '-c', '5000', '-w', path, _L2SEC_BPF],
+         timeout=int(seconds) + 8)
+    frames = []
+    try:
+        from scapy.all import rdpcap, Ether
+        try:
+            pkts = rdpcap(path)
+        except Exception:
+            return []
+        for pk in pkts:
+            if not isinstance(pk, Ether):
+                continue
+            et = int(pk.type) if pk.type is not None else 0
+            payload = bytes(pk.payload)
+            frames.append((pk.src, et, payload))
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return _l2sec_scan_frames(frames)
+
 # Locally-administered VM / container prefixes — tracked apart from privacy
 # randomization so virtual NICs don't inflate the randomized count or look like
 # a spoof. Keyed by the leading octets (lowercase, colon-separated).
@@ -1536,13 +1735,19 @@ def do_mac_watch_reset():
     return {'success': True, 'reset': True}
 
 
-def do_mac_watch(scan=True, interface=None):
-    """Detect current + past MAC spoofing/cloning and randomization, and track
-    devices that rotate randomized MACs. Detection-only; nothing is spoofed.
+def do_mac_watch(scan=True, interface=None, l2sec=False, l2sec_seconds=_L2SEC_CAPTURE_S):
+    """Detect current + past MAC spoofing/cloning and randomization, track devices
+    that rotate randomized MACs, and (opt-in) watch the link-security control plane.
+    Detection-only; nothing is spoofed and no frames are emitted.
 
     scan=True adds an arp-scan sweep (active but harmless) to widen coverage
     beyond whatever is already in the neighbour table; scan=False reads the
-    neighbour table only (works unprivileged, no traffic generated)."""
+    neighbour table only (works unprivileged, no traffic generated).
+
+    l2sec=True adds a short passive sniff of MACsec (802.1AE), 802.1X-EAPOL and
+    MKA — the one L2 identity plane the neighbour table never sees — folding
+    replay / spoofed-secure-channel / cipher-downgrade / 802.1X-DoS signals into
+    the verdict. Off by default so the background/e-Paper path stays fast."""
     now = time.time()
     gw = _default_gateway()
     gw_mac = _neigh_mac(gw) if gw else None
@@ -1783,11 +1988,34 @@ def do_mac_watch(scan=True, interface=None):
             f"{e['embedded_mac']}, but the NDP cache binds it to {e['mac']} — a "
             f"MAC-identity contradiction (spoof; proxy-NDP can also explain it)")
 
-    if spoofed or clones or hi_events or fhrp_hijacks:
+    # (8) L2-security control plane (opt-in passive sniff) — MACsec/EAPOL/MKA.
+    # The neighbour table never carries these EtherTypes, so this is the only way
+    # to see a replayed/spoofed secure channel, a forced cipher-downgrade, or an
+    # 802.1X Logoff deauth DoS. Best-effort: silently empty without tcpdump/scapy.
+    l2sec_findings = []
+    if l2sec:
+        cap_iface = interface if _valid_iface(interface or '') else (scan_iface or _default_route_iface())
+        l2sec_findings = _l2sec_capture(cap_iface, l2sec_seconds)
+    l2sec_hi = [f for f in l2sec_findings if f['severity'] == 'high']
+    l2sec_med = [f for f in l2sec_findings if f['severity'] == 'medium']
+    for f in l2sec_findings:
+        if f['severity'] != 'info':
+            reasons.append(f"{f['detail']} [{f['code']}]")
+    l2sec = {
+        'ran': bool(l2sec),
+        'findings': l2sec_findings,
+        'high': len(l2sec_hi),
+        'medium': len(l2sec_med),
+        'macsec': len([f for f in l2sec_findings if f['code'].startswith('MACSEC-')]),
+        'eapol': len([f for f in l2sec_findings if f['code'].startswith('EAPOL-')]),
+        'mka': len([f for f in l2sec_findings if f['code'].startswith('MKA-')]),
+    }
+
+    if spoofed or clones or hi_events or fhrp_hijacks or l2sec_hi:
         verdict = 'spoofed'
-    elif tracks or randomized or fhrp_virtuals:
-        verdict = 'suspicious' if tracks else ('fhrp' if fhrp_virtuals and not randomized
-                                               else 'randomization')
+    elif tracks or randomized or fhrp_virtuals or l2sec_med:
+        verdict = ('suspicious' if tracks or l2sec_med
+                   else ('fhrp' if fhrp_virtuals and not randomized else 'randomization'))
     if eui64_mismatches and verdict in ('clean', 'randomization', 'fhrp'):
         verdict = 'suspicious'
 
@@ -1805,10 +2033,13 @@ def do_mac_watch(scan=True, interface=None):
             'fhrp_hijacks': len(fhrp_hijacks),
             'ipv6_bindings': len(v6_bindings),
             'eui64_mismatch': len(eui64_mismatches),
+            'l2sec_high': l2sec['high'],
+            'l2sec_medium': l2sec['medium'],
         },
         'spoofed': spoofed,
         'clones': clones,
         'fhrp': fhrp,
+        'l2sec': l2sec,
         'ipv6': {'bindings': v6_bindings, 'eui64_mismatches': eui64_mismatches},
         # Every MAC seen this pass, worst class first, so the UI can list them.
         'observed_macs': sorted(
@@ -4558,6 +4789,56 @@ def _mac_selftest():
                           'pass': ok6.get('summary', {}).get('eui64_mismatch') == 0})
     finally:
         g.update(saved)
+
+    # L2-security control plane (MAC Watch v4): drive the pure parse/detect path
+    # with crafted MACsec / EAPOL / MKA frames — no wire, no root. Each tuple is
+    # (src_mac, ethertype, payload_after_ethertype), exactly what capture yields.
+    def _sectag(tci_an, pn, sci_mac=None):
+        p = bytes([tci_an, 0x00]) + int(pn).to_bytes(4, 'big')
+        if sci_mac is not None:
+            p += bytes(int(x, 16) for x in sci_mac.split(':')) + b'\x00\x01'
+        return p
+
+    def _eapol(ptype, version=2):
+        return bytes([version, ptype, 0x00, 0x00])
+
+    ME, EE = _MACSEC_ETHERTYPE, _EAPOL_ETHERTYPE
+    SA, SB = 'aa:bb:cc:dd:ee:01', 'aa:bb:cc:dd:ee:02'
+    TCI_ENC = 0x20 | 0x08 | 0x04      # SC + E + C, AN 0
+    TCI_INT = 0x20 | 0x04             # SC + C (integrity-only), AN 0
+
+    def l2(name, frames, want_codes, want_absent=()):
+        found = {f['code'] for f in _l2sec_scan_frames(frames)}
+        ok = all(c in found for c in want_codes) and not (set(want_absent) & found)
+        scenarios.append({'name': name, 'expect': '+'.join(want_codes) or 'clean',
+                          'got': ','.join(sorted(found)) or 'none', 'pass': ok})
+
+    # PN regression inside one SA (100 -> 50) is a replay.
+    l2('l2sec-macsec-pn-replay',
+       [(SA, ME, _sectag(TCI_ENC, 100, SA)), (SA, ME, _sectag(TCI_ENC, 50, SA))],
+       ['MACSEC-010', 'MACSEC-013'])
+    # SCI system-identifier (SB) != transmitting source MAC (SA) -> spoofed channel.
+    l2('l2sec-macsec-sci-spoof',
+       [(SA, ME, _sectag(TCI_ENC, 10, SB))], ['MACSEC-011'])
+    # Confidentiality downgrade: encrypted then integrity-only on one SA.
+    l2('l2sec-macsec-downgrade',
+       [(SA, ME, _sectag(TCI_ENC, 10, SA)), (SA, ME, _sectag(TCI_INT, 11, SA))],
+       ['MACSEC-012'])
+    # Clean MACsec: monotone PN, matching SCI, encryption stays on -> inventory only.
+    l2('l2sec-macsec-clean',
+       [(SA, ME, _sectag(TCI_ENC, 10, SA)), (SA, ME, _sectag(TCI_ENC, 11, SA))],
+       ['MACSEC-013'], want_absent=('MACSEC-010', 'MACSEC-011', 'MACSEC-012'))
+    # EAPOL-Logoff burst -> port-deauth DoS.
+    l2('l2sec-eapol-logoff-dos',
+       [(SA, EE, _eapol(2)), (SB, EE, _eapol(2)), (SA, EE, _eapol(2))],
+       ['EAPOL-010'])
+    # EAPOL-Start flood -> access flood.
+    l2('l2sec-eapol-start-flood',
+       [(SA, EE, _eapol(1))] * _EAPOL_START_FLOOD, ['EAPOL-011'])
+    # MKA (EAPOL type 5) participant inventory; a lone Logoff must NOT fire the DoS.
+    l2('l2sec-mka-inventory',
+       [(SA, EE, _eapol(5)), (SB, EE, _eapol(2))],
+       ['MKA-010'], want_absent=('EAPOL-010',))
 
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
@@ -18188,9 +18469,10 @@ _OSPF_ADVISORIES = {
         'detail': ('Auth Type 0 (none) or 1 (plaintext) lets any host on the '
                    'segment inject or spoof LSAs — the enabler for persistent '
                    'route poisoning, disguised-LSA and fight-back-bypass attacks '
-                   '(Nakibly et al.). Enable RFC 5709 HMAC-SHA cryptographic auth '
-                   '(OSPFv2) or IPsec AH/ESP (OSPFv3).'),
-        'refs': ['RFC 5709'],
+                   '(Nakibly et al.; the Cisco IOS OSPF LSA-manipulation shape '
+                   'CVE-2013-0149 is the same no-auth-enabled class). Enable RFC 5709 '
+                   'HMAC-SHA cryptographic auth (OSPFv2) or IPsec AH/ESP (OSPFv3).'),
+        'refs': ['RFC 5709', 'CVE-2013-0149'],
     },
     'opaque_lsa': {
         'severity': 'medium',
@@ -18206,9 +18488,16 @@ _OSPF_ADVISORIES = {
                    'and patch. The OSPF Segment-Routing opaque-LSA sub-TLV overruns '
                    '(CVE-2024-31950 / CVE-2024-31951) are byte-level detected by SR-MPLS '
                    'Watch (SRM-SR-TLV-OVERRUN). Cisco ASA/FTD have had equivalent '
-                   'OSPF-LSA DoS advisories.'),
+                   'OSPF-LSA DoS advisories. On the OSPFv3 (IPv6) side the same '
+                   'malformed-LSA DoS class spans Quagga/FRR ospf6d (CVE-2011-3323 '
+                   'invalid IPv6 prefix length, CVE-2018-14880 OSPFv3 parser over-read), '
+                   'Cisco IOS/IOS-XR (CVE-2018-0466, CVE-2013-5565) and Arista EOS '
+                   '(CVE-2025-8872) — version-specific, so named as posture, not '
+                   'byte-detected by this text watcher.'),
         'refs': ['CVE-2024-27913', 'CVE-2025-61107', 'CVE-2025-61105', 'CVE-2025-61099',
-                 'CVE-2025-61103', 'CVE-2025-61104', 'CVE-2025-61106', _OSPF_OSV_URL],
+                 'CVE-2025-61103', 'CVE-2025-61104', 'CVE-2025-61106', 'CVE-2011-3323',
+                 'CVE-2018-14880', 'CVE-2018-0466', 'CVE-2013-5565', 'CVE-2025-8872',
+                 _OSPF_OSV_URL],
     },
 }
 
@@ -18907,8 +19196,9 @@ _BGP_ADVISORIES = {
         'severity': 'medium',
         'title': 'Patch bgpd for malformed BGP-UPDATE attribute crashes',
         'detail': ('Malformed BGP path attributes have repeatedly crashed router '
-                   'BGP daemons (e.g. FRRouting CVE-2023-38802 / Juniper rpd '
-                   'CVE-2024-30395 via a corrupted Tunnel-Encapsulation attribute; '
+                   'BGP daemons (e.g. FRRouting CVE-2023-38802 / CVE-2024-44070 '
+                   '(bgp_attr_encap) / Juniper rpd CVE-2024-30395 via a corrupted '
+                   'Tunnel-Encapsulation attribute; '
                    'CERT VU#347067 covers multiple implementations). The v4 corpus '
                    'spans FRR bgpd (zero-length path-attributes CVE-2023-41358, '
                    'MP_UNREACH CVE-2023-47234, EOR-bypass CVE-2023-47235, Prefix-SID '
@@ -18920,10 +19210,10 @@ _BGP_ADVISORIES = {
                    'reconstruct, and the software version is not visible on the wire — '
                    'these are named as exposure posture; check OSV for your BGP build '
                    'and patch, or run the standalone BGP tap for byte-level detection.'),
-        'refs': ['CVE-2023-38802', 'CVE-2024-30395', 'CVE-2023-41358', 'CVE-2023-47234',
-                 'CVE-2023-47235', 'CVE-2024-31948', 'CVE-2022-40302', 'CVE-2022-43681',
-                 'CVE-2026-37457', 'CVE-2026-37458', 'CVE-2026-37459', 'CVE-2026-37461',
-                 'CVE-2026-37462', 'VU#347067', _BGP_OSV_URL],
+        'refs': ['CVE-2023-38802', 'CVE-2024-30395', 'CVE-2024-44070', 'CVE-2023-41358',
+                 'CVE-2023-47234', 'CVE-2023-47235', 'CVE-2024-31948', 'CVE-2022-40302',
+                 'CVE-2022-43681', 'CVE-2026-37457', 'CVE-2026-37458', 'CVE-2026-37459',
+                 'CVE-2026-37461', 'CVE-2026-37462', 'VU#347067', _BGP_OSV_URL],
     },
 }
 
@@ -25970,9 +26260,10 @@ def do_lldp_baseline(action='get'):
 
 def _lldp_selftest():
     """Adapter scenarios over the vendored engine + frame builders (offline, no root),
-    plus the module's own tiers run out-of-process: the 2117-check conformance
-    harness (which asserts scapy is NOT imported, so it cannot run inside this
-    process) and, with scapy present, the 285-check independent-dissector cross-check."""
+    plus the module's own tiers run out-of-process: the 2568-check conformance harness
+    (which asserts scapy is NOT imported, so it cannot run inside this process), the
+    338-check scapy cross-check, and — with tshark present — the 130-check DCBX
+    Wireshark-dissector cross-check (v3 added the DCBX class, LLDP-060..069)."""
     import tempfile
     scenarios = []
 
@@ -25986,20 +26277,21 @@ def _lldp_selftest():
         return {'success': False, 'scenarios': [
             {'name': 'lldpwatch import failed: %s' % e, 'pass': False}]}
 
-    check('registry: 30 codes (15 screening / 13 structural / 2 abuse)',
-          len(W.FINDINGS) == 30 and
+    check('registry: 40 codes (15 screening / 21 structural / 4 abuse)',
+          len(W.FINDINGS) == 40 and
           sorted(g for _n, _s, g in W.FINDINGS.values()).count('screening') == 15 and
-          sorted(g for _n, _s, g in W.FINDINGS.values()).count('structural') == 13)
+          sorted(g for _n, _s, g in W.FINDINGS.values()).count('structural') == 21 and
+          sorted(g for _n, _s, g in W.FINDINGS.values()).count('abuse') == 4)
     fam_cves = {c for f in W.BUILTIN_FAMILIES for c in f.cves}
     check('screening table names 30 distinct LLDP CVEs', len(fam_cves) == 30)
     check('engine passes its own passive-invariant AST audit',
           W.audit_source(open(W.__file__).read(), 'lldpwatch.py') == [])
 
-    def replay(frames, baseline=None, enforce=False):
+    def replay(frames, baseline=None, enforce=False, interval=0.001):
         fd, path = tempfile.mkstemp(suffix='.pcap')
         os.close(fd)
         try:
-            Fr.write_pcap(path, frames)
+            Fr.write_pcap(path, frames, interval=interval)
             return _lldp_analyze(path, baseline=baseline, enforce=enforce)
         finally:
             try:
@@ -26007,9 +26299,12 @@ def _lldp_selftest():
             except OSError:
                 pass
 
-    rows, neigh, n, _src = replay([b() for b in Fr.BENIGN_BUILDERS])
-    check('benign set (v4/v6 mgmt, 802.1Q, QinQ, MED phone, long banner, padding, FCS) '
-          '-> no finding (FP guard)', n == len(Fr.BENIGN_BUILDERS) and not rows)
+    # v3's benign set has 13 distinct sources — above the 12-distinct-source flood
+    # threshold — so space it 1 s/frame (no 10 s window holds 12) to prove the
+    # per-frame FP guard without tripping the rate correlator (flood is covered below).
+    rows, neigh, n, _src = replay([b() for b in Fr.BENIGN_BUILDERS], interval=1.0)
+    check('benign set (v4/v6 mgmt, 802.1Q, QinQ, MED phone, long banner, padding, FCS, '
+          'DCBX) -> no finding (FP guard)', n == len(Fr.BENIGN_BUILDERS) and not rows)
     check('verdict: benign LLDP -> clean, nothing captured -> no-traffic',
           _lldp_verdict(rows, n) == 'clean' and _lldp_verdict([], 0) == 'no-traffic')
     v6 = [x for x in neigh if any(a.startswith('[') for a in x['mgmt'])]
@@ -26064,6 +26359,12 @@ def _lldp_selftest():
         tail = (r['out'] or '').strip().splitlines()[-1:] or ['']
         check('scapy cross-check tier: %s' % tail[0][:90], r['rc'] == 0)
         xcheck = {'ran': True, 'pass': r['rc'] == 0}
+    # DCBX Wireshark-dissector cross-check (v3; needs tshark, skipped otherwise).
+    if _have('tshark'):
+        r = _run([sys.executable, os.path.join(here, 'lldpwatch_dcbx_xcheck.py'),
+                  '--quiet'], timeout=180)
+        tail = (r['out'] or r['err'] or '').strip().splitlines()[-1:] or ['']
+        check('DCBX cross-check tier: %s' % tail[0][:90], r['rc'] == 0)
     return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
             'scapy': xcheck}
 
@@ -26334,8 +26635,8 @@ def _oam_selftest():
     split = {}
     for _n, k, _s, _d in R.REGISTRY.values():
         split[k] = split.get(k, 0) + 1
-    check('registry: 38 codes (5 posture / 18 structural / 15 abuse)',
-          len(R.REGISTRY) == 38 and split == {'posture': 5, 'structural': 18, 'abuse': 15})
+    check('registry: 44 codes (5 posture / 18 structural / 21 abuse)',
+          len(R.REGISTRY) == 44 and split == {'posture': 5, 'structural': 18, 'abuse': 21})
 
     def replay(frames, engine=None, step=0.2):
         eng = engine or E.Engine(C.Config())
@@ -26389,8 +26690,11 @@ def _oam_selftest():
     rows, n, _e = replay([Fr.variable_response()])
     check('Variable Response with MIB contents -> OAM-072 cleartext leak',
           'OAM-072' in codes(rows))
-    rows, n, _e = replay([Fr.event_notification(seq=5), Fr.event_notification(seq=5)])
-    check('repeated Event Notification sequence -> OAM-073 replay',
+    # v2: a conformant (byte-identical) retransmission of the same seq is NOT a
+    # replay; OAM-073 needs the sequence to go BACKWARDS (same-seq-different-content
+    # is the new OAM-080, covered by the conformance tier).
+    rows, n, _e = replay([Fr.event_notification(seq=5), Fr.event_notification(seq=3)])
+    check('Event Notification sequence going backwards -> OAM-073 replay',
           'OAM-073' in codes(rows))
     bad = Fr.information([bytes([0x01, 0x40]) + b'\x00' * 8])
     rows, n, _e = replay([bad])
@@ -26457,7 +26761,10 @@ _cfmw_lock = threading.Lock()
 _cfmw_engines = {}                 # iface -> persistent cfmwatch Engine
 # 0x8902 untagged, behind one tag, or behind QinQ (libpcap's `vlan` also reads the
 # kernel-offloaded tag).
-_CFMW_BPF = 'ether proto 0x8902 or (vlan and (ether proto 0x8902 or (vlan and ether proto 0x8902)))'
+# CFM is EtherType 0x8902; E-LMI (MEF 16, class L) is 0x88EE on the UNI. Admit both,
+# untagged and behind one/two VLAN tags (802.1Q / QinQ).
+_CFMW_ET = '(ether proto 0x8902 or ether proto 0x88ee)'
+_CFMW_BPF = ('%s or (vlan and (%s or (vlan and %s)))' % (_CFMW_ET, _CFMW_ET, _CFMW_ET))
 _CFMW_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
 
 
@@ -26485,13 +26792,13 @@ def _cfmw_analyze(pcap, engine):
     with a running count, so a row's count here is this scan's delta."""
     cw = _cfmw_import()
     before = {k: f.count for k, f in engine.findings.items()}
-    frames = 0
+    before_cfm = engine.frames_cfm   # counts CFM (0x8902) AND E-LMI (0x88EE), not junk
     for i, (ts, raw) in enumerate(cw.read_pcap(pcap)):
         try:
-            if engine.feed_raw(raw, i, ts) is not None:
-                frames += 1
+            engine.feed_raw(raw, i, ts)
         except Exception:
             continue              # one hostile frame must never kill the scan
+    frames = engine.frames_cfm - before_cfm
     if frames:
         engine.finalize()         # posture inventory roll-up (CFM-160..163)
     rows = []
@@ -26569,7 +26876,8 @@ def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=F
         if not os.path.isfile(pcap):
             return {'success': False, 'error': 'pcap not found: %s' % pcap}
         seconds = 0
-        engine = cw.Engine(cw.Config(md_ceiling=ceiling, rings=_cfmw_rings()))
+        engine = cw.Engine(cw.Config(md_ceiling=ceiling, rings=_cfmw_rings(),
+                                     evcs=_cfmw_evcs()))
     else:
         iface = interface if _valid_iface(interface or '') else _capture_iface()
         if not iface:
@@ -26600,11 +26908,14 @@ def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=F
         with _cfmw_lock:
             if engine is None:
                 rings = _cfmw_rings()
+                evcs = _cfmw_evcs()
                 engine = _cfmw_engines.get(iface)
                 if engine is None:
-                    engine = _cfmw_engines[iface] = cw.Engine(cw.Config(rings=rings))
+                    engine = _cfmw_engines[iface] = cw.Engine(
+                        cw.Config(rings=rings, evcs=evcs))
                 engine.cfg.md_ceiling = ceiling
                 engine.cfg.rings = rings
+                engine.cfg.evcs = evcs
             rows, frames = _cfmw_analyze(pcap, engine)
             inventory = _cfmw_inventory(engine)
     except Exception as e:
@@ -26678,23 +26989,105 @@ _CFMW_STORE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            'data', 'cfm_watch.json')
 
 
-def _cfmw_load_ring_specs():
+def _cfmw_store_load():
     try:
         with open(_CFMW_STORE) as fh:
-            specs = (json.load(fh) or {}).get('rings') or []
-        return [s for s in specs if isinstance(s, str) and s.strip()]
+            return json.load(fh) or {}
     except (OSError, ValueError):
-        return []
+        return {}
 
 
-def _cfmw_save_ring_specs(specs):
+def _cfmw_load_specs(key):
+    specs = (_cfmw_store_load().get(key)) or []
+    return [s for s in specs if isinstance(s, str) and s.strip()]
+
+
+def _cfmw_save_specs(key, specs):
     try:
+        d = _cfmw_store_load()
+        d[key] = list(specs)
         os.makedirs(os.path.dirname(_CFMW_STORE), exist_ok=True)
         with open(_CFMW_STORE, 'w') as fh:
-            json.dump({'rings': list(specs)}, fh, indent=2)
+            json.dump(d, fh, indent=2)
         return True
     except OSError:
         return False
+
+
+def _cfmw_load_ring_specs():
+    return _cfmw_load_specs('rings')
+
+
+def _cfmw_save_ring_specs(specs):
+    return _cfmw_save_specs('rings', specs)
+
+
+def _cfmw_load_evc_specs():
+    return _cfmw_load_specs('evcs')
+
+
+def _cfmw_save_evc_specs(specs):
+    return _cfmw_save_specs('evcs', specs)
+
+
+def _cfmw_evcs():
+    """Declared EVC specs -> parsed Evc objects (a spec that no longer parses is
+    skipped, never fatal)."""
+    cw = _cfmw_import()
+    out = []
+    for s in _cfmw_load_evc_specs():
+        try:
+            out.append(cw.parse_evc(s))
+        except Exception:
+            continue
+    return tuple(out)
+
+
+def _cfmw_evc_list(specs, cw):
+    out = []
+    for s in specs:
+        try:
+            e = cw.parse_evc(s)
+            out.append({'spec': s, 'name': e.label or ('evc%d' % e.reference), 'ok': True})
+        except Exception as e:
+            out.append({'spec': s, 'ok': False, 'error': str(e)})
+    return out
+
+
+def do_cfm_evc(action='list', spec=None):
+    """Declare / list / remove the E-LMI EVCs (MEF 16) whose CE-VLAN→EVC join CFM
+    Watch should police. A spec is `REFERENCE,vlan=VLAN[,name=LABEL]`. Declaring an
+    EVC arms the Class L cross-plane rules (an E-LMI EVC status that contradicts the
+    CFM continuity picture on the same service); with none declared, E-LMI presence
+    is still reported but the join cannot be checked."""
+    cw = _cfmw_import()
+    spec = (str(spec).strip() if spec is not None else '')
+    with _cfmw_lock:
+        specs = _cfmw_load_evc_specs()
+        if action == 'declare':
+            if not spec:
+                return {'success': False, 'error': 'no EVC specification given'}
+            try:
+                evc = cw.parse_evc(spec)
+            except Exception as e:
+                return {'success': False, 'error': 'invalid EVC specification: %s' % e}
+            if spec not in specs:
+                specs.append(spec)
+                _cfmw_save_evc_specs(specs)
+            _cfmw_engines.clear()
+            return {'success': True, 'declared': spec,
+                    'name': evc.label or ('evc%d' % evc.reference),
+                    'evcs': _cfmw_evc_list(specs, cw)}
+        if action == 'remove':
+            new = [s for s in specs if s != spec]
+            _cfmw_save_evc_specs(new)
+            _cfmw_engines.clear()
+            return {'success': True, 'evcs': _cfmw_evc_list(new, cw)}
+        if action == 'clear':
+            _cfmw_save_evc_specs([])
+            _cfmw_engines.clear()
+            return {'success': True, 'evcs': []}
+        return {'success': True, 'evcs': _cfmw_evc_list(specs, cw)}
 
 
 def _cfmw_rings():
@@ -26760,7 +27153,7 @@ def _cfmw_selftest():
     """Adapter scenarios over the vendored engine with the upstream fixture corpus
     (offline, no root): every fixture must fire exactly its manifest code set through
     this adapter, plus verdict, CVE tagging and cross-scan persistence. Then the
-    module's own tiers out-of-process: the 173-check conformance harness and, with
+    module's own tiers out-of-process: the 284-check conformance harness and, with
     scapy + tshark present, the dual-dissector cross-check. (The upstream fuzz tier
     scans its own directory's copy of the module and is not run in-app.)"""
     import importlib.util
@@ -26786,9 +27179,9 @@ def _cfmw_selftest():
     split = {}
     for s in cw.SPECS:
         split[s.severity] = split.get(s.severity, 0) + 1
-    check('registry: 90 codes (3 critical / 34 high / 35 medium / 9 low / 9 info)',
-          len(cw.SPECS) == 90 and split == {'CRITICAL': 3, 'HIGH': 34, 'MEDIUM': 35,
-                                            'LOW': 9, 'INFO': 9})
+    check('registry: 107 codes (3 critical / 36 high / 44 medium / 12 low / 12 info)',
+          len(cw.SPECS) == 107 and split == {'CRITICAL': 3, 'HIGH': 36, 'MEDIUM': 44,
+                                             'LOW': 12, 'INFO': 12})
 
     def fixture(name):
         e = next(x for x in manifest if x['name'] == name)
@@ -26796,9 +27189,11 @@ def _cfmw_selftest():
         ceiling = args[args.index('--md-ceiling') + 1] if '--md-ceiling' in args else None
         rings = tuple(cw.parse_ring(args[i + 1])
                       for i, a in enumerate(args) if a == '--ring')
+        evcs = tuple(cw.parse_evc(args[i + 1])
+                     for i, a in enumerate(args) if a == '--evc')
         rows, n = _cfmw_analyze(os.path.join(fdir, e['pcap']),
                                 cw.Engine(cw.Config(md_ceiling=_cfmw_ceiling(ceiling),
-                                                    rings=rings)))
+                                                    rings=rings, evcs=evcs)))
         return e, rows, n
 
     def codes(rows):
@@ -26813,7 +27208,7 @@ def _cfmw_selftest():
             bad.append(e['name'])
     check('all %d fixtures fire exactly their manifest codes through the adapter%s'
           % (len(manifest), (' (bad: %s)' % ', '.join(bad)) if bad else ''), not bad)
-    check('the fixture corpus covers all 90 codes', len(fired) == 90)
+    check('the fixture corpus covers all 107 codes', len(fired) == 107)
 
     _e, rows, n = fixture('baseline')
     check('baseline (settled CCMs, APS No Request, LMM): inventory only -> clean',
@@ -26899,6 +27294,27 @@ def _cfmw_selftest():
               'CFM-200' in codes(rows))
     finally:
         _cfmw_save_ring_specs(_saved_rings)
+        _cfmw_engines.clear()
+
+    # E-LMI EVC-declaration store (Class L, v5): a declared EVC arms the cross-plane
+    # rules; with none declared E-LMI presence surfaces as CFM-254 (undeclared).
+    _saved_evcs = _cfmw_load_evc_specs()
+    try:
+        _ed = do_cfm_evc('declare', '7,vlan=500,name=cust-A')
+        _pe = _cfmw_evcs()
+        check('do_cfm_evc declare persists + parses an EVC spec',
+              _ed.get('success') and len(_pe) == 1)
+        rows, _n = _cfmw_analyze(os.path.join(fdir, 'elmi.pcap'),
+                                 cw.Engine(cw.Config(evcs=_cfmw_evcs())))
+        check('declared EVC (loaded from store) arms Class L cross-plane codes',
+              bool({'CFM-251', 'CFM-252', 'CFM-253'} & codes(rows)))
+        do_cfm_evc('clear')
+        rows, _n = _cfmw_analyze(os.path.join(fdir, 'elmi_undeclared.pcap'),
+                                 cw.Engine(cw.Config(evcs=_cfmw_evcs())))
+        check('undeclared E-LMI -> CFM-254 (declare-your-EVC posture)',
+              'CFM-254' in codes(rows))
+    finally:
+        _cfmw_save_evc_specs(_saved_evcs)
         _cfmw_engines.clear()
 
     # Out-of-process tiers: the upstream harnesses import cfmwatch from their own
@@ -28797,11 +29213,15 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/mac-watch', methods=['GET'])
     def net_mac_watch():
         # scan=0 reads the neighbour table only (no arp-scan sweep, silent);
-        # default runs an arp-scan sweep to widen coverage.
+        # default runs an arp-scan sweep to widen coverage. l2sec=1 adds the opt-in
+        # passive MACsec/EAPOL/MKA sniff (link-security control plane).
         scan = request.args.get('scan', '1') not in ('0', 'false', 'no')
         iface = (request.args.get('interface') or '').strip() or None
-        _log(f"net/mac-watch scan={scan}")
-        return jsonify(do_mac_watch(scan=scan, interface=iface))
+        l2sec = request.args.get('l2sec', '0') in ('1', 'true', 'yes')
+        secs = _clamp_int(request.args.get('l2sec_seconds'), _L2SEC_CAPTURE_S, 2, 30)
+        _log(f"net/mac-watch scan={scan} l2sec={l2sec}")
+        return jsonify(do_mac_watch(scan=scan, interface=iface,
+                                    l2sec=l2sec, l2sec_seconds=secs))
 
     @app.route('/api/net/mac-watch-reset', methods=['POST'])
     def net_mac_watch_reset():
@@ -29188,6 +29608,20 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Ring specification too long')
         _log(f"net/cfm-ring {action}")
         return jsonify(do_cfm_ring(action, spec))
+
+    @app.route('/api/net/cfm-evc', methods=['GET', 'POST'])
+    def net_cfm_evc():
+        if request.method == 'GET':
+            return jsonify(do_cfm_evc('list'))
+        data = request.get_json(silent=True) or {}
+        action = (data.get('action') or 'list').strip()
+        if action not in ('declare', 'remove', 'clear', 'list'):
+            return _bad('Invalid action')
+        spec = data.get('spec')
+        if spec is not None and len(str(spec)) > 300:
+            return _bad('EVC specification too long')
+        _log(f"net/cfm-evc {action}")
+        return jsonify(do_cfm_evc(action, spec))
 
     @app.route('/api/net/ble-watch', methods=['GET'])
     def net_ble_watch():
@@ -32001,6 +32435,15 @@ def _cli(argv=None):
                      help='VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,name=LABEL]')
     cr_.add_argument('--json', action='store_true', help='emit JSON')
 
+    ce_ = sub.add_parser('cfm-evc',
+                         help='declare / list / remove E-LMI EVCs (MEF 16) so CFM Watch '
+                              'can police the CE-VLAN/EVC cross-plane (Class L, CFM-250..254)')
+    ce_.add_argument('action', nargs='?', default='list',
+                     choices=['list', 'declare', 'remove', 'clear'])
+    ce_.add_argument('spec', nargs='?', default=None,
+                     help='REFERENCE,vlan=VLAN[,name=LABEL]')
+    ce_.add_argument('--json', action='store_true', help='emit JSON')
+
     lw_ = sub.add_parser('lldp-watch',
                          help='passive LLDP (802.1AB) scan: malformed-TLV CVE shapes, '
                               'vulnerable-family screening, flood / forged neighbour')
@@ -32749,6 +33192,24 @@ def _cli(argv=None):
                           + ('' if rg.get('ok', True) else f"  (INVALID: {rg.get('error')})"))
                 else:
                     print(f"  {rg}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'cfm-evc':
+        r = do_cfm_evc(args.action, args.spec)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            evcs = r.get('evcs') or []
+            if not evcs:
+                print('no E-LMI EVCs declared')
+            for ev in evcs:
+                if isinstance(ev, dict):
+                    print(f"  {ev.get('name', '?')}: {ev['spec']}"
+                          + ('' if ev.get('ok', True) else f"  (INVALID: {ev.get('error')})"))
+                else:
+                    print(f"  {ev}")
         return 0 if r.get('success') else 1
 
     if args.cmd == 'lldp-watch':

@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **299 CVEs detected from the wire.** 342 distinct CVE IDs are named across Ragnar's
+- **299 CVEs detected from the wire.** 349 distinct CVE IDs are named across Ragnar's
   code; 299 of them a passive detector actually identifies. The rest are named, not detected:
-  34 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+  41 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — and the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -27,7 +27,7 @@ behind them is Solarflere's work.
   **CVE-2026-86060**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
   and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899.
-- Weighted to the current threat wave (all named IDs): **45 CVEs from 2023, 51 from 2024, 37 from 2025, and
+- Weighted to the current threat wave (all named IDs): **45 CVEs from 2023, 51 from 2024, 38 from 2025, and
   45 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
   QNAP families and a deep 2020–2022 CDP seam (30 / 34 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
@@ -202,7 +202,10 @@ behind them is Solarflere's work.
   FortiSwitchAX OUI-overflow RCE **CVE-2026-22627**), TRENDnet (CVE-2021-33315 / 33316 /
   33317), QNAP QSS (CVE-2021-28801), PAN-OS (CVE-2025-0116) and SonicWall SWS
   (CVE-2021-20024). It detects the malformed frame structurally, whichever stack it targets.
-  The advertised-version screen is labelled a note, not a verdict.
+  The advertised-version screen is labelled a note, not a verdict. v3 adds a **DCBX** class
+  (Data Center Bridging eXchange, `LLDP-060`..`069`) — 40 codes now — forged ETS bandwidth /
+  PFC / application-priority negotiation on the lossless fabric; there is no DCBX CVE, so it
+  earns its place on protocol abuse, not the corpus.
 - **The Cisco discovery plane** — **CDP Watch** screens 25 CDP-plane CVEs: the Armis **CDPwn**
   five (CVE-2020-3110 / 3111 / 3118 / 3119 / 3120) widened by the **LCDPwn** successor and its
   cross-vendor arm — the Video Surveillance 7000/8000 camera set (CVE-2020-3505 / 3506 / 3507 /
@@ -220,12 +223,14 @@ behind them is Solarflere's work.
   violations, and it correlates the CVE-2025-52961 load pattern. That second one is labelled
   low confidence, because its trigger is valid traffic. Two CVEs are named only and stay
   context: CVE-2014-3223, the Huawei Y.1731 DoS, never published its trigger field, and
-  CVE-2023-20233, a Cisco IOS XR CFM bug, falls below the bar. Its other 88 codes cover
+  CVE-2023-20233, a Cisco IOS XR CFM bug, falls below the bar. Its other 105 codes cover
   forged APS protection switching (forced switch, lockout, uncorroborated Signal Fail),
-  forged AIS / CCM, moved or duplicate MEPs, linktrace sweeps, and a full **ERPS / G.8032
-  ring-protection** class (R-APS opcode 40): a forged RPL owner, two ring blocks, a ring
-  left open, off-VLAN R-APS, flush storms and revision downgrades, armed against an
-  operator-declared ring. None of them names a CVE.
+  forged AIS / CCM, moved or duplicate MEPs, linktrace sweeps, a full **ERPS / G.8032
+  ring-protection** class (R-APS opcode 40, armed against an operator-declared ring) and, in
+  v3→v5, **Y.1731 measurement & maintenance** abuse (forged loss/delay, TST), **transport**
+  anomalies (CFM tunnelled where it should not be, e.g. inside VXLAN) and an **E-LMI**
+  cross-plane class (MEF 16, EtherType 0x88EE): the UNI's CE-VLAN→EVC status checked against
+  CFM's continuity picture, armed against an operator-declared EVC. None of them names a CVE.
 - **Beyond the CVE corpus** — not every module needs a CVE to earn its place. **OAM Watch**
   covers IEEE 802.3ah Link OAM, where no CVE clears the bar. It is still a one-frame link
   blackhole: a forged Loopback Control frame puts the peer into remote loopback and discards

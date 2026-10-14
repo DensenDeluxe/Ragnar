@@ -143,6 +143,33 @@ REGISTRY = {
     "OAM-073": ("EVENT_SEQUENCE_ANOMALY", ABUSE, MEDIUM,
                 "Event Notification sequence number regressed or repeated; "
                 "replayed or forged link-event telemetry."),
+    # --- Event-content consistency (OAM-075..080) ------------------------
+    # The link-monitoring TLVs carry counters that constrain each other. A
+    # forged burst that does not keep them consistent contradicts itself, and
+    # that contradiction is detectable with no operator baseline. What is NOT
+    # detectable is a forgery whose numbers are internally consistent and
+    # plausible for the link - see the module README.
+    "OAM-075": ("EVENT_COUNT_EXCEEDS_WINDOW", ABUSE, HIGH,
+                "Event TLV reports more errors than the observation window can "
+                "physically contain."),
+    "OAM-076": ("EVENT_COUNT_BELOW_THRESHOLD", ABUSE, MEDIUM,
+                "Event TLV reports fewer errors than its own declared "
+                "threshold, so the event it announces should never have been "
+                "generated."),
+    "OAM-077": ("EVENT_COUNT_EXCEEDS_RUNNING_TOTAL", ABUSE, HIGH,
+                "Event TLV reports more errors in this window than its own "
+                "cumulative error total, which must already include them."),
+    "OAM-078": ("EVENT_COUNTER_REGRESSION", ABUSE, HIGH,
+                "A cumulative event counter went backwards on an OAM session "
+                "that never restarted; forged or replayed link telemetry."),
+    "OAM-079": ("EVENT_TIMESTAMP_REGRESSION", ABUSE, MEDIUM,
+                "Event TLV timestamp went backwards for an event type on a "
+                "session that never restarted."),
+    "OAM-080": ("EVENT_REPLAY_DIVERGENT", ABUSE, HIGH,
+                "Two Event Notification OAMPDUs share a sequence number but "
+                "carry different content. A conformant retransmission is "
+                "byte-identical; divergent content is injection or replay."),
+
     "OAM-074": ("MULTIPLE_PEERS_ON_LINK", ABUSE, CRITICAL,
                 "More than one OAM source MAC seen on the segment. Link OAM is "
                 "strictly point-to-point; a second speaker is an injector."),

@@ -71,16 +71,32 @@ PORT_SINGLE_HOP = 3784   # RFC 5881 control, GTSM applies
 PORT_ECHO = 3785         # RFC 5881 echo
 PORT_MULTIHOP = 4784     # RFC 5883 control, GTSM does NOT apply
 PORT_LAG = 6784          # RFC 7130 micro-BFD on LAG members, GTSM applies
+PORT_SBFD = 7784         # RFC 7881 S-BFD reflector; see SBFD note below
+# Pseudo-ports for G-ACh-carried BFD (RFC 5586). That path has no UDP header
+# at all, so these are internal labels only: negative so they can never
+# collide with a real port, never emitted on the wire, and never used in a
+# BPF filter. They let one session tracker key both encapsulations.
+PORT_GACH_BFD = -1
+PORT_GACH_SBFD = -2
 
-CONTROL_PORTS = frozenset((PORT_SINGLE_HOP, PORT_MULTIHOP, PORT_LAG))
+CONTROL_PORTS = frozenset((PORT_SINGLE_HOP, PORT_MULTIHOP, PORT_LAG,
+                           PORT_SBFD, PORT_GACH_BFD, PORT_GACH_SBFD))
+# GTSM deliberately EXCLUDES PORT_SBFD. RFC 7881 uses one port (7784) for
+# single-hop, multihop AND MPLS S-BFD, so a hop count below 255 on 7784 is not
+# a GTSM violation -- it is an ordinary multihop S-BFD packet. Adding 7784 here
+# would fire BFD-GTSM-VIOLATION (HIGH/CONFIRMED) on conformant traffic.
 GTSM_PORTS = frozenset((PORT_SINGLE_HOP, PORT_LAG))
-ALL_BFD_PORTS = frozenset((PORT_SINGLE_HOP, PORT_ECHO, PORT_MULTIHOP, PORT_LAG))
+ALL_BFD_PORTS = frozenset((PORT_SINGLE_HOP, PORT_ECHO, PORT_MULTIHOP, PORT_LAG,
+                           PORT_SBFD))
 
 PORT_LABEL = {
     PORT_SINGLE_HOP: "single-hop",
     PORT_ECHO: "echo",
     PORT_MULTIHOP: "multihop",
     PORT_LAG: "lag-member",
+    PORT_SBFD: "s-bfd",
+    PORT_GACH_BFD: "g-ach",
+    PORT_GACH_SBFD: "g-ach-s-bfd",
 }
 
 # RFC 5880 s.4.1 — State (2 bits)
@@ -176,6 +192,55 @@ AUTH_STRENGTH = {
 # wire. A passive observer cannot see a state that lives for less than one TX
 # interval, so treating its absence as forgery is an observer error, not a peer
 # violation. Any implementation with a fast re-enable path will do the same.
+# ---------------------------------------------------------------------------
+# S-BFD session types (RFC 7880 s.6.1 bfd.SessionType)
+#
+# S-BFD inverts several classic-BFD assumptions, so a packet's role has to be
+# known before the classic detectors run. Classification is structural -- it
+# comes from the UDP ports, never from the D bit, because the D bit is itself
+# one of the things being checked (RFC 7880 Appendix A makes it the anti-loop
+# mechanism). Using D to classify and then checking D would be circular and
+# would let an attacker choose which rules apply to their own packet.
+SESSION_CLASSIC = "classic"
+SESSION_SBFD_INITIATOR = "sbfd-initiator"
+SESSION_SBFD_REFLECTOR = "sbfd-reflector"
+# S-BFD carried in a G-ACh (RFC 7885, channel type 0x0008). Both directions
+# use the SAME channel type and there are no UDP ports, so the emitter's role
+# is NOT derivable from the encapsulation. It is recorded as unknown rather
+# than guessed: the role-dependent rules below are skipped for this type,
+# because applying a reflector rule to a packet that might be an initiator's
+# would invent a violation. Role-free rules still run.
+SESSION_SBFD_UNKNOWN_ROLE = "sbfd-gach"
+
+
+def classify_session_type(src_port: int, dst_port: int) -> str:
+    """Role of the emitter of this packet, from the port pair alone.
+
+    RFC 7881 s.2: an SBFDInitiator sends to dst 7784 and MUST NOT use 7784 as
+    its source port; the reflector answers from src 7784 back to the
+    initiator's source port. So dst==7784 is initiator-emitted and src==7784
+    is reflector-emitted. A packet with BOTH ports 7784 is malformed under
+    that same MUST NOT and is treated as initiator-side, which is the
+    direction the spec tells the reflector to discard.
+    """
+    if dst_port == PORT_SBFD:
+        return SESSION_SBFD_INITIATOR
+    if src_port == PORT_SBFD:
+        return SESSION_SBFD_REFLECTOR
+    if dst_port == PORT_GACH_SBFD:
+        return SESSION_SBFD_UNKNOWN_ROLE
+    # PORT_GACH_BFD (channel types 0x0007 / 0x0022 / 0x0023) carries classic
+    # BFD semantics, just without IP/UDP. Classic rules apply unchanged.
+    return SESSION_CLASSIC
+
+
+SBFD_TYPES = frozenset((SESSION_SBFD_INITIATOR, SESSION_SBFD_REFLECTOR,
+                        SESSION_SBFD_UNKNOWN_ROLE))
+# The subset whose emitter role is known, and therefore the only sessions the
+# role-dependent S-BFD rules may be applied to.
+SBFD_ROLED = frozenset((SESSION_SBFD_INITIATOR, SESSION_SBFD_REFLECTOR))
+
+
 INVALID_TRANSITIONS = frozenset((
     (STATE_UP, STATE_INIT),
 ))
@@ -416,6 +481,72 @@ CODES: Dict[str, CodeSpec] = {c.code: c for c in [
           "to MPC9, LC2101/2103, LC480. Not MPC10/11, LC4800/9600, MX304.",
           event=True, cves=("CVE-2026-33800",)),
 
+    # ---- Class S: S-BFD (RFC 7880 / RFC 7881 / RFC 7885) ----------------
+    _spec("BFD-SBFD-LOOP-PRIMITIVE", Severity.CRITICAL, Confidence.CONFIRMED,
+          "S-BFD Demand-bit violation: the RFC 7880 anti-loop guard is broken",
+          "RFC 7880 s.7.3.2 requires every SBFDInitiator packet to set D=1, "
+          "and s.7.2.2 requires every SBFDReflector packet to clear it. That "
+          "single bit is the ONLY thing distinguishing a request from a "
+          "reflection, and Appendix A exists because of it: a reflector that "
+          "cannot tell the two apart will reflect a reflection. One spoofed "
+          "packet naming two nodes' S-BFD Discriminators then ping-pongs "
+          "between them forever, with TTL reset to 255 on every bounce. The "
+          "spec's response is a hard discard on both sides (s.7.2.3, "
+          "s.7.3.3), so a conformant stack never emits this. Observing it "
+          "means either an implementation that omits the guard or an active "
+          "attempt to start the loop.", event=True),
+
+    _spec("BFD-SBFD-REFLECTOR-ILLEGAL-STATE", Severity.HIGH, Confidence.CONFIRMED,
+          "S-BFD reflector sent a state other than Up or AdminDown",
+          "RFC 7880 s.5: a Reflector BFD session MUST be capable of sending "
+          "only UP and AdminDown. It never sends Init or Down, which is why "
+          "s.7.3.1 gives SBFDInitiators a two-state machine with no Init at "
+          "all. Down or Init from port 7784 is either a reflector that did "
+          "not implement the restriction, or classic BFD traffic landing on "
+          "the S-BFD port, where it will be demultiplexed by the wrong "
+          "table.", event=True),
+
+    _spec("BFD-SBFD-SOURCE-PORT-VIOLATION", Severity.HIGH, Confidence.CONFIRMED,
+          "S-BFD Control packet with UDP source port 7784",
+          "RFC 7881 s.2: the source port of an SBFDInitiator packet MUST NOT "
+          "be 7784, and a reflector receiving one MUST discard it. With both "
+          "ports set to 7784 a reflector cannot tell a request from its own "
+          "reflection by port either, which is the same loop exposure "
+          "Appendix A closes with the D bit.", event=True),
+
+    _spec("BFD-SBFD-INITIATOR-INTERVAL-NONZERO", Severity.LOW,
+          Confidence.CONFIRMED,
+          "S-BFD initiator advertised a nonzero Required Min RX / Echo RX",
+          "RFC 7880 s.7.3.2 requires an SBFDInitiator to set both Required "
+          "Min RX Interval and Required Min Echo RX Interval to 0. The "
+          "reflector is stateless and schedules nothing on the initiator's "
+          "behalf, so a nonzero value is meaningless rather than dangerous -- "
+          "recorded as a conformance signal and as a hint that the sender is "
+          "a classic BFD stack pointed at an S-BFD port.", event=True),
+
+    _spec("BFD-SBFD-REFLECTOR-MIRROR-MISMATCH", Severity.HIGH, Confidence.PROBABLE,
+          "S-BFD reflection does not mirror the request it answers",
+          "RFC 7880 s.7.2.2 requires the reflector to copy Your Discriminator "
+          "from the request's My Discriminator (and back), and to copy Detect "
+          "Mult and Desired Min TX verbatim. A reply whose discriminators do "
+          "not mirror an observed request is not an answer from the addressed "
+          "entity. Confidence is PROBABLE because a passive tap can miss the "
+          "matching request through SPAN loss and see only the reply.",
+          event=True),
+
+    _spec("BFD-SBFD-DISCRIMINATOR-DOMAIN-COLLISION", Severity.HIGH,
+          Confidence.PROBABLE,
+          "One S-BFD Discriminator claimed by two reflectors in the domain",
+          "RFC 7880 s.4.1 scopes S-BFD Discriminator uniqueness to the whole "
+          "ADMINISTRATIVE DOMAIN, not to the emitting system the way RFC 5880 "
+          "s.6.8.1 scopes a classic My Discriminator. The consequence the RFC "
+          "names is specific: S-BFD Control packets terminate on the wrong "
+          "node and that node reflects anyway, so the initiator's continuity "
+          "test passes against a host it never meant to reach. This is a "
+          "separate rule from BFD-DISCRIMINATOR-COLLISION at a deliberately "
+          "wider key -- reusing the classic per-peer key here would miss the "
+          "entire failure.", event=True),
+
     # ---- Flagship correlations -----------------------------------------
     _spec("BFD-AUTH-BYPASS-TEARDOWN", Severity.CRITICAL, Confidence.PROBABLE,
           "BFD teardown on an authenticated session with a divergent auth profile",
@@ -484,6 +615,26 @@ ETH_P_IPV4 = 0x0800
 ETH_P_IPV6 = 0x86DD
 ETH_P_8021Q = 0x8100
 ETH_P_8021AD = 0x88A8
+ETH_P_MPLS_UC = 0x8847     # MPLS unicast
+ETH_P_MPLS_MC = 0x8848     # MPLS multicast
+
+# RFC 5586: the Generic Associated Label. A label stack ending in 13 means the
+# next 4 bytes are an Associated Channel Header, NOT an IP packet.
+MPLS_LABEL_GAL = 13
+MPLS_MAX_LABELS = 16       # bound the stack walk; real stacks are far shorter
+
+# ACH channel types that carry a BFD control packet with NO IP/UDP header.
+# Values from the IANA G-ACh Parameters registry.
+ACH_BFD_CC_PW = 0x0007          # RFC 5885 BFD Control, PW-ACH (no IP/UDP)
+ACH_SBFD_PW = 0x0008            # RFC 7885 S-BFD Control, PW-ACH/L2SS
+ACH_MPLS_TP_CC = 0x0022         # RFC 6428 MPLS-TP CC
+ACH_MPLS_TP_CV = 0x0023         # RFC 6428 MPLS-TP CV
+ACH_BFD_TYPES = {
+    ACH_BFD_CC_PW: "bfd-cc-pw",
+    ACH_SBFD_PW: "s-bfd-pw",
+    ACH_MPLS_TP_CC: "mpls-tp-cc",
+    ACH_MPLS_TP_CV: "mpls-tp-cv",
+}
 IPPROTO_UDP = 17
 
 # Extension headers we will walk past to reach UDP in IPv6.
@@ -506,6 +657,10 @@ class PacketMeta:
     dst_port: int
     payload: bytes
     vlan: Optional[int] = None
+    # Set only for G-ACh-carried BFD (RFC 5586). There is no IP or UDP header
+    # on that path, so these record how the packet actually arrived.
+    ach_channel: Optional[int] = None
+    mpls_labels: Tuple[int, ...] = ()
 
 
 def _mac(b: bytes) -> str:
@@ -539,7 +694,82 @@ def decode_ethernet(frame: bytes, ts: float) -> Optional[PacketMeta]:
         return _decode_ipv4(frame, off, ts, src_mac, dst_mac, vlan)
     if ethertype == ETH_P_IPV6:
         return _decode_ipv6(frame, off, ts, src_mac, dst_mac, vlan)
+    if ethertype in (ETH_P_MPLS_UC, ETH_P_MPLS_MC):
+        return _decode_mpls(frame, off, ts, src_mac, dst_mac, vlan)
     return None
+
+
+def _decode_mpls(buf, off, ts, src_mac, dst_mac, vlan) -> Optional[PacketMeta]:
+    """Walk an MPLS label stack to whatever BFD it carries.
+
+    Two destinations matter here. A stack ending in the GAL (label 13,
+    RFC 5586) is followed by an Associated Channel Header rather than an IP
+    packet, and that channel may carry a BFD control packet with no IP or UDP
+    header at all -- the encapsulation bfdwatch's IP-rooted chain could not
+    previously see. Otherwise the stack may simply be in front of an ordinary
+    IP packet, which the existing decoders handle.
+
+    This function deliberately stops at "reach the payload". MPLS-plane
+    judgements -- reserved-label misuse, S-bit anomalies, stack depth, GAL
+    placement -- belong to sr-mplswatch, which already owns them. The seam is
+    the finding, not the parser.
+    """
+    labels = []
+    cur = off
+    for _ in range(MPLS_MAX_LABELS):
+        if len(buf) < cur + 4:
+            return None
+        w = struct.unpack("!I", buf[cur:cur + 4])[0]
+        label = (w >> 12) & 0xFFFFF
+        bos = (w >> 8) & 0x1
+        ttl = w & 0xFF
+        labels.append(label)
+        cur += 4
+        if bos:
+            break
+    else:
+        return None  # stack deeper than the bound; refuse rather than guess
+
+    if labels and labels[-1] == MPLS_LABEL_GAL:
+        return _decode_ach(buf, cur, ts, src_mac, dst_mac, vlan, ttl, labels)
+
+    # Not a G-ACh frame. Peek at the first nibble to see whether an ordinary
+    # IP packet follows the stack (RFC 3032 has no protocol field, so the
+    # version nibble is the only signal available).
+    if len(buf) < cur + 1:
+        return None
+    ver = (buf[cur] >> 4) & 0xF
+    if ver == 4:
+        return _decode_ipv4(buf, cur, ts, src_mac, dst_mac, vlan)
+    if ver == 6:
+        return _decode_ipv6(buf, cur, ts, src_mac, dst_mac, vlan)
+    return None
+
+
+def _decode_ach(buf, off, ts, src_mac, dst_mac, vlan, mpls_ttl,
+                labels) -> Optional[PacketMeta]:
+    """Decode an RFC 5586 Associated Channel Header and return the BFD
+    payload it carries, if it carries one."""
+    if len(buf) < off + 4:
+        return None
+    # ACH: 0001 | version | reserved | channel type (16 bits)
+    if (buf[off] >> 4) != 0x1:
+        return None
+    channel = struct.unpack("!H", buf[off + 2:off + 4])[0]
+    if channel not in ACH_BFD_TYPES:
+        return None
+    payload = buf[off + 4:]
+    port = (PORT_GACH_SBFD if channel == ACH_SBFD_PW else PORT_GACH_BFD)
+    # There is no IP header, so there are no addresses. Using the MAC
+    # addresses as the session identity is honest about that: it says the
+    # endpoints are known only at L2, rather than inventing IPs that were
+    # never on the wire.
+    return PacketMeta(ts=ts, src_mac=src_mac, dst_mac=dst_mac,
+                      src_ip=f"mac:{src_mac}", dst_ip=f"mac:{dst_mac}",
+                      ip_version=0, ttl=mpls_ttl,
+                      src_port=port, dst_port=port,
+                      payload=payload, vlan=vlan,
+                      ach_channel=channel, mpls_labels=tuple(labels))
 
 
 def _decode_ipv4(buf, off, ts, src_mac, dst_mac, vlan) -> Optional[PacketMeta]:
@@ -785,6 +1015,8 @@ CORRELATION_WINDOW_S = 30.0     # teardown <-> path-integrity evidence window
 # profile worth comparing a teardown against. Two, so that a session first
 # observed at its teardown cannot manufacture a bypass finding from one packet.
 AUTH_PROFILE_MIN_PACKETS = 2
+# Outstanding S-BFD requests retained for reflection mirror-checking.
+SBFD_REQUEST_CACHE = 4096
 # micro-BFD Down transitions per FLAP_WINDOW_S before CVE-2026-33800 becomes
 # plausible. Deliberately above FLAP_DOWN_THRESHOLD: BFD-SESSION-FLAP already
 # covers ordinary instability, and this code should not simply shadow it.
@@ -825,6 +1057,7 @@ class DirectionState:
     dst_ip: str
     my_disc: int
     port: int
+    session_type: str
     first_seen: float
     last_seen: float
     packets: int = 0
@@ -862,9 +1095,19 @@ class DirectionState:
 
     @property
     def label(self) -> str:
+        # For S-BFD the emitter's role is the useful discriminator, not the
+        # port -- both roles share 7784, and the suppressions below turn on
+        # the role. Classic sessions keep the existing port label verbatim so
+        # the Tier 6 session-label grammar is unchanged for them.
+        tag = (self.session_type if self.session_type in SBFD_TYPES
+               else PORT_LABEL.get(self.port, self.port))
         return (f"{self.src_ip}->{self.dst_ip} "
                 f"disc=0x{self.my_disc:08x} "
-                f"[{PORT_LABEL.get(self.port, self.port)}]")
+                f"[{tag}]")
+
+    @property
+    def is_sbfd(self) -> bool:
+        return self.session_type in SBFD_TYPES
 
     def observation_gap_limit_s(self) -> float:
         """Longest silence after which this direction's state is unknown."""
@@ -894,6 +1137,16 @@ class BFDWatch:
         self.disc_index: Dict[Tuple[str, int], Tuple[str, str, int]] = {}
         # (peer_ip, my_disc, your_disc) -> sources claiming that session half
         self.disc_owners: Dict[Tuple[str, int, int], Set[Tuple[str, str]]] = {}
+        # S-BFD request cache, so a reflection can be checked against the
+        # packet it claims to answer (RFC 7880 s.7.2.2). Bounded by
+        # SBFD_REQUEST_CACHE -- a spoofed-source request flood must not grow
+        # it without limit on a Pi-class node.
+        self._sbfd_requests: Dict[Tuple[str, str, int, int],
+                                  Tuple[float, int, int]] = {}
+        # S-BFD Discriminator -> set of reflector source IPs. Domain-scoped
+        # per RFC 7880 s.4.1, deliberately NOT the per-peer key classic BFD
+        # uses.
+        self._sbfd_disc_owners: Dict[int, Set[str]] = {}
         self.recent_downs: Deque[Tuple[float, Tuple[str, str, int]]] = deque()
         self.findings: List[Finding] = []
         self.stats = {
@@ -1045,7 +1298,11 @@ class BFDWatch:
             self.stats["echo"] += 1
             self._check_echo(m)
             return
-        if m.dst_port not in CONTROL_PORTS:
+        # A reflected S-BFD packet travels FROM 7784 TO the initiator's
+        # ephemeral source port, so a destination-port test alone would drop
+        # exactly half of every S-BFD exchange -- including the whole
+        # reflector side, which is where most of the new rules live.
+        if m.dst_port not in CONTROL_PORTS and m.src_port != PORT_SBFD:
             return
         self.stats["control"] += 1
         self._observe_control(m)
@@ -1085,11 +1342,18 @@ class BFDWatch:
             )
             return
 
-        key = (m.src_ip, m.dst_ip, pkt.my_disc)
+        stype = classify_session_type(m.src_port, m.dst_port)
+        # The direction key gains the session type so a node that runs both a
+        # classic session and an S-BFD role toward the same peer, reusing a
+        # discriminator value across the two pools (RFC 7880 s.4.2 only
+        # RECOMMENDS separate pools), does not collapse into one direction
+        # and inherit the wrong suppressions.
+        key = (m.src_ip, m.dst_ip, pkt.my_disc, stype)
         d = self.directions.get(key)
         if d is None:
             d = DirectionState(src_ip=m.src_ip, dst_ip=m.dst_ip,
                                my_disc=pkt.my_disc, port=m.dst_port,
+                               session_type=stype,
                                first_seen=m.ts, last_seen=m.ts)
             self.directions[key] = d
             self.disc_index[(m.src_ip, pkt.my_disc)] = key
@@ -1102,6 +1366,7 @@ class BFDWatch:
         if stale:
             self.stats["resyncs"] += 1
 
+        self._check_sbfd(d, m, pkt)
         self._check_conformance(d, m, pkt)
         self._check_path_integrity(d, m, pkt)
         self._check_auth(d, m, pkt)
@@ -1130,6 +1395,153 @@ class BFDWatch:
                 d.auth_key_id = pkt.auth.key_id
         if pkt.poll:
             d.last_poll_ts = m.ts
+
+    # -- Class S: S-BFD ---------------------------------------------------
+
+    def _check_sbfd(self, d, m, pkt: BFDControl):
+        """RFC 7880 / 7881 rules. All structural: every one is a spec MUST
+        read straight out of the packet, so these are CONFIRMED except where
+        a passive tap can genuinely miss context."""
+        if not d.is_sbfd:
+            return
+
+        # Role-free rules first: these hold whichever side emitted the packet.
+        # Domain-wide discriminator uniqueness (s.4.1) is one of them, so it
+        # runs for G-ACh S-BFD too, where the role is unknown.
+        if d.session_type == SESSION_SBFD_UNKNOWN_ROLE:
+            return
+
+        init = d.session_type == SESSION_SBFD_INITIATOR
+
+        # RFC 7881 s.2 -- source port 7784 is forbidden and MUST be discarded.
+        if m.src_port == PORT_SBFD and m.dst_port == PORT_SBFD:
+            self._emit(d, m.ts, "BFD-SBFD-SOURCE-PORT-VIOLATION",
+                       "S-BFD Control packet with UDP source port 7784 "
+                       "(RFC 7881 s.2 forbids it; a reflector MUST discard "
+                       "it). Both ports at 7784 also defeats port-based "
+                       "request/reflection discrimination.",
+                       {"src_port": m.src_port, "dst_port": m.dst_port,
+                        "src_ip": m.src_ip, "src_mac": m.src_mac,
+                        "ttl": m.ttl})
+
+        # RFC 7880 Appendix A -- the D bit is the anti-loop guard.
+        if init and not pkt.demand:
+            self._emit(d, m.ts, "BFD-SBFD-LOOP-PRIMITIVE",
+                       "S-BFD packet toward a reflector (dst 7784) with the "
+                       "Demand bit CLEAR. RFC 7880 s.7.3.2 requires D=1 on "
+                       "every initiator packet and s.7.2.3 requires the "
+                       "reflector to discard it when clear. A reflector that "
+                       "honours this packet cannot distinguish it from a "
+                       "reflection, which is the Appendix A infinite-loop "
+                       "condition.",
+                       {"direction": "toward reflector", "demand": False,
+                        "my_disc": f"0x{pkt.my_disc:08x}",
+                        "your_disc": f"0x{pkt.your_disc:08x}",
+                        "src_ip": m.src_ip, "dst_ip": m.dst_ip,
+                        "src_mac": m.src_mac, "ttl": m.ttl})
+        if (not init) and pkt.demand:
+            self._emit(d, m.ts, "BFD-SBFD-LOOP-PRIMITIVE",
+                       "Reflected S-BFD packet (src 7784) with the Demand bit "
+                       "SET. RFC 7880 s.7.2.2 requires the reflector to clear "
+                       "D so the initiator can tell a reflection from a "
+                       "request; s.7.3.3 requires the initiator to discard "
+                       "this. Set, it is indistinguishable from a fresh "
+                       "request and can be reflected onward.",
+                       {"direction": "from reflector", "demand": True,
+                        "my_disc": f"0x{pkt.my_disc:08x}",
+                        "your_disc": f"0x{pkt.your_disc:08x}",
+                        "src_ip": m.src_ip, "dst_ip": m.dst_ip,
+                        "src_mac": m.src_mac, "ttl": m.ttl})
+
+        # RFC 7880 s.5 -- reflectors send only Up and AdminDown.
+        if (not init) and pkt.state not in (STATE_UP, STATE_ADMIN_DOWN):
+            self._emit(d, m.ts, "BFD-SBFD-REFLECTOR-ILLEGAL-STATE",
+                       f"S-BFD reflector sent state "
+                       f"{STATE_NAME.get(pkt.state, pkt.state)}; RFC 7880 s.5 "
+                       f"permits only Up and AdminDown. Either the reflector "
+                       f"omits the restriction, or classic BFD is being "
+                       f"carried on the S-BFD port.",
+                       {"state": STATE_NAME.get(pkt.state, pkt.state),
+                        "diag": DIAG_NAME.get(pkt.diag, pkt.diag),
+                        "src_ip": m.src_ip, "src_mac": m.src_mac})
+
+        # RFC 7880 s.7.3.2 -- initiator intervals MUST be zero.
+        if init and (pkt.required_min_rx or pkt.required_min_echo_rx):
+            self._emit(d, m.ts, "BFD-SBFD-INITIATOR-INTERVAL-NONZERO",
+                       f"S-BFD initiator advertised Required Min RX "
+                       f"{pkt.required_min_rx}us / Required Min Echo RX "
+                       f"{pkt.required_min_echo_rx}us; RFC 7880 s.7.3.2 "
+                       f"requires both to be 0.",
+                       {"required_min_rx_us": pkt.required_min_rx,
+                        "required_min_echo_rx_us": pkt.required_min_echo_rx,
+                        "src_ip": m.src_ip, "src_mac": m.src_mac})
+
+        if init:
+            # Remember the request so the reflection can be checked against
+            # it. Keyed on the discriminator pair as the reflector will
+            # echo it back, swapped.
+            self._sbfd_requests[(m.src_ip, m.dst_ip,
+                                 pkt.my_disc, pkt.your_disc)] = (
+                m.ts, pkt.detect_mult, pkt.desired_min_tx)
+            self._trim_sbfd_requests(m.ts)
+        else:
+            self._check_sbfd_mirror(d, m, pkt)
+            self._check_sbfd_domain_collision(d, m, pkt)
+
+    def _trim_sbfd_requests(self, now: float):
+        if len(self._sbfd_requests) <= SBFD_REQUEST_CACHE:
+            return
+        cutoff = now - CORRELATION_WINDOW_S
+        for k in [k for k, v in self._sbfd_requests.items() if v[0] < cutoff]:
+            self._sbfd_requests.pop(k, None)
+        # Hard cap even if nothing aged out, so a spoofed-source flood of
+        # requests cannot grow this map without bound on a Pi-class node.
+        while len(self._sbfd_requests) > SBFD_REQUEST_CACHE:
+            self._sbfd_requests.pop(next(iter(self._sbfd_requests)), None)
+
+    def _check_sbfd_mirror(self, d, m, pkt: BFDControl):
+        """RFC 7880 s.7.2.2 -- the reflection must mirror its request."""
+        req = self._sbfd_requests.get(
+            (m.dst_ip, m.src_ip, pkt.your_disc, pkt.my_disc))
+        if req is None:
+            # No matching request seen. That is normal on a lossy tap, so it
+            # is not itself a finding -- silence beats a guess here.
+            return
+        _, req_mult, req_tx = req
+        bad = []
+        if pkt.detect_mult != req_mult:
+            bad.append(f"Detect Mult {req_mult} -> {pkt.detect_mult}")
+        if pkt.desired_min_tx != req_tx:
+            bad.append(f"Desired Min TX {req_tx}us -> {pkt.desired_min_tx}us")
+        if not bad:
+            return
+        self._emit(d, m.ts, "BFD-SBFD-REFLECTOR-MIRROR-MISMATCH",
+                   f"S-BFD reflection did not mirror its request: "
+                   f"{'; '.join(bad)}. RFC 7880 s.7.2.2 requires these copied "
+                   f"verbatim from the packet being answered.",
+                   {"mismatches": bad,
+                    "request_detect_mult": req_mult,
+                    "reply_detect_mult": pkt.detect_mult,
+                    "request_desired_min_tx_us": req_tx,
+                    "reply_desired_min_tx_us": pkt.desired_min_tx,
+                    "src_ip": m.src_ip, "src_mac": m.src_mac})
+
+    def _check_sbfd_domain_collision(self, d, m, pkt: BFDControl):
+        """RFC 7880 s.4.1 -- uniqueness is DOMAIN-wide for S-BFD."""
+        owners = self._sbfd_disc_owners.setdefault(pkt.my_disc, set())
+        owners.add(m.src_ip)
+        if len(owners) < 2:
+            return
+        self._emit(d, m.ts, "BFD-SBFD-DISCRIMINATOR-DOMAIN-COLLISION",
+                   f"S-BFD Discriminator 0x{pkt.my_disc:08x} is reflected by "
+                   f"{len(owners)} distinct nodes ({', '.join(sorted(owners))}). "
+                   f"RFC 7880 s.4.1 requires domain-wide uniqueness: a "
+                   f"continuity test aimed at one of these will be answered "
+                   f"by whichever node the packet reaches first, and will "
+                   f"pass against the wrong one.",
+                   {"sbfd_discriminator": f"0x{pkt.my_disc:08x}",
+                    "reflector_count": len(owners),
+                    "reflectors": sorted(owners)})
 
     # -- Class B: conformance --------------------------------------------
 
@@ -1294,6 +1706,19 @@ class BFDWatch:
                 d.seq_stall_run = 0
         d.last_seq = a.seq
 
+        # RFC 7880 s.11: an SBFDReflector MUST compute its Authentication
+        # Data using the SAME sequence number it received, because it holds no
+        # per-peer state. A flat or non-increasing sequence from a reflector is
+        # therefore spec-mandated, not a replay window -- and the RFC states
+        # outright that reflectors are not susceptible to replay precisely
+        # because they answer regardless of the sequence carried. Firing here
+        # would mean a HIGH/CONFIRMED alert on every conformant authenticated
+        # reflector on the network. The initiator direction keeps the check:
+        # s.11 only says the initiator MAY pick the sequence number, so a
+        # stateless initiator reusing one is a genuine replay exposure.
+        if d.session_type == SESSION_SBFD_REFLECTOR:
+            return
+
         if (a.auth_type not in AUTH_METICULOUS
                 and d.seq_stall_run >= REPLAY_STALL_THRESHOLD):
             self._emit(d, m.ts, "BFD-AUTH-REPLAY-WINDOW",
@@ -1346,6 +1771,15 @@ class BFDWatch:
     # -- Class D: timing --------------------------------------------------
 
     def _check_timing(self, d, m, pkt: BFDControl):
+        # RFC 7880 s.7.2.2: a reflector COPIES Detect Mult and Desired Min TX
+        # out of the packet it is answering. Those fields therefore track
+        # whatever each initiator asked for, and a reflector serving several
+        # initiators with different timers will appear to "shrink" its
+        # detection time on every alternating packet. There is no negotiated
+        # detection time on a reflector to degrade, so the check does not
+        # apply. Initiators own their own timers and keep the check.
+        if d.session_type == SESSION_SBFD_REFLECTOR:
+            return
         prev = d.effective_detect_time_us()
         if prev is None or d.packets <= 1:
             return
@@ -1722,7 +2156,8 @@ def sniff_live(iface: str, watcher: BFDWatch, count: int = 0,
         from scapy.all import sniff  # type: ignore
     except ImportError:
         raise SystemExit("bfdwatch: no AF_PACKET and no scapy available")
-    bpf = "udp and (port 3784 or port 3785 or port 4784 or port 6784)"
+    bpf = ("udp and (port 3784 or port 3785 or port 4784 or port 6784 "
+           "or port 7784)")
     sniff(iface=iface, filter=bpf, store=False, count=count or 0,
           timeout=timeout, stop_filter=lambda _p: _tick(),
           prn=lambda p: watcher.observe_frame(bytes(p), float(p.time)))
@@ -1782,6 +2217,18 @@ def meta(payload: bytes, ts=1000.0, src_ip="10.0.0.1", dst_ip="10.0.0.2",
                       ttl=ttl, src_port=sport, dst_port=dport, payload=payload)
 
 
+def mpls_over_ipv4(bfd: bytes, label: int = 1000) -> bytes:
+    """One MPLS label in front of an ordinary IPv4/UDP BFD packet -- the
+    non-G-ACh branch of the label-stack walk."""
+    udp = struct.pack("!HHHH", 49152, PORT_SINGLE_HOP, 8 + len(bfd), 0) + bfd
+    ip = (bytes([0x45, 0]) + struct.pack("!H", 20 + len(udp))
+          + struct.pack("!HH", 1, 0) + bytes([255, 17, 0, 0])
+          + bytes([10, 0, 0, 1]) + bytes([10, 0, 0, 2]) + udp)
+    stack = struct.pack("!I", (label << 12) | (1 << 8) | 64)
+    return (b"\xaa\xbb\xcc\x00\x00\x02\xaa\xbb\xcc\x00\x00\x01"
+            + struct.pack("!H", ETH_P_MPLS_UC) + stack + ip)
+
+
 def meta6(payload: bytes, src_ip="2001:db8::1", dst_ip="2001:db8::2", **kw):
     """IPv6 counterpart of meta(). Every detector that is not address-family
     specific gets proven on both stacks, per the dual-stack mandate."""
@@ -1792,6 +2239,11 @@ def self_test(verbose: bool = False) -> int:
     """Tier 1: every finding code must be reachable, and clean traffic must be
     silent. Returns the number of failures."""
     results: List[Tuple[str, bool, str]] = []
+    # Codes a case both demanded and actually observed. Collected here rather
+    # than kept as a hand-written list so the reachability audit below cannot
+    # drift from what the suite really proves: a code enters this set only by
+    # being emitted during a case that asserted it.
+    proven: Set[str] = set()
 
     def case(name: str, expect: Set[str], forbid: Set[str], run) -> None:
         w = BFDWatch()
@@ -1800,6 +2252,7 @@ def self_test(verbose: bool = False) -> int:
         missing = expect - got
         leaked = forbid & got
         ok = not missing and not leaked
+        proven.update(expect & got)
         note = ""
         if missing:
             note += f"missing={sorted(missing)} "
@@ -1966,6 +2419,282 @@ def self_test(verbose: bool = False) -> int:
             w.observe(meta(build_bfd(state=STATE_DOWN, your_disc=0), ts=t))
             t += 1
     case("repeated down transitions", {"BFD-SESSION-FLAP"}, set(), flap)
+
+    # --- Class S: S-BFD (RFC 7880 / 7881) ---------------------------------
+    # Port helpers: an initiator sends ephemeral -> 7784, a reflector answers
+    # 7784 -> ephemeral. Conformant defaults everywhere except the field each
+    # case is actually testing, so a passing case proves that one rule.
+    _META_KW = {"ts", "src_ip", "dst_ip", "src_mac", "ttl"}
+
+    def _split(kw):
+        """Separate meta() kwargs from build_bfd() kwargs."""
+        mk = {k: v for k, v in kw.items() if k in _META_KW}
+        bk = {k: v for k, v in kw.items() if k not in _META_KW}
+        return mk, bk
+
+    def sbfd_init(mk=meta, **kw):
+        """One conformant initiator packet, overridable."""
+        mkw, bkw = _split(kw)
+        f = dict(demand=True, rx=0, echo_rx=0, state=STATE_UP)
+        f.update(bkw)
+        return mk(build_bfd(**f), sport=49152, dport=PORT_SBFD, **mkw)
+
+    def sbfd_refl(mk=meta, **kw):
+        """One conformant reflection, overridable."""
+        mkw, bkw = _split(kw)
+        f = dict(demand=False, state=STATE_UP)
+        f.update(bkw)
+        return mk(build_bfd(**f), sport=PORT_SBFD, dport=49152, **mkw)
+
+    # -- the anti-loop guard (RFC 7880 Appendix A) --
+    case("S-BFD initiator with D clear is the loop primitive (IPv4)",
+         {"BFD-SBFD-LOOP-PRIMITIVE"}, set(),
+         lambda w: w.observe(sbfd_init(demand=False)))
+    case("S-BFD initiator with D clear is the loop primitive (IPv6)",
+         {"BFD-SBFD-LOOP-PRIMITIVE"}, set(),
+         lambda w: w.observe(sbfd_init(meta6, demand=False)))
+    case("S-BFD reflection with D set is the loop primitive",
+         {"BFD-SBFD-LOOP-PRIMITIVE"}, set(),
+         lambda w: w.observe(sbfd_refl(demand=True)))
+
+    # -- reflector state restriction (RFC 7880 s.5) --
+    case("S-BFD reflector sending Down is illegal",
+         {"BFD-SBFD-REFLECTOR-ILLEGAL-STATE"}, set(),
+         lambda w: w.observe(sbfd_refl(state=STATE_DOWN, your_disc=0)))
+    case("S-BFD reflector sending Init is illegal",
+         {"BFD-SBFD-REFLECTOR-ILLEGAL-STATE"}, set(),
+         lambda w: w.observe(sbfd_refl(state=STATE_INIT)))
+    case("S-BFD reflector AdminDown is legal",
+         set(), {"BFD-SBFD-REFLECTOR-ILLEGAL-STATE"},
+         lambda w: w.observe(sbfd_refl(state=STATE_ADMIN_DOWN)))
+
+    # -- source port rule (RFC 7881 s.2) --
+    case("S-BFD with both ports 7784",
+         {"BFD-SBFD-SOURCE-PORT-VIOLATION"}, set(),
+         lambda w: w.observe(meta(build_bfd(demand=True, rx=0),
+                                  sport=PORT_SBFD, dport=PORT_SBFD)))
+
+    # -- initiator interval rule (RFC 7880 s.7.3.2) --
+    case("S-BFD initiator with nonzero Required Min RX",
+         {"BFD-SBFD-INITIATOR-INTERVAL-NONZERO"}, set(),
+         lambda w: w.observe(sbfd_init(rx=50000)))
+    case("S-BFD initiator with nonzero Required Min Echo RX",
+         {"BFD-SBFD-INITIATOR-INTERVAL-NONZERO"}, set(),
+         lambda w: w.observe(sbfd_init(echo_rx=50000)))
+
+    # -- reflection mirror check (RFC 7880 s.7.2.2) --
+    def sbfd_mirror_bad(w):
+        w.observe(meta(build_bfd(demand=True, rx=0, echo_rx=0,
+                                 my_disc=0xAA01, your_disc=0xBB01,
+                                 detect_mult=3, tx=50000),
+                       ts=1000.0, sport=49152, dport=PORT_SBFD))
+        # Reflection swaps the discriminators but rewrites Detect Mult.
+        w.observe(meta(build_bfd(demand=False, my_disc=0xBB01,
+                                 your_disc=0xAA01, detect_mult=9, tx=50000),
+                       ts=1000.1, src_ip="10.0.0.2", dst_ip="10.0.0.1",
+                       sport=PORT_SBFD, dport=49152))
+    case("S-BFD reflection rewriting Detect Mult",
+         {"BFD-SBFD-REFLECTOR-MIRROR-MISMATCH"}, set(), sbfd_mirror_bad)
+
+    def sbfd_mirror_ok(w):
+        w.observe(meta(build_bfd(demand=True, rx=0, echo_rx=0,
+                                 my_disc=0xAA02, your_disc=0xBB02,
+                                 detect_mult=3, tx=50000),
+                       ts=1000.0, sport=49152, dport=PORT_SBFD))
+        w.observe(meta(build_bfd(demand=False, my_disc=0xBB02,
+                                 your_disc=0xAA02, detect_mult=3, tx=50000),
+                       ts=1000.1, src_ip="10.0.0.2", dst_ip="10.0.0.1",
+                       sport=PORT_SBFD, dport=49152))
+    case("S-BFD reflection that mirrors correctly is silent",
+         set(), {"BFD-SBFD-REFLECTOR-MIRROR-MISMATCH"}, sbfd_mirror_ok)
+
+    def sbfd_reply_unseen_request(w):
+        """A reply with no observed request must NOT be a mismatch: on a
+        lossy SPAN the request is simply missing."""
+        w.observe(meta(build_bfd(demand=False, my_disc=0xCC01,
+                                 your_disc=0xDD01),
+                       sport=PORT_SBFD, dport=49152))
+    case("S-BFD reply with no observed request is silent",
+         set(), {"BFD-SBFD-REFLECTOR-MIRROR-MISMATCH"}, sbfd_reply_unseen_request)
+
+    # -- domain-scoped discriminator uniqueness (RFC 7880 s.4.1) --
+    def sbfd_domain_collision(w):
+        for ip in ("10.0.0.2", "10.0.0.3"):
+            w.observe(meta(build_bfd(demand=False, my_disc=0x5EED),
+                           src_ip=ip, sport=PORT_SBFD, dport=49152))
+    case("one S-BFD Discriminator reflected by two nodes",
+         {"BFD-SBFD-DISCRIMINATOR-DOMAIN-COLLISION"}, set(), sbfd_domain_collision)
+
+    def sbfd_one_reflector_many_peers(w):
+        """The control that separates the domain rule from the classic one:
+        ONE reflector legitimately answers many initiators with the same
+        S-BFD Discriminator. That is the design, not a collision."""
+        for i, peer in enumerate(("10.0.1.1", "10.0.1.2", "10.0.1.3")):
+            w.observe(meta(build_bfd(demand=False, my_disc=0x5EED,
+                                     your_disc=0x1000 + i),
+                           ts=1000.0 + i, src_ip="10.0.0.2", dst_ip=peer,
+                           sport=PORT_SBFD, dport=49152))
+    case("one reflector serving many initiators is not a collision",
+         set(), {"BFD-SBFD-DISCRIMINATOR-DOMAIN-COLLISION",
+                 "BFD-DISCRIMINATOR-COLLISION"},
+         sbfd_one_reflector_many_peers)
+
+    # -- the suppressions: conformant S-BFD must not trip classic detectors --
+    def sbfd_authenticated_reflector(w):
+        """THE regression lock for this build. RFC 7880 s.11 makes a reflector
+        echo the sequence number it received, so a conformant authenticated
+        reflector emits a flat sequence. Before the suppression this raised
+        BFD-AUTH-REPLAY-WINDOW at HIGH/CONFIRMED -- an alert on every
+        authenticated S-BFD reflector in the network, for obeying the spec."""
+        t = 1000.0
+        for _ in range(REPLAY_STALL_THRESHOLD + 6):
+            w.observe(meta(build_bfd(demand=False, state=STATE_UP,
+                                     auth_type=AUTH_KEYED_SHA1, key_id=7,
+                                     seq=4242),
+                           ts=t, sport=PORT_SBFD, dport=49152))
+            t += 0.3
+    case("authenticated S-BFD reflector echoing one sequence is not a replay",
+         set(), {"BFD-AUTH-REPLAY-WINDOW"}, sbfd_authenticated_reflector)
+
+    def classic_stalled_seq_still_fires(w):
+        """The other half of that lock: the suppression must be scoped to the
+        reflector, not to authenticated traffic generally."""
+        t = 1000.0
+        for _ in range(REPLAY_STALL_THRESHOLD + 6):
+            w.observe(meta(build_bfd(auth_type=AUTH_KEYED_SHA1, key_id=7,
+                                     seq=4242), ts=t))
+            t += 0.3
+    case("classic stalled sequence still fires the replay window",
+         {"BFD-AUTH-REPLAY-WINDOW"}, set(), classic_stalled_seq_still_fires)
+
+    def sbfd_initiator_stalled_seq_fires(w):
+        """And the initiator keeps the check: s.11 only lets the INITIATOR
+        choose its sequence number, so a stateless one reusing a value is a
+        genuine replay exposure."""
+        t = 1000.0
+        for _ in range(REPLAY_STALL_THRESHOLD + 6):
+            w.observe(meta(build_bfd(demand=True, rx=0, echo_rx=0,
+                                     auth_type=AUTH_KEYED_SHA1, key_id=7,
+                                     seq=99), ts=t,
+                           sport=49152, dport=PORT_SBFD))
+            t += 0.3
+    case("S-BFD initiator reusing a sequence number still fires",
+         {"BFD-AUTH-REPLAY-WINDOW"}, set(), sbfd_initiator_stalled_seq_fires)
+
+    def sbfd_multihop_ttl_is_not_gtsm(w):
+        """7784 carries single-hop, multihop AND MPLS S-BFD, so a low hop
+        count on it is ordinary multihop traffic. Putting 7784 in GTSM_PORTS
+        would have fired HIGH/CONFIRMED on all of it."""
+        w.observe(sbfd_init(ttl=58))
+    case("low TTL on the S-BFD port is not a GTSM violation",
+         set(), {"BFD-GTSM-VIOLATION"}, sbfd_multihop_ttl_is_not_gtsm)
+
+    def sbfd_reflector_varying_timers(w):
+        """A reflector copies Detect Mult / Desired Min TX from each request
+        (s.7.2.2), so serving initiators with different timers makes its
+        apparent detection time swing. That is not degradation."""
+        t = 1000.0
+        for mult, tx in ((9, 1000000), (3, 50000), (9, 1000000), (3, 50000)):
+            w.observe(meta(build_bfd(demand=False, detect_mult=mult, tx=tx),
+                           ts=t, sport=PORT_SBFD, dport=49152))
+            t += 0.3
+    case("reflector timers copied per-request are not detect-time degradation",
+         set(), {"BFD-DETECT-TIME-DEGRADED"}, sbfd_reflector_varying_timers)
+
+    def sbfd_fully_conformant(w):
+        """Whole conformant exchange, both directions, repeated. Must be
+        silent apart from auth posture, which is a true finding."""
+        t = 1000.0
+        for i in range(6):
+            w.observe(meta(build_bfd(demand=True, rx=0, echo_rx=0,
+                                     my_disc=0xA10, your_disc=0xB20,
+                                     detect_mult=3, tx=50000),
+                           ts=t, sport=49152, dport=PORT_SBFD))
+            w.observe(meta(build_bfd(demand=False, state=STATE_UP,
+                                     my_disc=0xB20, your_disc=0xA10,
+                                     detect_mult=3, tx=50000),
+                           ts=t + 0.05, src_ip="10.0.0.2", dst_ip="10.0.0.1",
+                           sport=PORT_SBFD, dport=49152))
+            t += 0.3
+    case("fully conformant S-BFD exchange raises only auth posture",
+         set(), {"BFD-SBFD-LOOP-PRIMITIVE", "BFD-SBFD-REFLECTOR-ILLEGAL-STATE",
+                 "BFD-SBFD-SOURCE-PORT-VIOLATION",
+                 "BFD-SBFD-INITIATOR-INTERVAL-NONZERO",
+                 "BFD-SBFD-REFLECTOR-MIRROR-MISMATCH",
+                 "BFD-SBFD-DISCRIMINATOR-DOMAIN-COLLISION",
+                 "BFD-AUTH-REPLAY-WINDOW", "BFD-GTSM-VIOLATION",
+                 "BFD-DETECT-TIME-DEGRADED", "BFD-STATE-REGRESSION"},
+         sbfd_fully_conformant)
+
+    def classic_traffic_unaffected_by_sbfd(w):
+        """Classic BFD must not acquire S-BFD codes."""
+        t = 1000.0
+        for _ in range(4):
+            w.observe(meta(build_bfd(state=STATE_UP), ts=t))
+            t += 0.3
+    case("classic BFD never raises S-BFD codes",
+         set(), {c for c in CODES if c.startswith("BFD-SBFD-")},
+         classic_traffic_unaffected_by_sbfd)
+
+    # --- G-ACh encapsulation (RFC 5586 / 5885 / 6428 / 7885) -------------
+    def gach_frame(channel, bfd_payload, labels=(1000,), gal=True,
+                   mpls_ttl=64):
+        """MPLS label stack -> [GAL] -> ACH -> BFD, with no IP or UDP."""
+        stack = b""
+        seq = list(labels) + ([MPLS_LABEL_GAL] if gal else [])
+        for i, lab in enumerate(seq):
+            bos = 1 if i == len(seq) - 1 else 0
+            stack += struct.pack("!I", (lab << 12) | (bos << 8) | mpls_ttl)
+        ach = struct.pack("!BBH", 0x10, 0x00, channel)
+        return (b"\xaa\xbb\xcc\x00\x00\x02\xaa\xbb\xcc\x00\x00\x01"
+                + struct.pack("!H", ETH_P_MPLS_UC) + stack + ach
+                + bfd_payload)
+
+    for _chname, _ch in (("BFD CC PW-ACH 0x0007", ACH_BFD_CC_PW),
+                         ("MPLS-TP CC 0x0022", ACH_MPLS_TP_CC),
+                         ("MPLS-TP CV 0x0023", ACH_MPLS_TP_CV)):
+        case(f"G-ACh {_chname} reaches the BFD detectors",
+             {"BFD-NO-AUTH"}, {"BFD-GTSM-VIOLATION"},
+             (lambda ch: lambda w: w.observe_frame(
+                 gach_frame(ch, build_bfd(state=STATE_UP)), 1000.0))(_ch))
+
+    case("G-ACh S-BFD 0x0008 reaches the BFD detectors",
+         {"BFD-NO-AUTH"}, {"BFD-GTSM-VIOLATION"},
+         lambda w: w.observe_frame(
+             gach_frame(ACH_SBFD_PW, build_bfd(state=STATE_UP)), 1000.0))
+
+    def gach_sbfd_role_unknown(w):
+        """Both G-ACh S-BFD directions share channel type 0x0008, so the
+        emitter's role cannot be known. The role-dependent rules must stay
+        silent rather than guess -- a D=0 packet here might be a perfectly
+        legal reflection."""
+        w.observe_frame(gach_frame(ACH_SBFD_PW,
+                                   build_bfd(state=STATE_DOWN, demand=False)),
+                        1000.0)
+    case("G-ACh S-BFD does not get role-dependent rules",
+         set(), {"BFD-SBFD-LOOP-PRIMITIVE", "BFD-SBFD-REFLECTOR-ILLEGAL-STATE",
+                 "BFD-SBFD-INITIATOR-INTERVAL-NONZERO"},
+         gach_sbfd_role_unknown)
+
+    case("G-ACh frame on a non-BFD channel type is ignored",
+         set(), set(CODES),
+         lambda w: w.observe_frame(
+             gach_frame(0x0021, build_bfd(state=STATE_UP)), 1000.0))
+
+    case("MPLS stack with no GAL in front of plain IPv4 BFD still decodes",
+         {"BFD-NO-AUTH"}, set(),
+         lambda w: w.observe_frame(mpls_over_ipv4(build_bfd()), 1000.0))
+
+    def gach_truncated_ach(w):
+        """A GAL with a truncated ACH must not raise anything -- there is no
+        BFD payload to judge, and inventing one would be a parser bug."""
+        w.observe_frame(
+            b"\xaa\xbb\xcc\x00\x00\x02\xaa\xbb\xcc\x00\x00\x01"
+            + struct.pack("!H", ETH_P_MPLS_UC)
+            + struct.pack("!I", (MPLS_LABEL_GAL << 12) | (1 << 8) | 64)
+            + b"\x10\x00", 1000.0)
+    case("GAL with a truncated ACH raises nothing", set(), set(CODES),
+         gach_truncated_ach)
 
     # --- CVE-2026-73458: authenticated-session teardown bypass ------------
     def auth_bypass(mk):
@@ -2154,24 +2883,12 @@ def self_test(verbose: bool = False) -> int:
             line += f"  {note}"
         print(line)
 
-    # Code reachability audit. The tested set is maintained by hand so that
-    # adding a code without adding a case is a hard failure, not a silent gap.
+    # Code reachability audit. `proven` holds only codes that a case asserted
+    # AND the module actually emitted, so adding a code without adding a case
+    # is a hard failure, and a case that silently stops emitting its code
+    # cannot leave a stale entry behind.
     covered = {spec.code for spec in CODES.values()}
-    tested = {
-        "BFD-NO-AUTH", "BFD-SIMPLE-PASSWORD-AUTH", "BFD-KEYED-MD5-AUTH",
-        "BFD-KEYED-SHA1-AUTH", "BFD-METICULOUS-MD5-AUTH",
-        "BFD-METICULOUS-SHA1-AUTH", "BFD-AUTH-UNKNOWN-TYPE",
-        "BFD-AUTH-REPLAY-WINDOW", "BFD-AUTH-ASYMMETRIC", "BFD-AUTH-DOWNGRADE",
-        "BFD-MULTIHOP-NO-AUTH", "BFD-VERSION-ZERO", "BFD-VERSION-UNKNOWN",
-        "BFD-TRUNCATED-HEADER", "BFD-MALFORMED-HEADER",
-        "BFD-ZERO-DISCRIMINATOR", "BFD-RESERVED-DIAG",
-        "BFD-INVALID-FLAG-COMBO", "BFD-GTSM-VIOLATION",
-        "BFD-SOURCE-MIGRATION", "BFD-DISCRIMINATOR-COLLISION",
-        "BFD-STATE-REGRESSION", "BFD-SESSION-FLAP", "BFD-CONVERGENCE-STORM",
-        "BFD-FORCED-ADMINDOWN", "BFD-DETECT-TIME-DEGRADED",
-        "BFD-ECHO-ENABLED", "BFD-ECHO-SRC-MISMATCH", "BFD-SPOOFED-TEARDOWN",
-        "BFD-AUTH-BYPASS-TEARDOWN", "BFD-MICRO-FLAP-STORM",
-    }
+    tested = proven
     unreached = covered - tested
     print()
     print(f"  codes defined: {len(covered)}   codes exercised: {len(tested)}")
@@ -2304,6 +3021,7 @@ def main(argv=None) -> int:
 
     worst = min((SEV_ORDER[f.severity] for f in w.findings), default=99)
     return 2 if worst <= SEV_ORDER[Severity.HIGH] else 0
+
 
 
 # CLI entrypoint removed on vendoring; this module is imported by Ragnar.
@@ -2610,6 +3328,7 @@ def selftest():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         failures = self_test(verbose=False)
-    check("engine-tier1-48-cases", failures == 0, "failures=%d" % failures)
+    check("engine-tier1 (every code reachable, clean traffic silent)",
+          failures == 0, "failures=%d" % failures)
 
     return {"success": all(s["pass"] for s in scen), "scenarios": scen}

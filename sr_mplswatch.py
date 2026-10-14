@@ -41,7 +41,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any, Dict, List, Optional, Tuple
 
-__version__ = "0.1.0-dev"
+__version__ = "0.2.0-dev"
 MODULE_NAME = "sr-mplswatch"
 
 # ---------------------------------------------------------------------------
@@ -111,6 +111,328 @@ IPV6_EXT_HEADERS = frozenset((
     IPPROTO_AH, IPPROTO_IPV6_OPTS,
 ))
 
+# ---------------------------------------------------------------------------
+# MPLS Generalized Associated Channel (G-ACh) - RFC 5586
+#
+# ACH layout: 0001 (4b) | Version (4b) | Reserved (8b) | Channel Type (16b).
+# Version and Reserved MUST be zero.  The GAL (label 13) carries it for LSP
+# and section OAM; a pseudowire carries it with no GAL at all (RFC 4385).
+#
+# Every value below was read off the IANA "MPLS Generalized Associated Channel
+# (G-ACh) Types" registry, not from recall.  Two of them are traps:
+#   * RFC 6374 owns FIVE channel types, not two (DLM/ILM/DM/DLM+DM/ILM+DM).
+#   * ACH-carries-IPv6 is 0x0057, nowhere near ACH-carries-IPv4 (0x0021).
+#     Guessing the adjacent value lands on MPLS-TP CC.
+# ---------------------------------------------------------------------------
+ACH_FIRST_NIBBLE = 1             # RFC 5586 s3.2 - 0001
+ACH_HEADER_LEN = 4
+
+GACH_MCC = 0x0001                # RFC 5718
+GACH_SCC = 0x0002                # RFC 5718
+GACH_BFD_PW_ACH = 0x0007         # RFC 5885  - VCCV-BFD, no IP/UDP
+GACH_SBFD_PW_ACH = 0x0008        # RFC 7885
+GACH_DHC = 0x0009                # RFC 8185
+GACH_DLM = 0x000A                # RFC 6374  - Direct Loss Measurement
+GACH_ILM = 0x000B                # RFC 6374  - Inferred Loss Measurement
+GACH_DM = 0x000C                 # RFC 6374  - Delay Measurement
+GACH_DLM_DM = 0x000D             # RFC 6374  - combined
+GACH_ILM_DM = 0x000E             # RFC 6374  - combined
+GACH_RTM = 0x000F                # RFC 8169
+GACH_MULTIPOINT_BFD = 0x0013     # RFC 9780
+GACH_IPV4 = 0x0021               # RFC 4385  - ACH carries an IPv4 packet
+GACH_MPLS_TP_CC = 0x0022         # RFC 6428
+GACH_MPLS_TP_CV = 0x0023         # RFC 6428
+GACH_PSC = 0x0024                # RFC 6378
+GACH_ON_DEMAND_CV = 0x0025       # RFC 6426
+GACH_LI = 0x0026                 # RFC 6435
+GACH_PW_OAM = 0x0027             # RFC 6478
+GACH_MAC_WITHDRAW = 0x0028       # RFC 7769
+GACH_PW_STATUS_REFRESH = 0x0029  # RFC 8237
+GACH_RPS = 0x002A                # RFC 8227
+GACH_IPV6 = 0x0057               # RFC 4385  - ACH carries an IPv6 packet
+GACH_FAULT_OAM = 0x0058          # RFC 6427
+GACH_GAP = 0x0059                # RFC 7212
+GACH_G8113_1 = 0x8902            # RFC 6671
+
+GACH_EXPERIMENTAL = range(0x7FF8, 0x8000)   # RFC 5586 - experimental use
+
+# The two channel types that mean "the payload is an ordinary IP packet".
+# These are the bfdwatch seam: everything they expose is handed to the IP
+# path, so IP/UDP-rooted protocols (BFD included) stay with the module that
+# owns IP/UDP.  sr-mplswatch never decodes BFD reached via IP/UDP.
+GACH_IP_PAYLOAD = frozenset((GACH_IPV4, GACH_IPV6))
+
+# RFC 6374 message families, keyed by channel type -> (name, fixed_size).
+# Sizes exclude the TLV block and are derived from the RFC 6374 s3.1/3.2/3.3
+# diagrams: LM 52, DM 44, combined 76.
+GACH_MEASUREMENT: Dict[int, Tuple[str, int]] = {
+    GACH_DLM: ("dlm", 52),
+    GACH_ILM: ("ilm", 52),
+    GACH_DM: ("dm", 44),
+    GACH_DLM_DM: ("dlm+dm", 76),
+    GACH_ILM_DM: ("ilm+dm", 76),
+}
+
+# ---------------------------------------------------------------------------
+# IOAM - RFC 9197 data fields, RFC 9486 IPv6 encapsulation
+#
+# IOAM rides as an IPv6 Hop-by-Hop or Destination option.  There are TWO
+# option type values and a parser matching one misses half the traffic:
+#   0x11 (chg=0) : IOAM E2E (Destination), IOAM DEX (Hop-by-Hop)
+#   0x31 (chg=1) : IOAM Pre-allocated Trace (HbH), IOAM POT (HbH)
+#
+# Trace option header (RFC 9197 s4.4.1, identical for pre-allocated and
+# incremental):
+#   Namespace-ID (16b) | NodeLen (5b) | Flags (4b) | RemainingLen (7b)
+#   IOAM Trace-Type (24b) | Reserved (8b)
+#
+# IOAM IS IPv6-ONLY HERE, AND THAT IS THE PROTOCOL, NOT AN OMISSION.
+# RFC 9486 defines IOAM as IPv6 extension-header options; there is no IPv4
+# equivalent to parse.  Recorded explicitly so the asymmetry is visible to a
+# future reader rather than looking like a dual-stack gap.
+# ---------------------------------------------------------------------------
+IPV6_OPT_IOAM_IMMUTABLE = 0x11   # RFC 9486 - chg = 0
+IPV6_OPT_IOAM_MUTABLE = 0x31     # RFC 9486 - chg = 1
+IPV6_OPT_IOAM = frozenset((IPV6_OPT_IOAM_IMMUTABLE, IPV6_OPT_IOAM_MUTABLE))
+
+IPV6_OPT_PAD1 = 0x00
+IPV6_OPT_PADN = 0x01
+
+IOAM_OPT_PREALLOC_TRACE = 0      # RFC 9197 s4.4.1
+IOAM_OPT_INCREMENTAL_TRACE = 1   # RFC 9197 s4.4.1
+IOAM_OPT_POT = 2                 # RFC 9197 s4.5
+IOAM_OPT_E2E = 3                 # RFC 9197 s4.6
+IOAM_OPT_DEX = 4                 # RFC 9326
+IOAM_OPT_NAMES: Dict[int, str] = {
+    IOAM_OPT_PREALLOC_TRACE: "pre-allocated-trace",
+    IOAM_OPT_INCREMENTAL_TRACE: "incremental-trace",
+    IOAM_OPT_POT: "pot",
+    IOAM_OPT_E2E: "e2e",
+    IOAM_OPT_DEX: "dex",
+    64: "integrity-protected-prealloc-trace",
+    65: "integrity-protected-incremental-trace",
+    66: "integrity-protected-pot",
+    67: "integrity-protected-e2e",
+}
+IOAM_TRACE_OPTS = frozenset((IOAM_OPT_PREALLOC_TRACE, IOAM_OPT_INCREMENTAL_TRACE))
+
+IOAM_OPT_HEADER_LEN = 4          # Option-Type | Opt Data Len | Reserved | IOAM-Type
+IOAM_TRACE_HEADER_LEN = 8        # the two words above
+IOAM_MAX_TOTAL_LEN = 255         # RFC 9486 s4
+IOAM_ALIGNMENT = 4               # RFC 9486 s4 - multiples of 4 octets
+
+# RFC 9197 s4.4.2: data each Trace-Type bit contributes, in 4-octet units.
+# Bit 0 is the MOST significant bit of the 24-bit Trace-Type.  Bits 8/9/10 are
+# the WIDE formats and cost TWO units each; bits 12-21 are undefined but MUST
+# be 4 octets; bit 22 is variable and EXCLUDED from NodeLen; bit 23 has no
+# data field at all.
+IOAM_TRACE_UNITS: Dict[int, int] = {}
+for _b in range(0, 8):
+    IOAM_TRACE_UNITS[_b] = 1
+for _b in (8, 9, 10):
+    IOAM_TRACE_UNITS[_b] = 2
+IOAM_TRACE_UNITS[11] = 1
+for _b in range(12, 22):
+    IOAM_TRACE_UNITS[_b] = 1
+del _b
+
+IOAM_TRACE_BIT_OPAQUE = 22       # variable length, excluded from NodeLen
+IOAM_TRACE_BIT_RESERVED = 23     # MUST be zero on transmission
+IOAM_TRACE_BITS_UNDEFINED = frozenset(range(12, 22))
+
+# The largest NodeLen any legal Trace-Type can imply.  The field is 5 bits so
+# it can encode 31, but no combination of bits reaches past this, which makes
+# it a bound independent of which bits are actually set.
+IOAM_NODELEN_MAX = sum(IOAM_TRACE_UNITS.values())      # 25
+
+IOAM_TRACE_FLAG_OVERFLOW = 0x8   # RFC 9197 - O-bit, first Flags bit
+IOAM_TRACE_FLAG_LOOPBACK = 0x4   # RFC 9322 - L-bit
+IOAM_TRACE_FLAG_ACTIVE = 0x2     # RFC 9322 - A-bit
+IOAM_TRACE_FLAG_MBZ = 0x1        # remaining bit unassigned
+
+IOAM_NAMESPACE_DEFAULT = 0x0000
+IOAM_NAMESPACE_PRIVATE = range(0x0001, 0x8000)   # reserved for private use
+
+# ---------------------------------------------------------------------------
+# LSP Ping - RFC 8029 MPLS Echo Request / Reply  (+ VCCV, RFC 5085)
+#
+# UDP port 3503 (IANA service name 'lsp-ping', ref RFC 8029), both directions.
+# Header, from the RFC 8029 s3 diagram - note the FIELD WIDTHS, which are a
+# common source of error:
+#   Version Number (16b) | Global Flags (16b)
+#   Message Type (8b) | Reply Mode (8b) | Return Code (8b) | Return Subcode (8b)
+#   Sender's Handle (32b) | Sequence Number (32b)
+#   TimeStamp Sent (64b) | TimeStamp Received (64b) | TLVs...
+# Version Number is SIXTEEN bits with value 1, not an 8-bit field.
+#
+# The destination-address rule is the strongest signal here.  An echo request
+# is addressed into 127/8 (IPv4) or 0:0:0:0:0:FFFF:7F00:0/104 (IPv6) precisely
+# so that a packet which escapes the LSP is DROPPED rather than delivered:
+# RFC 1122 forbids 127/8 outside a host and RFC 1812 tells routers not to
+# forward it.  A request addressed anywhere else has lost that property.
+# ---------------------------------------------------------------------------
+LSPPING_PORT = 3503
+LSPPING_VERSION = 1
+LSPPING_HEADER_LEN = 32
+
+LSPPING_MSG_ECHO_REQUEST = 1     # RFC 8029
+LSPPING_MSG_ECHO_REPLY = 2       # RFC 8029
+LSPPING_MSG_PROXY_REQUEST = 3    # RFC 7555
+LSPPING_MSG_PROXY_REPLY = 4      # RFC 7555
+LSPPING_MSG_RELAYED_REPLY = 5    # RFC 7743
+LSPPING_MSG_ASSIGNED = frozenset((
+    LSPPING_MSG_ECHO_REQUEST, LSPPING_MSG_ECHO_REPLY,
+    LSPPING_MSG_PROXY_REQUEST, LSPPING_MSG_PROXY_REPLY,
+    LSPPING_MSG_RELAYED_REPLY,
+))
+
+LSPPING_REPLY_NO_REPLY = 1
+LSPPING_REPLY_UDP = 2
+LSPPING_REPLY_UDP_ROUTER_ALERT = 3   # DEPRECATED by RFC 9570
+LSPPING_REPLY_CONTROL_CHANNEL = 4
+LSPPING_REPLY_SPECIFIED_PATH = 5     # RFC 7110
+LSPPING_REPLY_ASSIGNED = frozenset(range(1, 6))
+
+# TLV types below 32768 are mandatory; 32768 and above are optional.
+LSPPING_TLV_MANDATORY_MAX = 32767
+
+LSPPING_TLV_TARGET_FEC = 1           # RFC 8029
+LSPPING_TLV_DOWNSTREAM_MAP = 2       # RFC 8029 - DEPRECATED in favour of 20
+LSPPING_TLV_PAD = 3
+LSPPING_TLV_VENDOR_ENTERPRISE = 5
+LSPPING_TLV_INTERFACE_LABEL_STACK = 7
+LSPPING_TLV_ERRORED_TLVS = 9
+LSPPING_TLV_REPLY_TOS = 10
+LSPPING_TLV_BFD_DISCRIMINATOR = 15   # RFC 5884
+LSPPING_TLV_REVERSE_PATH_FEC = 16    # RFC 6426
+LSPPING_TLV_DDMAP = 20               # RFC 8029 - Downstream Detailed Mapping
+LSPPING_TLV_REPLY_PATH = 21          # RFC 7110
+
+# Target FEC Stack sub-TLVs carrying these types also appear in TLV 16 and 21.
+# The registry is ADDRESS-FAMILY-SPLIT by design, which is what makes a
+# family-mismatch detection expressible at all.
+LSPPING_FEC_V4: Dict[int, str] = {
+    1: "ldp-ipv4-prefix", 3: "rsvp-ipv4-lsp", 6: "vpn-ipv4-prefix",
+    9: "fec128-pw-ipv4-deprecated", 10: "fec128-pw-ipv4",
+    11: "fec129-pw-ipv4", 12: "bgp-labeled-ipv4", 14: "generic-ipv4-prefix",
+    17: "rsvp-p2mp-ipv4", 26: "ipv4-rsvp-tunnel", 31: "mt-ldp-ipv4-prefix",
+    34: "ipv4-igp-prefix-sid", 47: "ipv4-node-address-sr-mpls",
+    49: "sr-policy-psid-ipv4", 50: "sr-cp-psid-ipv4", 51: "sr-sl-psid-ipv4",
+}
+LSPPING_FEC_V6: Dict[int, str] = {
+    2: "ldp-ipv6-prefix", 4: "rsvp-ipv6-lsp", 7: "vpn-ipv6-prefix",
+    13: "bgp-labeled-ipv6", 15: "generic-ipv6-prefix", 18: "rsvp-p2mp-ipv6",
+    24: "fec128-pw-ipv6", 25: "fec129-pw-ipv6", 27: "ipv6-rsvp-tunnel",
+    32: "mt-ldp-ipv6-prefix", 35: "ipv6-igp-prefix-sid",
+    48: "ipv6-node-address-sr-mpls", 52: "sr-policy-psid-ipv6",
+    53: "sr-cp-psid-ipv6", 54: "sr-sl-psid-ipv6",
+}
+# Family-neutral sub-TLVs, listed so an unknown type is distinguishable from
+# a known-but-neutral one.
+LSPPING_FEC_NEUTRAL: Dict[int, str] = {
+    8: "l2vpn-endpoint", 16: "nil-fec", 19: "multicast-p2mp-ldp",
+    20: "multicast-mp2mp-ldp", 22: "static-lsp", 23: "static-pw",
+    28: "static-tunnel", 29: "hsmp-upstream-ldp", 30: "hsmp-downstream-ldp",
+    33: "entropy-label-fec", 36: "igp-adjacency-sid", 37: "p2mp-pw",
+    38: "peeradj-sid", 39: "peernode-sid", 40: "peerset-sid",
+    41: "sr-mpls-p2mp-policy-tree", 42: "evpn-mac-ip",
+    43: "evpn-inclusive-multicast", 44: "evpn-eth-auto-discovery",
+    45: "evpn-ip-prefix", 46: "sid-only-mpls-label",
+}
+# RFC 8287 SR sub-TLVs: the only OAM codepoints that NAME A SID on the wire,
+# which is what lets them be cross-checked against this module's SR ledger.
+LSPPING_FEC_SR_V4 = 34
+LSPPING_FEC_SR_V6 = 35
+LSPPING_FEC_SR_ADJ = 36
+
+LSPPING_FEC_DEPRECATED = {9: "RFC 8029 (use sub-TLV 10)"}
+
+# Downstream (Detailed) Mapping Address Type -> exact K-octet length.
+LSPPING_ADDR_TYPE_LEN: Dict[int, Tuple[str, int]] = {
+    1: ("ipv4-numbered", 16),
+    2: ("ipv4-unnumbered", 16),
+    3: ("ipv6-numbered", 40),
+    4: ("ipv6-unnumbered", 28),
+    5: ("non-ip", 12),
+}
+
+# RFC 8029 s4.3: the loopback ranges an echo request is addressed into.
+LSPPING_LOOPBACK_V4 = ipaddress.ip_network("127.0.0.0/8")
+LSPPING_LOOPBACK_V6 = ipaddress.ip_network("::ffff:127.0.0.0/104")
+
+# VCCV - RFC 5085 s5.3.1.  Advertised in LDP interface parameter 0x0C as two
+# octets: a CC Type bitmask then a CV Type bitmask.
+VCCV_IFACE_PARAM = 0x0C
+VCCV_CC_CONTROL_WORD = 0x01        # Type 1 - PW-ACH, first nibble 0001
+VCCV_CC_ROUTER_ALERT = 0x02        # Type 2 - MPLS Router Alert label
+VCCV_CC_TTL_EXPIRY = 0x04          # Type 3 - PW label with TTL == 1
+VCCV_CC_RESERVED = 0xF8
+VCCV_CV_ICMP_PING = 0x01
+VCCV_CV_LSP_PING = 0x02
+VCCV_CV_RESERVED = 0xFC
+# Types 2 and 3 both push the packet to a router's control plane.
+VCCV_CC_CONTROL_PLANE = VCCV_CC_ROUTER_ALERT | VCCV_CC_TTL_EXPIRY
+
+# ---------------------------------------------------------------------------
+# RFC 6374 Loss / Delay Measurement
+#
+# Common header, confirmed against the RFC 6374 s3.1/3.2/3.3 diagrams:
+#   byte 0 : Version (4b) | Flags (4b)      Flags  = R|T|0|0
+#   byte 1 : Control Code (8b)
+#   byte 2 : Message Length (16b)
+#   word 2 : LM    -> DFlags(4) | OTF(4) | Reserved(24)   DFlags = X|B|0|0
+#            DM    -> QTF(4) | RTF(4) | RPTF(4) | Reserved(20)
+#            LM+DM -> DFlags(4) | QTF(4) | RTF(4) | RPTF(4) | Reserved(16)
+#   word 3 : Session Identifier (24b) | DS (8b)
+#
+# TRAP, and the reason there is no "DS must be zero" rule anywhere below:
+# RFC 6374 s3.1 says that when T = 0 "the value of this field is arbitrary,
+# and the field can be considered part of the Session Identifier".  DS is
+# only interpretable when T = 1.  Reading it otherwise fires on conforming
+# traffic.
+# ---------------------------------------------------------------------------
+MEAS_VERSION = 0                 # RFC 6374 s3.1 - MUST be 0
+
+MEAS_FLAG_R = 0x08               # query/response indicator, first Flags bit
+MEAS_FLAG_T = 0x04               # traffic-class-specific, second Flags bit
+MEAS_FLAG_MBZ = 0x03             # remaining two Flags bits MUST be zero
+
+MEAS_DFLAG_X = 0x08              # extended (64-bit) counter format
+MEAS_DFLAG_B = 0x04              # octet count rather than packet count
+MEAS_DFLAG_MBZ = 0x03            # remaining two DFlags bits MUST be zero
+
+# Timestamp formats - IANA "Measurement Timestamp Type".  0..3 assigned,
+# 4..15 unassigned.
+MEAS_TS_NULL = 0
+MEAS_TS_SEQUENCE = 1
+MEAS_TS_NTPV4 = 2
+MEAS_TS_PTP = 3
+MEAS_TS_MAX_ASSIGNED = MEAS_TS_PTP
+
+# IANA "Loss/Delay Measurement Control Code" - query codes 0x0..0x2.
+MEAS_QUERY_CODES = frozenset((0x00, 0x01, 0x02))
+# Response codes: 0x1..0x5 non-error, 0x10..0x1D error.  0x0 is Reserved.
+MEAS_RESPONSE_CODES = frozenset(range(0x01, 0x06)) | frozenset(range(0x10, 0x1E))
+
+# Mandatory TLV object types are 0..127; optional are 128..255.
+MEAS_TLV_MANDATORY_MAX = 127
+
+GACH_ASSIGNED: Dict[int, str] = {
+    GACH_MCC: "mcc", GACH_SCC: "scc",
+    GACH_BFD_PW_ACH: "bfd-pw-ach", GACH_SBFD_PW_ACH: "s-bfd-pw-ach",
+    GACH_DHC: "dual-homing-coordination",
+    GACH_DLM: "dlm", GACH_ILM: "ilm", GACH_DM: "dm",
+    GACH_DLM_DM: "dlm+dm", GACH_ILM_DM: "ilm+dm",
+    GACH_RTM: "residence-time", GACH_MULTIPOINT_BFD: "multipoint-bfd",
+    GACH_IPV4: "ipv4-payload", GACH_MPLS_TP_CC: "mpls-tp-cc",
+    GACH_MPLS_TP_CV: "mpls-tp-cv", GACH_PSC: "psc",
+    GACH_ON_DEMAND_CV: "on-demand-cv", GACH_LI: "lawful-intercept",
+    GACH_PW_OAM: "pw-oam", GACH_MAC_WITHDRAW: "mac-withdraw",
+    GACH_PW_STATUS_REFRESH: "pw-status-refresh", GACH_RPS: "ring-protection",
+    GACH_IPV6: "ipv6-payload", GACH_FAULT_OAM: "fault-oam",
+    GACH_GAP: "gach-advertisement", GACH_G8113_1: "g8113.1-oam",
+}
+
 SRH_ROUTING_TYPE = 4             # RFC 8754 s2 - Segment Routing Header
 SRH_TLV_PAD1 = 0                 # RFC 8754 s2.1.1
 SRH_TLV_PADN = 4                 # RFC 8754 s2.1.1
@@ -142,6 +464,12 @@ LDP_TLV_IPV4_TRANSPORT = 0x0401
 LDP_TLV_CONFIG_SEQNO = 0x0402
 LDP_TLV_IPV6_TRANSPORT = 0x0403
 LDP_TLV_COMMON_SESSION = 0x0500
+# Pseudowire FEC elements - RFC 8077 (was RFC 4447).
+LDP_FEC_PWID = 128               # 0x80: C|PWType(15) | PWInfoLen(8) |
+                                 #       GroupID(32) | PWID(32) | ifparams...
+LDP_FEC_GENERALIZED_PWID = 129   # 0x81: AGI/SAII/TAII, NO inline ifparams
+# The Generalized FEC carries its interface parameters in a SEPARATE TLV.
+LDP_TLV_PW_INTERFACE_PARAMS = 0x096B
 
 LDP_HELLO_FLAG_TARGETED = 0x8000   # RFC 5036 s3.5.2 "T" bit
 LDP_HELLO_FLAG_REQUEST = 0x4000    # "R" bit
@@ -943,6 +1271,173 @@ FINDINGS: Dict[str, Dict[str, str]] = {
         "desc": "SRHs were seen but --srv6-locator was not given, so the SID conformance "
                 "rules are disarmed. Declare the locator to arm them.",
     },
+    # -- MPLS OAM: RFC 6374 loss / delay measurement ------------------------
+    "SRM-OAM-MSG-MALFORMED": {
+        "severity": "high", "klass": "ATTACK", "category": "oam",
+        "title": "RFC 6374 measurement message malformed",
+        "desc": "The measurement message is shorter than the fixed size its channel "
+                "type requires (52 octets for LM, 44 for DM, 76 for the combined "
+                "form), its Message Length disagrees with the frame it arrived in, or "
+                "its TLV block overruns the message. This is the shape that crashes "
+                "or over-reads a measurement parser, and it is the same family as the "
+                "SR sub-TLV overruns already tracked by this module.",
+    },
+    "SRM-OAM-FIELD-INVALID": {
+        "severity": "medium", "klass": "ATTACK", "category": "oam",
+        "title": "RFC 6374 field carries an illegal value",
+        "desc": "A measurement header field holds a value no conforming sender emits: "
+                "Version other than 0, a must-be-zero Flags or DFlags bit set, a "
+                "Control Code outside the assigned query or response sets for the "
+                "direction indicated by the R bit, or a timestamp-format selector in "
+                "the unassigned 4-15 range.",
+    },
+    "SRM-OAM-SELF-CONTRADICTORY": {
+        "severity": "medium", "klass": "ATTACK", "category": "oam",
+        "title": "RFC 6374 message contradicts itself",
+        "desc": "The message's own fields disagree: a query carrying a response-only "
+                "Control Code or the reverse, a Delay Measurement with the T flag "
+                "clear when RFC 6374 requires it set, a query with fields that only a "
+                "responder may fill (Counter 2, Timestamp 2, RTF, RPTF), or a response "
+                "whose RTF matches neither the QTF nor the RPTF it cites. No single "
+                "field is out of range; the combination cannot be produced by a "
+                "conforming implementation.",
+    },
+    # -- MPLS OAM: LSP Ping (RFC 8029) and VCCV (RFC 5085) ------------------
+    "SRM-LSPPING-ON-CE-PORT": {
+        "severity": "high", "klass": "ATTACK", "category": "lsp-ping",
+        "title": "MPLS Echo Request/Reply on a customer-facing port",
+        "desc": "LSP Ping is the operator's own LSP diagnostic. On a customer-facing "
+                "port, or an undeclared one, it either leaks the provider's label "
+                "topology outward or is a customer probing the provider's LSPs; its "
+                "Target FEC Stack names FECs, labels and segment identifiers.",
+    },
+    "SRM-LSPPING-DST-NOT-LOOPBACK": {
+        "severity": "high", "klass": "ATTACK", "category": "lsp-ping",
+        "title": "MPLS Echo Request not addressed into the loopback range",
+        "desc": "RFC 8029 s4.3 addresses an echo request into 127/8 (IPv4) or "
+                "0:0:0:0:0:FFFF:7F00:0/104 (IPv6) so that a packet escaping the LSP is "
+                "discarded rather than delivered - RFC 1122 bars 127/8 from the wire "
+                "and RFC 1812 tells routers not to forward it. A request addressed "
+                "anywhere else has lost that containment and will be delivered if the "
+                "label stack is wrong or stripped.",
+    },
+    "SRM-LSPPING-MALFORMED": {
+        "severity": "high", "klass": "ATTACK", "category": "lsp-ping",
+        "title": "Malformed MPLS Echo Request/Reply",
+        "desc": "The datagram violates RFC 8029 framing: Version Number other than 1, "
+                "a reserved or unassigned Message Type or Reply Mode, a TLV or sub-TLV "
+                "whose length overruns the datagram, a Value not padded to a 4-octet "
+                "boundary, or a Downstream Mapping Address Type whose length does not "
+                "match the K-octet value the registry fixes for it.",
+    },
+    "SRM-LSPPING-FEC-FAMILY-MISMATCH": {
+        "severity": "medium", "klass": "ATTACK", "category": "lsp-ping",
+        "title": "Target FEC Stack sub-TLV carried over the wrong address family",
+        "desc": "The IANA Target FEC Stack sub-TLV registry is address-family-split: "
+                "sub-TLV 34 is an IPv4 IGP-Prefix Segment ID and 35 is its IPv6 "
+                "counterpart, and the same pairing runs through the LDP, RSVP, VPN, "
+                "BGP and pseudowire FECs. A family-specific sub-TLV arriving over the "
+                "other family cannot be produced by a conforming sender.",
+    },
+    "SRM-LSPPING-FEC-UNADVERTISED": {
+        "severity": "medium", "klass": "ATTACK", "category": "lsp-ping",
+        "title": "LSP Ping probes an IGP-Prefix Segment nobody advertised",
+        "desc": "An RFC 8287 IGP-Prefix Segment ID sub-TLV (34 for IPv4, 35 for IPv6) "
+                "names a prefix for which no IS-IS, OSPFv2, OSPFv3 or BGP speaker has "
+                "been seen to advertise a Prefix-SID. LSP Ping is the only OAM "
+                "protocol that names segment FECs on the wire, so this is either a "
+                "stale operator script or reconnaissance of the SR domain. "
+                "BASELINE-DEPENDENT: it fires only once the SR ledger holds "
+                "Prefix-SID advertisements, and the ledger size travels with every "
+                "finding so a capture that began mid-stream is distinguishable from a "
+                "real gap. NOTE: these sub-TLVs carry a PREFIX, not a SID value or "
+                "index - RFC 8287 leaves the SID itself to the responder's IGP "
+                "database - so the check is prefix-scoped by necessity, and the "
+                "Adjacency Segment sub-TLV (36) is deliberately out of scope because "
+                "its node identifiers cannot be matched to this module's ledger keys "
+                "without guessing at IS-IS versus OSPF identifier formats.",
+    },
+    "SRM-LSPPING-DEPRECATED-FEATURE": {
+        "severity": "low", "klass": "POSTURE", "category": "lsp-ping",
+        "title": "Deprecated LSP Ping feature in use",
+        "desc": "The exchange uses a feature the IETF has since deprecated: Reply Mode "
+                "3 (reply via UDP with Router Alert, deprecated by RFC 9570), the "
+                "Downstream Mapping TLV 2 (superseded by Downstream Detailed Mapping, "
+                "TLV 20), or Target FEC sub-TLV 9. Router Alert in particular forces "
+                "replies through the control plane of every hop.",
+    },
+    "SRM-VCCV-CC-RISKY": {
+        "severity": "medium", "klass": "POSTURE", "category": "lsp-ping",
+        "title": "Pseudowire advertises a control-plane-punting VCCV channel",
+        "desc": "An LDP pseudowire advertises VCCV CC Type 2 (MPLS Router Alert label) "
+                "or Type 3 (PW label with TTL 1). Both deliver the VCCV message to the "
+                "control plane of the receiving router rather than keeping it in the "
+                "data path, so a pseudowire's peer can meter CPU with ordinary OAM. "
+                "Also fires when reserved CC/CV bits are set, or when a CC type is "
+                "offered with no connectivity-verification type at all.",
+    },
+    # -- IOAM (RFC 9197 / RFC 9486) - IPv6 only, see the module constants ---
+    "SRM-IOAM-DOMAIN-LEAK": {
+        "severity": "critical", "klass": "ATTACK", "category": "ioam",
+        "title": "IOAM data crossing an IOAM-domain boundary",
+        "desc": "An IOAM option was observed on a customer-facing port, or an "
+                "undeclared one. RFC 9486 s5 requires domain boundary routers to "
+                "filter IOAM-bearing traffic in BOTH directions and states that such "
+                "packets MUST NOT be leaked across domain boundaries. IOAM carries "
+                "node identifiers, interface identifiers, queue depths and transit "
+                "delays, so a leak is simultaneously a protocol violation and a "
+                "disclosure of internal topology and capacity.",
+    },
+    "SRM-IOAM-MALFORMED": {
+        "severity": "high", "klass": "ATTACK", "category": "ioam",
+        "title": "Malformed IOAM option",
+        "desc": "The IOAM option violates RFC 9197 / RFC 9486 structure: a NodeLen "
+                "that disagrees with the sum of the data fields its Trace-Type "
+                "selects, a NodeLen larger than any Trace-Type can imply, a "
+                "RemainingLen inconsistent with the space the option actually has, an "
+                "option not aligned to 4 octets, a total IOAM length beyond the "
+                "255-octet ceiling, or a truncated header. The NodeLen relation is a "
+                "complete self-consistency check: it needs no baseline, because the "
+                "Trace-Type in the same header says exactly how much each node adds.",
+    },
+    "SRM-IOAM-TRACETYPE-RESERVED": {
+        "severity": "medium", "klass": "ATTACK", "category": "ioam",
+        "title": "IOAM Trace-Type sets a reserved or undefined bit",
+        "desc": "RFC 9197 s4.4.1 requires Trace-Type bit 23 to be zero on "
+                "transmission, and requires an IOAM encapsulating node to set every "
+                "undefined bit (12-21) to zero. A set bit in either place is a crafted "
+                "or fuzzed option, or an implementation using a codepoint IANA has not "
+                "assigned - and because each undefined bit still obliges a transit "
+                "node to reserve 4 octets, it is a way to inflate what every hop on "
+                "the path writes.",
+    },
+    # -- MPLS OAM: G-ACh / MPLS-TP (RFC 5586, RFC 6428) ---------------------
+    "SRM-GACH-ON-CE-PORT": {
+        "severity": "critical", "klass": "ATTACK", "category": "oam",
+        "title": "MPLS OAM channel on a customer-facing port",
+        "desc": "A G-ACh (RFC 5586) carrying MPLS-TP or measurement OAM was seen on a "
+                "port declared customer-facing, or on an undeclared port, which fails "
+                "loud toward customer-facing. The OAM plane of a transport LSP has no "
+                "business crossing a customer boundary: it exposes the operator's own "
+                "connectivity-verification and performance-measurement traffic.",
+    },
+    "SRM-GACH-CHANNEL-INVALID": {
+        "severity": "medium", "klass": "ATTACK", "category": "oam",
+        "title": "G-ACh Channel Type unassigned, reserved or experimental",
+        "desc": "The ACH Channel Type is not an IANA-assigned value, is the reserved "
+                "0x0000, or falls in the 0x7FF8-0x7FFF experimental range. No "
+                "conforming implementation emits an unassigned channel type on a "
+                "production LSP; it is a crafted or fuzzed frame, or gear running a "
+                "private extension that the operator has not declared.",
+    },
+    "SRM-GACH-HEADER-INVALID": {
+        "severity": "medium", "klass": "ATTACK", "category": "oam",
+        "title": "Malformed Associated Channel Header",
+        "desc": "RFC 5586 s3.2 requires the ACH Version and Reserved fields to be zero. "
+                "A non-zero value is either a crafted frame or an implementation whose "
+                "framing cannot be trusted; in both cases the channel payload below it "
+                "should not be relied upon.",
+    },
     "SRM-CONFIG-BPF-OVERRIDE": {
         "severity": "info", "klass": "POSTURE", "category": "config",
         "title": "Non-empty BPF filter supplied",
@@ -1162,6 +1657,466 @@ def classify_mpls_payload(data: bytes) -> str:
     return "unknown"
 
 
+def parse_ach(data: bytes) -> Dict[str, Any]:
+    """Decode an RFC 5586 Associated Channel Header.
+
+    Four octets: 0001 | Version (4b) | Reserved (8b) | Channel Type (16b).
+    Raises ParseError when the frame is too short or the first nibble is not
+    0001 - callers reach here only after classify_mpls_payload said 'pw-ach',
+    but the guard keeps the parser honest when called directly.
+    """
+    if len(data) < ACH_HEADER_LEN:
+        raise ParseError("truncated associated channel header")
+    if (data[0] >> 4) != ACH_FIRST_NIBBLE:
+        raise ParseError("not an associated channel header")
+    return {
+        "version": data[0] & 0x0F,
+        "reserved": data[1],
+        "channel": struct.unpack_from("!H", data, 2)[0],
+        "payload": data[ACH_HEADER_LEN:],
+    }
+
+
+def walk_interface_params(data: bytes,
+                          cap: int = 32) -> List[Dict[str, Any]]:
+    """Walk pseudowire Interface Parameter sub-TLVs (RFC 8077 s5.3).
+
+    Parameter ID(8) | Length(8) | Value, where Length INCLUDES the two header
+    octets - so a VCCV parameter is ID 0x0C, Length 0x04, then one CC octet
+    and one CV octet.  A Length below 2 would not advance and is rejected.
+    """
+    out: List[Dict[str, Any]] = []
+    off = 0
+    guard = 0
+    while off + 2 <= len(data) and guard < cap:
+        guard += 1
+        pid = data[off]
+        plen = data[off + 1]
+        if plen < 2 or off + plen > len(data):
+            out.append({"id": pid, "length": plen, "value": b"",
+                        "malformed": True})
+            break
+        out.append({"id": pid, "length": plen,
+                    "value": data[off + 2:off + plen], "malformed": False})
+        off += plen
+    return out
+
+
+def parse_pwid_fec(value: bytes) -> List[Dict[str, Any]]:
+    """Decode PWid (128) and Generalized PWid (129) FEC elements.
+
+    Only the PWid form carries interface parameters inline; the Generalized
+    form's live in LDP_TLV_PW_INTERFACE_PARAMS.  PW Info Length counts the
+    PW ID field PLUS the interface parameters, and a value of 0 is the
+    wildcard form with no PW ID and no parameters at all.
+    """
+    out: List[Dict[str, Any]] = []
+    off = 0
+    guard = 0
+    while off < len(value) and guard < 16:
+        guard += 1
+        etype = value[off]
+        if etype not in (LDP_FEC_PWID, LDP_FEC_GENERALIZED_PWID):
+            break
+        if off + 4 > len(value):
+            break
+        cbit = (value[off + 1] >> 7) & 0x01
+        pw_type = struct.unpack_from("!H", value, off + 1)[0] & 0x7FFF
+        info_len = value[off + 3]
+        cursor = off + 4
+        rec: Dict[str, Any] = {"fec_type": etype, "control_word": bool(cbit),
+                               "pw_type": pw_type, "info_len": info_len,
+                               "iface_params": [], "wildcard": info_len == 0}
+        if etype == LDP_FEC_PWID:
+            if info_len == 0:
+                # Wildcard: Group ID only, no PW ID, no parameters.
+                if cursor + 4 > len(value):
+                    break
+                rec["group_id"] = struct.unpack_from("!I", value, cursor)[0]
+                cursor += 4
+            else:
+                if cursor + 8 > len(value) or info_len < 4:
+                    break
+                rec["group_id"] = struct.unpack_from("!I", value, cursor)[0]
+                rec["pw_id"] = struct.unpack_from("!I", value, cursor + 4)[0]
+                cursor += 8
+                params_len = info_len - 4
+                if cursor + params_len > len(value):
+                    break
+                rec["iface_params"] = walk_interface_params(
+                    value[cursor:cursor + params_len])
+                cursor += params_len
+        else:
+            # Generalized: AGI / SAII / TAII, each Type|Length|Value.
+            if cursor + info_len > len(value):
+                break
+            cursor += info_len
+        out.append(rec)
+        off = cursor
+    return out
+
+
+def parse_vccv_param(value: bytes) -> Optional[Dict[str, Any]]:
+    """RFC 5085 s5.3.1 VCCV interface parameter value: CC byte then CV byte."""
+    if len(value) < 2:
+        return None
+    cc, cv = value[0], value[1]
+    return {
+        "cc": cc, "cv": cv,
+        "cc_control_word": bool(cc & VCCV_CC_CONTROL_WORD),
+        "cc_router_alert": bool(cc & VCCV_CC_ROUTER_ALERT),
+        "cc_ttl_expiry": bool(cc & VCCV_CC_TTL_EXPIRY),
+        "cc_reserved": cc & VCCV_CC_RESERVED,
+        "cv_icmp_ping": bool(cv & VCCV_CV_ICMP_PING),
+        "cv_lsp_ping": bool(cv & VCCV_CV_LSP_PING),
+        "cv_reserved": cv & VCCV_CV_RESERVED,
+    }
+
+
+def walk_ipv6_options(area: bytes, cap: int = 32) -> List[Dict[str, Any]]:
+    """Walk a Hop-by-Hop / Destination Options TLV area (RFC 8200 s4.2).
+
+    Pad1 is a single octet with no length; every other option is
+    Type(1) | Opt Data Len(1) | data.  A truncated option terminates the walk
+    and is reported through the 'truncated' key rather than raising, because
+    the caller must still be able to report the options it did parse.
+    """
+    out: List[Dict[str, Any]] = []
+    off = 0
+    guard = 0
+    while off < len(area) and guard < cap:
+        guard += 1
+        otype = area[off]
+        if otype == IPV6_OPT_PAD1:
+            off += 1
+            continue
+        if off + 2 > len(area):
+            out.append({"type": otype, "offset": off, "truncated": True,
+                        "data": b"", "length": None})
+            break
+        olen = area[off + 1]
+        dstart = off + 2
+        if dstart + olen > len(area):
+            out.append({"type": otype, "offset": off, "truncated": True,
+                        "data": area[dstart:], "length": olen})
+            break
+        out.append({"type": otype, "offset": off, "truncated": False,
+                    "length": olen, "data": area[dstart:dstart + olen]})
+        off = dstart + olen
+    return out
+
+
+def ioam_nodelen_expected(trace_type: int) -> int:
+    """Sum of the 4-octet units the set Trace-Type bits imply.
+
+    Bit 0 is the MOST significant bit of the 24-bit field.  Bit 22 (Opaque
+    State Snapshot) is variable and excluded from NodeLen; bit 23 contributes
+    no data field.
+    """
+    total = 0
+    for bit, units in IOAM_TRACE_UNITS.items():
+        if trace_type & (1 << (23 - bit)):
+            total += units
+    return total
+
+
+def ioam_trace_bits_set(trace_type: int) -> List[int]:
+    """Which Trace-Type bit positions are set, in RFC bit numbering."""
+    return [bit for bit in range(24) if trace_type & (1 << (23 - bit))]
+
+
+def parse_ioam_option(data: bytes) -> Dict[str, Any]:
+    """RFC 9486 Fig. 1 IOAM option body (the part after Type/Len).
+
+    The IPv6 option data begins with Reserved(8) | IOAM Opt-Type(8), so the
+    IOAM option type is the SECOND octet of the option data, not the first.
+    """
+    if len(data) < 2:
+        raise ParseError("truncated IOAM option")
+    return {"reserved": data[0], "ioam_type": data[1], "body": data[2:]}
+
+
+def parse_ioam_trace(body: bytes) -> Dict[str, Any]:
+    """RFC 9197 s4.4.1 trace option header."""
+    if len(body) < IOAM_TRACE_HEADER_LEN:
+        raise ParseError("truncated IOAM trace header")
+    ns, packed = struct.unpack_from("!HH", body, 0)
+    node_len = (packed >> 11) & 0x1F
+    flags = (packed >> 7) & 0x0F
+    remaining = packed & 0x7F
+    w2 = struct.unpack_from("!I", body, 4)[0]
+    trace_type = (w2 >> 8) & 0xFFFFFF
+    reserved = w2 & 0xFF
+    return {"namespace": ns, "node_len": node_len, "flags": flags,
+            "remaining_len": remaining, "trace_type": trace_type,
+            "reserved": reserved,
+            "overflow": bool(flags & IOAM_TRACE_FLAG_OVERFLOW),
+            "flags_mbz": flags & IOAM_TRACE_FLAG_MBZ,
+            "data": body[IOAM_TRACE_HEADER_LEN:]}
+
+
+def parse_lspping(data: bytes) -> Dict[str, Any]:
+    """Decode an RFC 8029 MPLS Echo Request / Reply header.
+
+    Version Number is 16 bits (value 1) and Global Flags is the other half of
+    the first word - not an 8-bit version plus padding.
+    """
+    if len(data) < LSPPING_HEADER_LEN:
+        raise ParseError("truncated MPLS echo header")
+    version, gflags = struct.unpack_from("!HH", data, 0)
+    msg_type, reply_mode, rc, rsc = struct.unpack_from("!BBBB", data, 4)
+    handle, seq = struct.unpack_from("!II", data, 8)
+    return {
+        "version": version,
+        "global_flags": gflags,
+        "msg_type": msg_type,
+        "reply_mode": reply_mode,
+        "return_code": rc,
+        "return_subcode": rsc,
+        "handle": handle,
+        "sequence": seq,
+        "tlvs_off": LSPPING_HEADER_LEN,
+    }
+
+
+def walk_lspping_tlvs(data: bytes, off: int,
+                      cap: int = 64) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Walk a top-level TLV block.
+
+    Returns (tlvs, error).  RFC 8029 s3: Length counts the Value octets
+    EXCLUDING padding, and the Value is zero-padded to a 4-octet boundary, so
+    the step to the next TLV is 4 + roundup4(Length).
+    """
+    out: List[Dict[str, Any]] = []
+    guard = 0
+    while off + 4 <= len(data) and guard < cap:
+        guard += 1
+        t_type, t_len = struct.unpack_from("!HH", data, off)
+        val_off = off + 4
+        if val_off + t_len > len(data):
+            return out, "TLV length overruns the datagram"
+        padded = t_len + ((-t_len) % 4)
+        out.append({
+            "type": t_type,
+            "length": t_len,
+            "value": data[val_off:val_off + t_len],
+            "offset": off,
+            "padded_len": padded,
+            "mandatory": t_type <= LSPPING_TLV_MANDATORY_MAX,
+        })
+        if val_off + padded > len(data):
+            return out, "TLV padding overruns the datagram"
+        off += 4 + padded
+    if off != len(data) and guard < cap:
+        return out, "trailing octets after the final TLV"
+    return out, None
+
+
+def walk_fec_subtlvs(value: bytes,
+                     cap: int = 32) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Walk the sub-TLVs inside a Target FEC Stack TLV (same 4-octet rules)."""
+    out: List[Dict[str, Any]] = []
+    off = 0
+    guard = 0
+    while off + 4 <= len(value) and guard < cap:
+        guard += 1
+        s_type, s_len = struct.unpack_from("!HH", value, off)
+        v_off = off + 4
+        if v_off + s_len > len(value):
+            return out, "FEC sub-TLV length overruns the TLV"
+        padded = s_len + ((-s_len) % 4)
+        out.append({"type": s_type, "length": s_len,
+                    "value": value[v_off:v_off + s_len], "offset": off})
+        off += 4 + padded
+    return out, None
+
+
+def parse_fec_prefix_sid(value: bytes, family: str) -> Dict[str, Any]:
+    """RFC 8287 s5.1 / s5.2 IGP-Prefix Segment ID sub-TLV.
+
+    v4 (sub-TLV 34): Prefix(4) | PrefixLen(1) | Protocol(1) | Reserved(2)  = 8
+    v6 (sub-TLV 35): Prefix(16) | PrefixLen(1) | Protocol(1) | Reserved(2) = 20
+
+    These carry NO SID value and no index: RFC 8287 leaves resolution of the
+    segment to the responder's own IGP database.  Anything built on top of
+    this can therefore only reason about the PREFIX.
+    """
+    alen = 4 if family == "ipv4" else 16
+    need = alen + 4
+    if len(value) < need:
+        raise ParseError("truncated IGP-Prefix Segment ID sub-TLV")
+    raw = value[:alen]
+    plen = value[alen]
+    proto = value[alen + 1]
+    reserved = struct.unpack_from("!H", value, alen + 2)[0]
+    max_plen = 32 if family == "ipv4" else 128
+    prefix = None
+    if 1 <= plen <= max_plen:
+        try:
+            addr = (ipaddress.IPv4Address(raw) if family == "ipv4"
+                    else ipaddress.IPv6Address(raw))
+            prefix = str(ipaddress.ip_network("%s/%d" % (addr, plen), strict=False))
+        except (ValueError, ipaddress.AddressValueError):
+            prefix = None
+    return {"prefix": prefix, "prefix_len": plen, "protocol": proto,
+            "reserved": reserved, "max_prefix_len": max_plen,
+            "value_len": len(value), "expected_len": need}
+
+
+# RFC 8287 s5.3 Adjacency types.  Parsed only far enough to validate framing:
+# the node identifiers are NOT matched against this module's SR ledger, because
+# doing so would mean guessing whether a 4-octet field is an OSPF Router ID or
+# a truncated IS-IS System ID.
+FEC_ADJ_TYPES: Dict[int, Tuple[str, int]] = {
+    0: ("unnumbered", 4),
+    1: ("parallel", 4),
+    4: ("ipv4-non-parallel", 4),
+    6: ("ipv6-non-parallel", 16),
+}
+FEC_PROTOCOL_ANY = 0
+FEC_PROTOCOL_OSPF = 1
+FEC_PROTOCOL_ISIS = 2
+
+
+def parse_fec_adj_sid(value: bytes) -> Dict[str, Any]:
+    """RFC 8287 s5.3 IGP-Adjacency Segment ID sub-TLV - framing only."""
+    if len(value) < 4:
+        raise ParseError("truncated IGP-Adjacency Segment ID sub-TLV")
+    adj_type = value[0]
+    proto = value[1]
+    reserved = struct.unpack_from("!H", value, 2)[0]
+    info = FEC_ADJ_TYPES.get(adj_type)
+    expected = None
+    if info is not None:
+        iface = info[1]
+        # Advertising + Receiving Node Identifier: 4 octets for OSPF or a
+        # zeroed Protocol 0, 6 for IS-IS.
+        node = 6 if proto == FEC_PROTOCOL_ISIS else 4
+        expected = 4 + 2 * iface + 2 * node
+    return {"adj_type": adj_type, "adj_type_name": info[0] if info else None,
+            "protocol": proto, "reserved": reserved,
+            "value_len": len(value), "expected_len": expected}
+
+
+def fec_subtlv_family(stype: int) -> Optional[str]:
+    """'ipv4', 'ipv6', 'neutral' or None (unknown) for a FEC sub-TLV type."""
+    if stype in LSPPING_FEC_V4:
+        return "ipv4"
+    if stype in LSPPING_FEC_V6:
+        return "ipv6"
+    if stype in LSPPING_FEC_NEUTRAL:
+        return "neutral"
+    return None
+
+
+def lspping_in_loopback(addr: str) -> bool:
+    """Is this echo destination inside the RFC 8029 s4.3 loopback range?"""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    if ip.version == 4:
+        return ip in LSPPING_LOOPBACK_V4
+    # An IPv4-mapped v6 destination is the v6 form of the same rule.
+    return ip in LSPPING_LOOPBACK_V6
+
+
+def parse_measurement(data: bytes, family: str) -> Dict[str, Any]:
+    """Decode an RFC 6374 LM / DM / combined measurement message header.
+
+    `family` is 'lm', 'dm' or 'lmdm' and selects the word-2 layout, which is
+    the only part that differs between the three.  The caller derives it from
+    the G-ACh Channel Type via GACH_MEASUREMENT.
+    """
+    if len(data) < 8:
+        raise ParseError("truncated measurement header")
+    version = data[0] >> 4
+    flags = data[0] & 0x0F
+    ctrl = data[1]
+    msg_len = struct.unpack_from("!H", data, 2)[0]
+
+    out: Dict[str, Any] = {
+        "version": version,
+        "flags": flags,
+        "r": bool(flags & MEAS_FLAG_R),
+        "t": bool(flags & MEAS_FLAG_T),
+        "flags_mbz": flags & MEAS_FLAG_MBZ,
+        "control_code": ctrl,
+        "msg_len": msg_len,
+        "family": family,
+        "dflags": None, "dflags_mbz": None, "otf": None,
+        "qtf": None, "rtf": None, "rptf": None,
+    }
+
+    w2 = struct.unpack_from("!I", data, 4)[0]
+    if family == "lm":
+        out["dflags"] = (w2 >> 28) & 0x0F
+        out["dflags_mbz"] = out["dflags"] & MEAS_DFLAG_MBZ
+        out["otf"] = (w2 >> 24) & 0x0F
+        out["reserved"] = w2 & 0x00FFFFFF
+    elif family == "dm":
+        out["qtf"] = (w2 >> 28) & 0x0F
+        out["rtf"] = (w2 >> 24) & 0x0F
+        out["rptf"] = (w2 >> 20) & 0x0F
+        out["reserved"] = w2 & 0x000FFFFF
+    else:                                  # lmdm
+        out["dflags"] = (w2 >> 28) & 0x0F
+        out["dflags_mbz"] = out["dflags"] & MEAS_DFLAG_MBZ
+        out["qtf"] = (w2 >> 24) & 0x0F
+        out["rtf"] = (w2 >> 20) & 0x0F
+        out["rptf"] = (w2 >> 16) & 0x0F
+        out["reserved"] = w2 & 0x0000FFFF
+
+    if len(data) >= 12:
+        w3 = struct.unpack_from("!I", data, 8)[0]
+        out["session_id"] = w3 >> 8
+        # DS is only meaningful when T = 1 (RFC 6374 s3.1).  Recorded as None
+        # otherwise so no rule can accidentally reason about it.
+        out["ds"] = (w3 & 0xFF) if out["t"] else None
+    else:
+        out["session_id"] = None
+        out["ds"] = None
+
+    # Offsets of the fields a conforming QUERY must leave zero.  These differ
+    # per family and are read straight off the RFC 6374 diagrams:
+    #   LM    : OriginTS 12, Counter1 20, Counter2 28, C3 36, C4 44  (52 total)
+    #   DM    : TS1 12, TS2 20, TS3 28, TS4 36                       (44 total)
+    #   LM+DM : TS1 12, TS2 20, TS3 28, TS4 36, C1 44, C2 52, C3 60, C4 68 (76)
+    out["counter2_off"] = {"lm": 28, "dm": None, "lmdm": 52}[family]
+    out["timestamp2_off"] = {"lm": None, "dm": 20, "lmdm": 20}[family]
+    return out
+
+
+def _u64(data: bytes, off: Optional[int]) -> Optional[int]:
+    """Read a 64-bit field, or None when it is absent or truncated away."""
+    if off is None or off + 8 > len(data):
+        return None
+    return struct.unpack_from("!Q", data, off)[0]
+
+
+def measurement_family(channel: int) -> Optional[str]:
+    """Map a G-ACh Channel Type to the RFC 6374 word-2 layout family."""
+    if channel in (GACH_DLM, GACH_ILM):
+        return "lm"
+    if channel == GACH_DM:
+        return "dm"
+    if channel in (GACH_DLM_DM, GACH_ILM_DM):
+        return "lmdm"
+    return None
+
+
+def gach_channel_kind(channel: int) -> str:
+    """Classify a Channel Type against the IANA registry: 'assigned',
+    'reserved', 'experimental' or 'unassigned'."""
+    if channel in GACH_ASSIGNED:
+        return "assigned"
+    if channel == 0x0000:
+        return "reserved"
+    if channel in GACH_EXPERIMENTAL:
+        return "experimental"
+    return "unassigned"
+
+
 def inner_destination(data: bytes, kind: str) -> Optional[str]:
     """Destination address of the payload below the bottom of stack."""
     try:
@@ -1194,14 +2149,22 @@ def parse_ethernet(frame: bytes) -> Tuple[int, bytes, List[int]]:
 
 
 def walk_ipv6_headers(data: bytes) -> Tuple[Optional[Dict[str, Any]], int,
-                                            Optional[bytes], int, bool]:
+                                            Optional[bytes], int, bool,
+                                            List[Tuple[int, bytes]]]:
     """Walk the whole IPv6 extension-header chain.
 
     Returns (srh_or_None, final_next_header, raw_srh_or_None, payload_offset,
-    is_later_fragment).  Unlike the first revision this does NOT stop at the
-    Routing Header: it records the SRH and keeps walking, because the upper
-    layer protocol behind the chain is what carries LDP, BGP and RSVP-TE over
-    IPv6 and the module was blind to all three.
+    is_later_fragment, option_areas).  Unlike the first revision this does NOT
+    stop at the Routing Header: it records the SRH and keeps walking, because
+    the upper layer protocol behind the chain is what carries LDP, BGP and
+    RSVP-TE over IPv6 and the module was blind to all three.
+
+    option_areas is a list of (header_protocol, option_bytes) for every
+    Hop-by-Hop and Destination Options header traversed, where option_bytes is
+    the TLV area with the 2-byte Next Header / Hdr Ext Len prefix already
+    stripped.  The chain used to be walked for length only and the options
+    thrown away, which made IOAM (RFC 9486) invisible - it rides in exactly
+    these two headers.
     """
     if len(data) < 40:
         raise ParseError("truncated IPv6 header")
@@ -1211,9 +2174,10 @@ def walk_ipv6_headers(data: bytes) -> Tuple[Optional[Dict[str, Any]], int,
     srh: Optional[Dict[str, Any]] = None
     raw: Optional[bytes] = None
     later_fragment = False
+    opts: List[Tuple[int, bytes]] = []
     while hops < _MAX_IPV6_EXT_CHAIN:
         if nh not in IPV6_EXT_HEADERS:
-            return srh, nh, raw, off, later_fragment
+            return srh, nh, raw, off, later_fragment, opts
         if nh == IPPROTO_IPV6_FRAG:
             if off + 8 > len(data):
                 raise ParseError("truncated fragment header")
@@ -1242,8 +2206,12 @@ def walk_ipv6_headers(data: bytes) -> Tuple[Optional[Dict[str, Any]], int,
             # A malformed header AFTER a valid SRH must not suppress the SRH
             # finding; report what was parsed and dispatch no transport.
             if srh is not None:
-                return srh, this_nh, raw, len(data), later_fragment
+                return srh, this_nh, raw, len(data), later_fragment, opts
             raise ParseError("extension header length overruns packet")
+        if nh in (IPPROTO_HOPOPT, IPPROTO_IPV6_OPTS):
+            # RFC 8200 s4.3/s4.6: the option area is everything after the
+            # 2-byte Next Header / Hdr Ext Len prefix.
+            opts.append((nh, data[off + 2:off + ext_len]))
         nh = this_nh
         off += ext_len
         hops += 1
@@ -2376,6 +3344,13 @@ class SRMPLSEngine:
                        payload_len=len(payload), classified=kind)
             return
 
+        # The G-ACh sits below the bottom of stack with no IP header at all.
+        # It is reachable only through a label stack, which is why this module
+        # owns it (see the bfdwatch seam, handled in _handle_gach).
+        if kind == "pw-ach":
+            self._handle_gach(payload, ts, entries, stack_str, labels)
+            return
+
         inner_dst = inner_destination(payload, kind)
         inner_src = None
         try:
@@ -2392,6 +3367,591 @@ class SRMPLSEngine:
         # An SRH can be tunnelled under MPLS; keep walking.
         if kind == "ipv6":
             self.handle_ipv6(payload, ts, under_mpls=True)
+
+    # -- MPLS OAM: G-ACh ----------------------------------------------------
+
+    def _handle_gach(self, payload: bytes, ts: float, entries: List[LSE],
+                     stack_str: str, labels: List[int]) -> None:
+        """Decode an RFC 5586 Associated Channel and route its payload.
+
+        THE bfdwatch SEAM LIVES HERE.  Channel Types 0x0021 and 0x0057 mean
+        'the payload is an ordinary IP packet' by IANA assignment, so they are
+        handed to the IP path and anything IP/UDP-rooted below them - BFD
+        included - belongs to the module that owns IP/UDP.  Every other
+        channel type has no IP header anywhere and is reachable only through
+        a label stack, so it stays here.
+
+        This module therefore reports the channel and any structural problem
+        and stops.  It does NOT decode BFD session state: an ACH-encapsulated
+        BFD session is a different session from any IP/UDP one, so sharing
+        state across the seam would be wrong rather than merely redundant.
+        """
+        try:
+            ach = parse_ach(payload)
+        except ParseError:
+            self._fire("SRM-GACH-HEADER-INVALID", "ach:truncated", ts,
+                       reason="truncated or non-ACH first nibble",
+                       payload_len=len(payload), stack=labels)
+            return
+
+        self.stats["gach"] += 1
+        channel = ach["channel"]
+        kind = gach_channel_kind(channel)
+        has_gal = any(e.label == LABEL_GAL for e in entries)
+
+        ev = {"channel": channel, "channel_hex": "0x%04X" % channel,
+              "channel_name": GACH_ASSIGNED.get(channel), "stack": labels,
+              "gal_present": has_gal}
+
+        # EXPOSURE of the operator's own OAM plane across a customer boundary.
+        if self._ce_gate(ts):
+            self._fire("SRM-GACH-ON-CE-PORT", "gach:%04X" % channel, ts,
+                       declared_role=self.cfg.role, **ev)
+
+        # RFC 5586 s3.2: Version and Reserved MUST be zero.
+        if ach["version"] != 0:
+            self._fire("SRM-GACH-HEADER-INVALID", "ach:version", ts,
+                       field="version", value=ach["version"], **ev)
+        if ach["reserved"] != 0:
+            self._fire("SRM-GACH-HEADER-INVALID", "ach:reserved", ts,
+                       field="reserved", value=ach["reserved"], **ev)
+
+        if kind != "assigned":
+            self._fire("SRM-GACH-CHANNEL-INVALID", "gach:%04X" % channel, ts,
+                       range_kind=kind, **ev)
+            return
+
+        # -- the seam: hand an IP payload to the IP path ---------------------
+        if channel in GACH_IP_PAYLOAD:
+            inner = ach["payload"]
+            try:
+                if channel == GACH_IPV4:
+                    # handle_ipv4 takes no under_mpls flag: that flag exists
+                    # only so srv6-category findings can say how the SRH
+                    # arrived, and there is no IPv4 SRH to qualify.
+                    self.handle_ipv4(inner, ts)
+                else:
+                    self.handle_ipv6(inner, ts, under_mpls=True)
+            except ParseError:
+                pass
+            return
+
+        # RFC 6374 measurement: five channel types, three message layouts.
+        if channel in GACH_MEASUREMENT:
+            self._check_measurement(ach["payload"], ts, channel, ev)
+            return
+
+    def _check_measurement(self, body: bytes, ts: float, channel: int,
+                           ev: Dict[str, Any]) -> None:
+        """RFC 6374 loss / delay measurement structural and consistency rules.
+
+        Deliberately silent about whether counters or timestamps are TRUTHFUL.
+        That cannot be judged from the wire without a trusted reference clock
+        and a baseline, so no rule here asserts it.
+        """
+        name, fixed = GACH_MEASUREMENT[channel]
+        family = measurement_family(channel)
+        if family is None:                      # unreachable; keeps mypy honest
+            return
+        self.stats["measurement"] += 1
+        base = dict(ev)
+        base.update({"measurement": name, "fixed_size": fixed})
+        key = "meas:%04X" % channel
+
+        # -- length ----------------------------------------------------------
+        if len(body) < fixed:
+            self._fire("SRM-OAM-MSG-MALFORMED", key + ":short", ts,
+                       reason="shorter than the fixed size for this channel type",
+                       actual=len(body), expected_min=fixed, **base)
+            return
+
+        try:
+            m = parse_measurement(body, family)
+        except ParseError as exc:
+            self._fire("SRM-OAM-MSG-MALFORMED", key + ":parse", ts,
+                       reason=str(exc), actual=len(body), expected_min=fixed, **base)
+            return
+
+        base["session_id"] = m["session_id"]
+        base["r"] = m["r"]
+        base["t"] = m["t"]
+        base["control_code"] = m["control_code"]
+
+        # Message Length must cover the fixed header and sit inside the frame.
+        if m["msg_len"] < fixed or m["msg_len"] > len(body):
+            self._fire("SRM-OAM-MSG-MALFORMED", key + ":msglen", ts,
+                       reason="Message Length disagrees with the frame",
+                       msg_len=m["msg_len"], actual=len(body),
+                       expected_min=fixed, **base)
+
+        # TLV block: walk it only as far as the message claims to be.
+        tlv_off = fixed
+        end = min(m["msg_len"], len(body)) if m["msg_len"] >= fixed else len(body)
+        guard = 0
+        while tlv_off + 2 <= end and guard < 64:
+            guard += 1
+            t_type = body[tlv_off]
+            t_len = body[tlv_off + 1]
+            if tlv_off + 2 + t_len > end:
+                self._fire("SRM-OAM-MSG-MALFORMED", key + ":tlv", ts,
+                           reason="TLV object overruns the message",
+                           tlv_type=t_type, tlv_len=t_len, tlv_offset=tlv_off,
+                           message_end=end, mandatory=t_len <= MEAS_TLV_MANDATORY_MAX,
+                           **base)
+                break
+            tlv_off += 2 + t_len
+
+        # -- illegal field values -------------------------------------------
+        if m["version"] != MEAS_VERSION:
+            self._fire("SRM-OAM-FIELD-INVALID", key + ":version", ts,
+                       field="version", value=m["version"],
+                       required=MEAS_VERSION, **base)
+        if m["flags_mbz"]:
+            self._fire("SRM-OAM-FIELD-INVALID", key + ":flags-mbz", ts,
+                       field="flags-must-be-zero", value=m["flags_mbz"], **base)
+        if m["dflags_mbz"]:
+            self._fire("SRM-OAM-FIELD-INVALID", key + ":dflags-mbz", ts,
+                       field="dflags-must-be-zero", value=m["dflags_mbz"], **base)
+
+        legal = MEAS_RESPONSE_CODES if m["r"] else MEAS_QUERY_CODES
+        if m["control_code"] not in legal:
+            # Distinguish "no such code" from "right code, wrong direction":
+            # the second is a contradiction, not an unassigned value.
+            other = MEAS_QUERY_CODES if m["r"] else MEAS_RESPONSE_CODES
+            if m["control_code"] in other:
+                self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":ctrl-direction", ts,
+                           rule="control code belongs to the other direction",
+                           **base)
+            else:
+                self._fire("SRM-OAM-FIELD-INVALID", key + ":ctrl", ts,
+                           field="control-code", value=m["control_code"],
+                           direction="response" if m["r"] else "query", **base)
+
+        for fld in ("otf", "qtf", "rtf", "rptf"):
+            val = m[fld]
+            if val is not None and val > MEAS_TS_MAX_ASSIGNED:
+                self._fire("SRM-OAM-FIELD-INVALID", key + ":" + fld, ts,
+                           field=fld, value=val,
+                           max_assigned=MEAS_TS_MAX_ASSIGNED, **base)
+
+        # -- self-contradiction ----------------------------------------------
+        # RFC 6374 s3.2: DM has the T flag set, always.
+        if family in ("dm", "lmdm") and not m["t"]:
+            self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":dm-t-clear", ts,
+                       rule="delay measurement with the T flag clear", **base)
+
+        if not m["r"]:
+            # A QUERY may not pre-fill the responder's fields.
+            if m["rtf"] or m["rptf"]:
+                self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":query-rtf", ts,
+                           rule="query carries a responder timestamp format",
+                           rtf=m["rtf"], rptf=m["rptf"], **base)
+            c2 = _u64(body, m["counter2_off"])
+            if c2:
+                self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":query-counter2", ts,
+                           rule="query with a non-zero Counter 2", counter2=c2, **base)
+            t2 = _u64(body, m["timestamp2_off"])
+            if t2:
+                self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":query-ts2", ts,
+                           rule="query with a non-zero Timestamp 2", timestamp2=t2,
+                           **base)
+        else:
+            # RFC 6374 s3.2: a responder's RTF is either the format the
+            # querier used or the one the responder said it preferred.
+            if m["rtf"] is not None and m["rtf"] not in (m["qtf"], m["rptf"]):
+                self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":rtf-unrelated", ts,
+                           rule="response RTF matches neither QTF nor RPTF",
+                           qtf=m["qtf"], rtf=m["rtf"], rptf=m["rptf"], **base)
+            # A RESPONSE must leave Timestamp 2 zero (RFC 6374 s3.2).
+            t2 = _u64(body, m["timestamp2_off"])
+            if t2:
+                self._fire("SRM-OAM-SELF-CONTRADICTORY", key + ":resp-ts2", ts,
+                           rule="response with a non-zero Timestamp 2",
+                           timestamp2=t2, **base)
+
+    # -- LSP Ping (RFC 8029) ------------------------------------------------
+
+    def handle_lspping(self, body: bytes, src: str, dst: str, ts: float,
+                       sport: int, dport: int) -> None:
+        """RFC 8029 MPLS Echo Request / Reply.
+
+        Structural and containment rules only.  Whether the FEC a request
+        names actually exists in the forwarding plane is not knowable from a
+        passive tap, so no rule asserts it; the one rule that reasons beyond a
+        single datagram is the SR-ledger cross-check, which says so in its
+        own evidence.
+        """
+        try:
+            pdu = parse_lspping(body)
+        except ParseError as exc:
+            self._fire("SRM-LSPPING-MALFORMED", "lspping:%s:trunc" % src, ts,
+                       src=src, dst=dst, reason=str(exc), length=len(body),
+                       expected_min=LSPPING_HEADER_LEN)
+            return
+
+        self.stats["lspping"] += 1
+        family = "ipv6" if ":" in dst else "ipv4"
+        is_request = pdu["msg_type"] in (LSPPING_MSG_ECHO_REQUEST,
+                                         LSPPING_MSG_PROXY_REQUEST)
+        ev = {"src": src, "dst": dst, "sport": sport, "dport": dport,
+              "family": family, "msg_type": pdu["msg_type"],
+              "reply_mode": pdu["reply_mode"], "return_code": pdu["return_code"],
+              "handle": pdu["handle"], "sequence": pdu["sequence"]}
+        key = "lspping:%s" % src
+
+        if self._ce_gate(ts):
+            self._fire("SRM-LSPPING-ON-CE-PORT", key, ts,
+                       declared_role=self.cfg.role, **ev)
+
+        # -- framing ---------------------------------------------------------
+        if pdu["version"] != LSPPING_VERSION:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":version", ts,
+                       field="version", value=pdu["version"],
+                       required=LSPPING_VERSION, **ev)
+        if pdu["msg_type"] not in LSPPING_MSG_ASSIGNED:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":msgtype", ts,
+                       field="message-type", value=pdu["msg_type"], **ev)
+        if pdu["reply_mode"] not in LSPPING_REPLY_ASSIGNED:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":replymode", ts,
+                       field="reply-mode", value=pdu["reply_mode"], **ev)
+        elif pdu["reply_mode"] == LSPPING_REPLY_UDP_ROUTER_ALERT:
+            self._fire("SRM-LSPPING-DEPRECATED-FEATURE", key + ":replymode3", ts,
+                       feature="reply-mode-3-router-alert",
+                       deprecated_by="RFC 9570", **ev)
+
+        # -- containment: the whole point of the 127/8 convention ------------
+        if is_request and not lspping_in_loopback(dst):
+            self._fire("SRM-LSPPING-DST-NOT-LOOPBACK", key + ":dst", ts,
+                       expected_range=str(LSPPING_LOOPBACK_V4 if family == "ipv4"
+                                          else LSPPING_LOOPBACK_V6), **ev)
+
+        # -- TLVs ------------------------------------------------------------
+        tlvs, err = walk_lspping_tlvs(body, pdu["tlvs_off"])
+        if err:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":tlv", ts,
+                       reason=err, tlv_count=len(tlvs), **ev)
+
+        for t in tlvs:
+            if t["type"] == LSPPING_TLV_DOWNSTREAM_MAP:
+                self._fire("SRM-LSPPING-DEPRECATED-FEATURE", key + ":dsmap", ts,
+                           feature="downstream-mapping-tlv-2",
+                           deprecated_by="RFC 8029 (use TLV 20, DDMAP)", **ev)
+                self._check_lspping_addr_type(t, ts, key, ev)
+            elif t["type"] == LSPPING_TLV_DDMAP:
+                self._check_lspping_addr_type(t, ts, key, ev)
+            elif t["type"] in (LSPPING_TLV_TARGET_FEC,
+                               LSPPING_TLV_REVERSE_PATH_FEC):
+                self._check_fec_stack(t, ts, key, ev, family)
+
+    def _check_lspping_addr_type(self, tlv: Dict[str, Any], ts: float,
+                                 key: str, ev: Dict[str, Any]) -> None:
+        """Downstream (Detailed) Mapping Address Type vs its fixed K length.
+
+        The registry pins an exact octet count per address type (IPv4 numbered
+        16, IPv6 numbered 40, IPv6 unnumbered 28, Non-IP 12), so a mismatch is
+        decidable from one datagram.
+        """
+        v = tlv["value"]
+        if len(v) < 4:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":dmap-short", ts,
+                       reason="downstream mapping shorter than its fixed header",
+                       tlv_type=tlv["type"], tlv_len=tlv["length"], **ev)
+            return
+        # DDMAP: MTU(16) | AddrType(8) | DS flags(8) ... ; DSMAP has the same
+        # first three fields in the same order.
+        addr_type = v[2]
+        if addr_type not in LSPPING_ADDR_TYPE_LEN:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":dmap-addrtype", ts,
+                       field="downstream-address-type", value=addr_type,
+                       tlv_type=tlv["type"], **ev)
+            return
+        name, klen = LSPPING_ADDR_TYPE_LEN[addr_type]
+        if tlv["length"] < klen:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":dmap-klen", ts,
+                       field="downstream-address-type-length",
+                       address_type=addr_type, address_type_name=name,
+                       expected_min=klen, actual=tlv["length"],
+                       tlv_type=tlv["type"], **ev)
+
+    def _check_fec_stack(self, tlv: Dict[str, Any], ts: float, key: str,
+                         ev: Dict[str, Any], family: str) -> None:
+        """Target FEC Stack sub-TLVs: framing, family split, deprecation."""
+        subs, err = walk_fec_subtlvs(tlv["value"])
+        if err:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec", ts,
+                       reason=err, tlv_type=tlv["type"], **ev)
+        for sub in subs:
+            stype = sub["type"]
+            fam = fec_subtlv_family(stype)
+            sub_ev = dict(ev)
+            sub_ev.update({"fec_subtlv": stype,
+                           "fec_name": (LSPPING_FEC_V4.get(stype)
+                                        or LSPPING_FEC_V6.get(stype)
+                                        or LSPPING_FEC_NEUTRAL.get(stype)),
+                           "fec_family": fam, "tlv_type": tlv["type"]})
+            if fam is None:
+                self._fire("SRM-LSPPING-MALFORMED", key + ":fec-unknown-%d" % stype,
+                           ts, field="fec-subtlv-type", value=stype, **sub_ev)
+                continue
+            if stype in LSPPING_FEC_DEPRECATED:
+                self._fire("SRM-LSPPING-DEPRECATED-FEATURE",
+                           key + ":fec-dep-%d" % stype, ts,
+                           feature="target-fec-subtlv-%d" % stype,
+                           deprecated_by=LSPPING_FEC_DEPRECATED[stype], **sub_ev)
+            # The registry is family-split, so this is decidable.
+            if fam != "neutral" and fam != family:
+                self._fire("SRM-LSPPING-FEC-FAMILY-MISMATCH",
+                           key + ":fec-fam-%d" % stype, ts,
+                           carried_over=family, subtlv_family=fam, **sub_ev)
+                continue           # do not parse a sub-TLV as the wrong family
+
+            # -- RFC 8287 segment FECs ------------------------------------
+            if stype in (LSPPING_FEC_SR_V4, LSPPING_FEC_SR_V6):
+                self._check_fec_prefix_sid(sub, stype, fam, ts, key, sub_ev)
+            elif stype == LSPPING_FEC_SR_ADJ:
+                self._check_fec_adj_sid(sub, ts, key, sub_ev)
+
+    def _check_fec_prefix_sid(self, sub: Dict[str, Any], stype: int,
+                              fam: str, ts: float, key: str,
+                              ev: Dict[str, Any]) -> None:
+        """RFC 8287 IGP-Prefix Segment ID: framing, then the ledger check."""
+        try:
+            p = parse_fec_prefix_sid(sub["value"], fam)
+        except ParseError as exc:
+            # ev already carries fec_subtlv; passing it again would raise a
+            # duplicate-keyword TypeError and take the capture down.
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-sid-%d" % stype, ts,
+                       reason=str(exc), actual=len(sub["value"]), **ev)
+            return
+        if p["prefix"] is None:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-plen-%d" % stype, ts,
+                       field="prefix-length", value=p["prefix_len"],
+                       legal_range="1..%d" % p["max_prefix_len"], **ev)
+            return
+        if p["reserved"]:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-rsv-%d" % stype, ts,
+                       field="reserved", value=p["reserved"], **ev)
+
+        # BASELINE-DEPENDENT.  Absence of an advertisement is not evidence
+        # that none was sent, only that this tap has not seen one, so the
+        # rule stays disarmed until the ledger holds something.
+        ledger = len(self.prefix_sid)
+        if ledger and p["prefix"] not in self.prefix_sid:
+            self._fire("SRM-LSPPING-FEC-UNADVERTISED",
+                       key + ":fec-unadv-%s" % p["prefix"], ts,
+                       probed_prefix=p["prefix"], prefix_len=p["prefix_len"],
+                       igp_protocol=p["protocol"], ledger_size=ledger,
+                       **ev)
+
+    def _check_fec_adj_sid(self, sub: Dict[str, Any], ts: float, key: str,
+                           ev: Dict[str, Any]) -> None:
+        """RFC 8287 IGP-Adjacency Segment ID - framing only.
+
+        No ledger cross-check: the sub-TLV's Advertising and Receiving Node
+        Identifiers are 4 octets for OSPF and 6 for IS-IS, and matching them
+        against this module's (originator, neighbor) ledger keys would mean
+        guessing which identifier format a given 4-octet field holds.  A
+        guess there would produce confident wrong findings, so the rule is
+        deliberately absent rather than approximate.
+        """
+        try:
+            a = parse_fec_adj_sid(sub["value"])
+        except ParseError as exc:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-adj", ts,
+                       reason=str(exc), actual=len(sub["value"]), **ev)
+            return
+        if a["adj_type_name"] is None:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-adj-type", ts,
+                       field="adjacency-type", value=a["adj_type"],
+                       legal=sorted(FEC_ADJ_TYPES), **ev)
+            return
+        if a["expected_len"] is not None and a["value_len"] < a["expected_len"]:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-adj-len", ts,
+                       field="adjacency-subtlv-length",
+                       adj_type=a["adj_type"], adj_type_name=a["adj_type_name"],
+                       igp_protocol=a["protocol"],
+                       expected_min=a["expected_len"], actual=a["value_len"], **ev)
+        if a["reserved"]:
+            self._fire("SRM-LSPPING-MALFORMED", key + ":fec-adj-rsv", ts,
+                       field="reserved", value=a["reserved"], **ev)
+
+    # -- IOAM (RFC 9197 / RFC 9486) -----------------------------------------
+
+    def _check_ioam_area(self, hdr_proto: int, area: bytes, src: str, dst: str,
+                         ts: float, under_mpls: bool) -> None:
+        """Scan one option area for IOAM options and check each."""
+        total = 0
+        for opt in walk_ipv6_options(area):
+            if opt["type"] not in IPV6_OPT_IOAM:
+                continue
+            self.stats["ioam"] += 1
+            total += (opt["length"] or 0) + 2
+            self._check_ioam_option(opt, hdr_proto, src, dst, ts, under_mpls,
+                                    total)
+
+    def _check_ioam_option(self, opt: Dict[str, Any], hdr_proto: int,
+                           src: str, dst: str, ts: float, under_mpls: bool,
+                           running_total: int) -> None:
+        in_hbh = hdr_proto == IPPROTO_HOPOPT
+        ev: Dict[str, Any] = {
+            "src": src, "dst": dst, "under_mpls": under_mpls,
+            "ipv6_option_type": "0x%02X" % opt["type"],
+            "mutable": opt["type"] == IPV6_OPT_IOAM_MUTABLE,
+            "header": "hop-by-hop" if in_hbh else "destination-options",
+        }
+        key = "ioam:%s" % src
+
+        # RFC 9486 s5: boundary routers MUST filter IOAM in BOTH directions,
+        # and IOAM MUST NOT be leaked across a domain boundary.
+        if self._ce_gate(ts):
+            self._fire("SRM-IOAM-DOMAIN-LEAK", key, ts,
+                       declared_role=self.cfg.role, **ev)
+
+        if opt["truncated"]:
+            self._fire("SRM-IOAM-MALFORMED", key + ":trunc", ts,
+                       rule="option truncated", declared_len=opt["length"],
+                       actual=len(opt["data"]), **ev)
+            return
+
+        # RFC 9486 s4: 4-octet alignment and a 255-octet ceiling.
+        if (opt["length"] + 2) % IOAM_ALIGNMENT:
+            self._fire("SRM-IOAM-MALFORMED", key + ":align", ts,
+                       rule="option not aligned to %d octets" % IOAM_ALIGNMENT,
+                       option_len=opt["length"] + 2, **ev)
+        if running_total > IOAM_MAX_TOTAL_LEN:
+            self._fire("SRM-IOAM-MALFORMED", key + ":total", ts,
+                       rule="total IOAM option length beyond the ceiling",
+                       total=running_total, ceiling=IOAM_MAX_TOTAL_LEN, **ev)
+
+        try:
+            io = parse_ioam_option(opt["data"])
+        except ParseError as exc:
+            self._fire("SRM-IOAM-MALFORMED", key + ":hdr", ts,
+                       rule=str(exc), **ev)
+            return
+
+        ev["ioam_type"] = io["ioam_type"]
+        ev["ioam_name"] = IOAM_OPT_NAMES.get(io["ioam_type"])
+
+        if io["ioam_type"] not in IOAM_TRACE_OPTS:
+            return                       # POT / E2E / DEX: header-level only
+
+        try:
+            tr = parse_ioam_trace(io["body"])
+        except ParseError as exc:
+            self._fire("SRM-IOAM-MALFORMED", key + ":trace-hdr", ts,
+                       rule=str(exc), body_len=len(io["body"]), **ev)
+            return
+
+        ev.update({"namespace": "0x%04X" % tr["namespace"],
+                   "trace_type": "0x%06X" % tr["trace_type"],
+                   "node_len": tr["node_len"],
+                   "remaining_len": tr["remaining_len"],
+                   "overflow": tr["overflow"]})
+
+        # -- reserved / undefined Trace-Type bits ----------------------------
+        bits = ioam_trace_bits_set(tr["trace_type"])
+        undefined = [b for b in bits if b in IOAM_TRACE_BITS_UNDEFINED]
+        if IOAM_TRACE_BIT_RESERVED in bits or undefined:
+            self._fire("SRM-IOAM-TRACETYPE-RESERVED", key + ":tt", ts,
+                       reserved_bit_set=IOAM_TRACE_BIT_RESERVED in bits,
+                       undefined_bits_set=undefined, bits_set=bits, **ev)
+
+        # -- THE NodeLen INVARIANT -------------------------------------------
+        # NodeLen must equal the sum of the 4-octet units the set Trace-Type
+        # bits imply, excluding bit 22.  Complete, computable, no baseline.
+        expected = ioam_nodelen_expected(tr["trace_type"])
+        opaque = bool(tr["trace_type"] & (1 << (23 - IOAM_TRACE_BIT_OPAQUE)))
+        if tr["node_len"] > IOAM_NODELEN_MAX:
+            # Unreachable by ANY Trace-Type, whatever bits are set.
+            self._fire("SRM-IOAM-MALFORMED", key + ":nodelen-bound", ts,
+                       rule="NodeLen beyond anything a Trace-Type can imply",
+                       ceiling=IOAM_NODELEN_MAX, **ev)
+        elif tr["node_len"] != expected:
+            self._fire("SRM-IOAM-MALFORMED", key + ":nodelen", ts,
+                       rule="NodeLen disagrees with the Trace-Type it carries",
+                       expected=expected, bits_set=bits,
+                       opaque_snapshot=opaque, **ev)
+
+        if tr["flags_mbz"]:
+            self._fire("SRM-IOAM-MALFORMED", key + ":flags", ts,
+                       rule="unassigned Trace-Flags bit set",
+                       flags=tr["flags"], **ev)
+
+        # -- RemainingLen vs the space the option actually has ---------------
+        # RemainingLen counts 4-octet units still available for node data.
+        space = len(tr["data"])
+        if tr["remaining_len"] * 4 > space:
+            self._fire("SRM-IOAM-MALFORMED", key + ":remaining", ts,
+                       rule="RemainingLen exceeds the option's own data space",
+                       remaining_octets=tr["remaining_len"] * 4,
+                       data_space=space, **ev)
+
+    # -- VCCV (RFC 5085) ----------------------------------------------------
+
+    def _check_vccv(self, tlvs: List[Dict[str, Any]], lsr: str, src: str,
+                    dst: str, ts: float, mtype: int) -> None:
+        """VCCV control-channel posture from a pseudowire's LDP advertisement.
+
+        CC Type 2 (MPLS Router Alert label) and CC Type 3 (PW label with TTL
+        1) both deliver the VCCV message to the receiving router's CONTROL
+        PLANE rather than keeping it in the data path, so a pseudowire peer
+        can meter CPU with ordinary OAM.  That is an exposure the operator
+        chose, hence POSTURE rather than ATTACK.
+        """
+        params: List[Dict[str, Any]] = []
+        pw_ctx: Dict[str, Any] = {}
+        for t in tlvs:
+            if t["type"] == LDP_TLV_FEC:
+                for fec in parse_pwid_fec(t["value"]):
+                    if not pw_ctx:
+                        pw_ctx = {"fec_type": fec["fec_type"],
+                                  "pw_type": fec["pw_type"],
+                                  "pw_id": fec.get("pw_id"),
+                                  "control_word": fec["control_word"]}
+                    params.extend(fec["iface_params"])
+            elif t["type"] == LDP_TLV_PW_INTERFACE_PARAMS:
+                # The Generalized PWid FEC keeps its parameters here.
+                params.extend(walk_interface_params(t["value"]))
+        if not params:
+            return
+
+        for prm in params:
+            if prm["id"] != VCCV_IFACE_PARAM or prm["malformed"]:
+                continue
+            v = parse_vccv_param(prm["value"])
+            if v is None:
+                continue
+            self.stats["vccv"] += 1
+            key = "vccv:%s/%s" % (lsr, pw_ctx.get("pw_id"))
+            ev = {"lsr_id": lsr, "src": src, "dst": dst,
+                  "ldp_msg_type": mtype, "cc_types": v["cc"],
+                  "cv_types": v["cv"],
+                  "cc_router_alert": v["cc_router_alert"],
+                  "cc_ttl_expiry": v["cc_ttl_expiry"],
+                  "cc_control_word": v["cc_control_word"],
+                  "cv_lsp_ping": v["cv_lsp_ping"],
+                  "cv_icmp_ping": v["cv_icmp_ping"]}
+            ev.update(pw_ctx)
+
+            if v["cc"] & VCCV_CC_CONTROL_PLANE:
+                which = []
+                if v["cc_router_alert"]:
+                    which.append("type-2-router-alert")
+                if v["cc_ttl_expiry"]:
+                    which.append("type-3-ttl-expiry")
+                self._fire("SRM-VCCV-CC-RISKY", key + ":punt", ts,
+                           reason="control-plane-punting CC type advertised",
+                           punting_types=which, **ev)
+            if v["cc_reserved"] or v["cv_reserved"]:
+                self._fire("SRM-VCCV-CC-RISKY", key + ":reserved", ts,
+                           reason="reserved VCCV CC/CV bits set",
+                           cc_reserved=v["cc_reserved"],
+                           cv_reserved=v["cv_reserved"], **ev)
+            if v["cc"] and not v["cv"]:
+                self._fire("SRM-VCCV-CC-RISKY", key + ":no-cv", ts,
+                           reason="CC type advertised with no CV type",
+                           **ev)
 
     def _check_special_labels(self, entries: List[LSE], ts: float, stack_str: str) -> None:
         last = len(entries) - 1
@@ -2506,10 +4066,17 @@ class SRMPLSEngine:
         self.stats["ipv6"] += 1
         src = str(ipaddress.IPv6Address(data[8:24]))
         dst = str(ipaddress.IPv6Address(data[24:40]))
-        srh, final_nh, _raw, l4_off, later_fragment = walk_ipv6_headers(data)
+        (srh, final_nh, _raw, l4_off, later_fragment,
+         ext_opts) = walk_ipv6_headers(data)
         if srh is not None:
             self.stats["srh"] += 1
             self._check_srh(srh, src, dst, ts, under_mpls)
+
+        # IOAM rides in the Hop-by-Hop and Destination Options headers the
+        # walker now hands back.  IPv6-only by protocol (RFC 9486), not by
+        # omission - see the IOAM constants block.
+        for hdr_proto, area in ext_opts:
+            self._check_ioam_area(hdr_proto, area, src, dst, ts, under_mpls)
 
         # PRIME DIRECTIVE: LDP (RFC 7552), BGP with IPv6 transport and RSVP-TE
         # all run over IPv6, and every one of them used to be invisible here
@@ -2657,6 +4224,11 @@ class SRMPLSEngine:
             sport, dport, _ulen, _ck = struct.unpack_from("!HHHH", body, 0)
             if LDP_PORT in (sport, dport):
                 self.handle_ldp(body[8:], src, dst, ts, transport="udp")
+            elif LSPPING_PORT in (sport, dport):
+                # Reached from handle_ipv4 AND handle_ipv6 through this one
+                # function, so LSP Ping is dual-stack by construction rather
+                # than by two copies that drift.
+                self.handle_lspping(body[8:], src, dst, ts, sport, dport)
         elif proto == IPPROTO_TCP:
             if len(body) < 20:
                 return
@@ -2698,6 +4270,9 @@ class SRMPLSEngine:
         for msg in pdu["messages"]:
             mtype = msg["type"]
             tlvs = msg["tlvs"]
+            # VCCV rides in pseudowire FEC interface parameters, which appear
+            # on any message carrying a PW FEC - typically Label Mapping.
+            self._check_vccv(tlvs, lsr, src, dst, ts, mtype)
             if mtype == LDP_MSG_HELLO:
                 self._check_ldp_hello(pdu, msg, tlvs, src, dst, ts, transport)
             elif mtype == LDP_MSG_LABEL_MAPPING:
@@ -3541,21 +5116,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
-# CLI entrypoint removed on vendoring; this module is imported by Ragnar.
 
 
-# ===========================================================================
-# RAGNAR IN-APP ADAPTER  (appended on vendoring; not part of the upstream CLI)
-# ---------------------------------------------------------------------------
-# Snapshot-over-pcap adapter mirroring lacp/rpc/bfd: one tcpdump capture on the
-# interface, replayed frame-by-frame through SRMPLSEngine.handle_frame with the
-# Emitter in collect mode, reduced to one card verdict, HIGH/CRITICAL findings
-# streamed to Watchtower. The engine is pure-Python (own parsers); replay uses
-# bfdwatch.read_pcap (also pure-Python), so scapy is never needed. The interface
-# `role` is load-bearing: an undeclared interface fails loud toward customer-
-# facing, so presence rules (MPLS/SRH on a CE port) stay armed. Detection-only:
-# the engine has no transmit primitives (its own conformance greps the source).
-# ===========================================================================
+# --- Ragnar integration layer (do_sr_mpls_watch / selftest / Watchtower) ---
 import os as _os
 import json as _json
 import time as _time
@@ -3989,3 +5552,7 @@ def selftest():
           sorted(_codes(r)))
 
     return {"success": all(s["pass"] for s in scen), "scenarios": scen}
+
+
+if __name__ == "__main__":
+    sys.exit(main())

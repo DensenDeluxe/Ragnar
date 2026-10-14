@@ -194,8 +194,54 @@ SCENARIOS = {
         [F.variable_response()],
         [F.variable_response_error()], None),
     "OAM-073": (
-        [F.event_notification(seq=5), F.event_notification(seq=5)],
+        # sequence goes BACKWARDS with new content
+        [F.event_notification(seq=5),
+         F.event_notification(seq=2, tlvs=[F.event_tlv(0x02, errors=21)])],
         [F.event_notification(seq=5), F.event_notification(seq=6)], None),
+    # ---- event-content consistency --------------------------------------
+    "OAM-075": (
+        [F.event_notification(tlvs=[F.event_tlv(0x03, window=1000, errors=5000,
+                                                error_total=9000)])],
+        [F.event_notification(tlvs=[F.event_tlv(0x03, window=100000,
+                                                errors=5000,
+                                                error_total=9000)])], None),
+    "OAM-076": (
+        [F.event_notification(tlvs=[F.event_tlv(0x02, threshold=100,
+                                                errors=5)])],
+        [F.event_notification(tlvs=[F.event_tlv(0x02, threshold=100,
+                                                errors=150)])], None),
+    "OAM-077": (
+        [F.event_notification(tlvs=[F.event_tlv(0x02, errors=900,
+                                                error_total=100)])],
+        [F.event_notification(tlvs=[F.event_tlv(0x02, errors=900,
+                                                error_total=9000)])], None),
+    "OAM-078": (
+        [F.event_notification(seq=1, tlvs=[F.event_tlv(0x02,
+                                                       error_total=5000)]),
+         F.event_notification(seq=2, tlvs=[F.event_tlv(0x02,
+                                                       error_total=50)])],
+        [F.event_notification(seq=1, tlvs=[F.event_tlv(0x02,
+                                                       error_total=5000)]),
+         F.event_notification(seq=2, tlvs=[F.event_tlv(0x02,
+                                                       error_total=5100)])],
+        None),
+    "OAM-079": (
+        [F.event_notification(seq=1, tlvs=[F.event_tlv(0x02,
+                                                       timestamp=9000)]),
+         F.event_notification(seq=2, tlvs=[F.event_tlv(0x02, timestamp=10)])],
+        [F.event_notification(seq=1, tlvs=[F.event_tlv(0x02,
+                                                       timestamp=9000)]),
+         F.event_notification(seq=2, tlvs=[F.event_tlv(0x02,
+                                                       timestamp=9100)])],
+        None),
+    "OAM-080": (
+        [F.event_notification(seq=7),
+         F.event_notification(seq=7, tlvs=[F.event_tlv(0x02, errors=9999,
+                                                       error_total=99999)])],
+        # byte-identical retransmission on the same sequence number is
+        # conformant (IEEE 802.3 57.4.3.2) and must stay silent
+        [F.event_notification(seq=7), F.event_notification(seq=7)], None),
+
     "OAM-074": (
         [F.keepalive(src=F.SRC_A), F.keepalive(src=F.SRC_B)],
         [F.keepalive(src=F.SRC_A), F.keepalive(src=F.SRC_A)], None),
@@ -234,6 +280,90 @@ def tier2():
     non_posture = [f.code for f in got_all if f.klass != reg.POSTURE]
     check(not non_posture,
           "clean set produced non-posture findings: %s" % non_posture)
+
+    # IEEE 802.3 57.4.3.2 permits retransmitting an Event Notification with
+    # the SAME sequence number, and duplicates directly follow the original.
+    # This is the reliability mechanism for an unacknowledged PDU, so a
+    # byte-identical repeat must be silent. Before the event-content tier
+    # this fired OAM-073 on every conformant retransmission.
+    ev = F.event_notification(seq=11)
+    got_rtx = run([ev, ev, ev], Config(posture_enabled=False))
+    check(not got_rtx,
+          "byte-identical Event Notification retransmission must be silent, "
+          "produced: %s" % codes(got_rtx))
+
+    # Threshold 0 is the standard's periodic-statistics mode: an Event
+    # Notification is sent at the end of every window with no error count
+    # required. It must not look like an event below its threshold.
+    for kind in (0x01, 0x02, 0x03, 0x04):
+        got_ps = run([F.event_notification(
+            seq=1, tlvs=[F.event_tlv(kind, threshold=0, errors=0,
+                                     error_total=0, event_total=1)])],
+            Config(posture_enabled=False))
+        check(not got_ps,
+              "threshold-0 periodic statistics report (event type 0x%02x) "
+              "must be silent, produced: %s" % (kind, codes(got_ps)))
+
+    # An ErroredFrame window is a TIME period, not a frame count, so a large
+    # frame count inside a small time window is ordinary - comparing them
+    # would be a unit confusion.
+    got_u = run([F.event_notification(
+        seq=1, tlvs=[F.event_tlv(0x02, window=10, errors=5000, threshold=10,
+                                 error_total=9000)])],
+        Config(posture_enabled=False))
+    check(not got_u,
+          "ErroredFrame count vs TIME window must not be compared, "
+          "produced: %s" % codes(got_u))
+
+    # ErroredFrameSecondsSummary is the one event type whose window needs a
+    # unit conversion: the window is a duration in 100 ms units and the count
+    # is errored SECONDS, so the bound is window/10. A fixture whose error
+    # count sits below BOTH window and window/10 cannot tell a correct
+    # implementation from one that forgot the conversion (LESSON X), so these
+    # two sit deliberately BETWEEN the bounds.
+    #   window 1000 = 100 s. 500 errored seconds is impossible; 50 is fine.
+    got_imp = run([F.event_notification(
+        seq=1, tlvs=[F.event_tlv(0x04, window=1000, errors=500, threshold=10,
+                                 error_total=900, event_total=2)])],
+        Config(posture_enabled=False))
+    check("OAM-075" in codes(got_imp),
+          "500 errored seconds inside a 100-second window must fire OAM-075; "
+          "got %s. A bound of 1000 instead of 100 means the 100ms-to-seconds "
+          "conversion was dropped." % codes(got_imp))
+    got_ok = run([F.event_notification(
+        seq=1, tlvs=[F.event_tlv(0x04, window=1000, errors=50, threshold=10,
+                                 error_total=900, event_total=2)])],
+        Config(posture_enabled=False))
+    check(not got_ok,
+          "50 errored seconds inside a 100-second window is legal, got %s"
+          % codes(got_ok))
+
+    # The threshold-0 gate on OAM-076 is belt-and-braces: with an unsigned
+    # error count, `errors < 0` is already impossible, so the gate only
+    # becomes load-bearing if the comparison is ever relaxed to `<=`. Pin
+    # that the periodic-statistics report stays silent at the boundary.
+    got_eq = run([F.event_notification(
+        seq=1, tlvs=[F.event_tlv(0x02, threshold=0, errors=0, error_total=0,
+                                 event_total=1)])],
+        Config(posture_enabled=False))
+    check(not got_eq,
+          "a threshold-0 periodic report with 0 errors sits exactly on the "
+          "boundary and must stay silent, got %s" % codes(got_eq))
+
+    # A discovery restart legitimately zeroes the peer's running totals.
+    got_r = run([F.event_notification(seq=1, tlvs=[F.event_tlv(0x02,
+                                                               error_total=5000)]),
+                 F.information(flags=F.FLAGS_OPERATIONAL),
+                 F.information(flags=F.FLAGS_DISCOVERY),
+                 F.event_notification(seq=2, tlvs=[F.event_tlv(0x02,
+                                                               error_total=0,
+                                                               errors=0,
+                                                               threshold=0,
+                                                               event_total=1)])],
+                Config(posture_enabled=False))
+    check("OAM-078" not in codes(got_r),
+          "counters zeroed after a discovery restart must not read as a "
+          "regression, produced: %s" % codes(got_r))
 
     # A long steady-state keepalive run at 1/sec must stay silent, including
     # the rate code: the standard rate is 1 OAMPDU/second.
@@ -414,9 +544,22 @@ def tier7():
               "%s: unknown class %r" % (code, klass))
         check(sev in reg.SEVERITY_ORDER, "%s: unknown severity %r" % (code, sev))
         check(len(summary) > 30, "%s: summary too thin" % code)
+    # Event TLV field widths must sum to the fixed TLV length the standard
+    # defines, for every event type. A width table that does not add up is
+    # how an offset error enters silently.
+    from oamwatch.parser import EVENT_FIELD_WIDTHS, EVENT_TLV_FIXED_LEN, WINDOW_UNIT
+    for kind, widths in EVENT_FIELD_WIDTHS.items():
+        check(2 + sum(widths) == EVENT_TLV_FIXED_LEN[kind],
+              "event 0x%02x: field widths sum to %d, TLV length is %d"
+              % (kind, 2 + sum(widths), EVENT_TLV_FIXED_LEN[kind]))
+    check(set(EVENT_FIELD_WIDTHS) == set(EVENT_TLV_FIXED_LEN),
+          "event width table and length table cover different types")
+    check(set(WINDOW_UNIT) == set(EVENT_FIELD_WIDTHS),
+          "window-unit table and width table cover different types")
+
     names = [v[0] for v in reg.REGISTRY.values()]
     check(len(names) == len(set(names)), "duplicate finding names in registry")
-    check(len(reg.CODES) == 38, "registry size changed: %d" % len(reg.CODES))
+    check(len(reg.CODES) == 44, "registry size changed: %d" % len(reg.CODES))
 
 
 # --------------------------------------------------------------------------

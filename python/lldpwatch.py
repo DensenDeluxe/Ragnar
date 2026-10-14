@@ -120,11 +120,64 @@ AF_IPV6 = 2
 AF_LEN = {AF_IPV4: 4, AF_IPV6: 16}
 AF_NAME = {AF_IPV4: "ipv4", AF_IPV6: "ipv6"}
 
+# --------------------------------------------------------------------------
+# DCBX — Data Center Bridging Exchange, carried as LLDP org-specific TLVs.
+#
+# Two variants on the wire, and a fabric should run exactly one:
+#   IEEE 802.1Qaz  OUI 00-80-C2, subtypes 9/10/11/12
+#   CEE ("1.01")   OUI 00-1B-21, subtype 2, body = LLDP-style sub-TLVs
+#
+# EVERY LAYOUT BELOW WAS PINNED AGAINST WIRESHARK 4.2.2's INDEPENDENT DCBX
+# DISSECTOR, not read off the standard. Two encodings would have been wrong
+# from the specification alone:
+#   * ETS Max-TCs is a 3-BIT field where the value 0 ENCODES 8. A naive
+#     range check treats the commonest real value as invalid.
+#   * CEE feature sub-TLVs carry a SUBTYPE octet after the flags byte. Omit
+#     it and every field after it shifts by one — the dissector caught that
+#     as mis-read PGIDs before anything was built on top of it.
+# (suite LESSON AG: verify a layout against real serialized bytes.)
+# --------------------------------------------------------------------------
+
+OUI_CEE = b"\x00\x1b\x21"           # CEE / Intel DCBX 1.01
+DCBX_CEE_SUBTYPE = 2
+
+# IEEE 802.1Qaz subtypes under the 802.1 OUI
+QAZ_ETS_CONFIG = 9
+QAZ_ETS_RECOMMEND = 10
+QAZ_PFC_CONFIG = 11
+QAZ_APP_PRIORITY = 12
+QAZ_SUBTYPES = {
+    QAZ_ETS_CONFIG: "ETS Configuration",
+    QAZ_ETS_RECOMMEND: "ETS Recommendation",
+    QAZ_PFC_CONFIG: "PFC Configuration",
+    QAZ_APP_PRIORITY: "Application Priority",
+}
+# Total org-TLV length (OUI 3 + subtype 1 + body) for the fixed-size ones.
+QAZ_FIXED_TOTAL = {QAZ_ETS_CONFIG: 25, QAZ_ETS_RECOMMEND: 25, QAZ_PFC_CONFIG: 6}
+QAZ_APP_BASE = 5          # OUI(3) + subtype(1) + reserved(1)
+QAZ_APP_ENTRY = 3         # priority/selector(1) + protocol id(2)
+
+# Transmission Selection Algorithm values (802.1Qaz Table 8-5)
+TSA_NAMES = {0: "strict priority", 1: "credit-based shaper", 2: "ETS",
+             255: "vendor specific"}
+TSA_ETS = 2
+# Application Selector values; 0 and 5-7 are reserved.
+APP_SELECTORS = {1: "EtherType", 2: "TCP port", 3: "UDP/DCCP/SCTP port",
+                 4: "TCP/SCTP/UDP/DCCP port"}
+
+# CEE feature sub-TLV types and their fixed body sizes where pinned.
+CEE_CONTROL, CEE_PRIORITY_GROUPS, CEE_PFC, CEE_APPLICATION = 1, 2, 3, 4
+CEE_SUBTLV_NAMES = {1: "Control", 2: "Priority Groups", 3: "PFC",
+                    4: "Application Protocol"}
+CEE_FIXED_BODY = {CEE_CONTROL: 10, CEE_PRIORITY_GROUPS: 17, CEE_PFC: 6}
+CEE_FEATURE_HDR = 4       # oper_version, max_version, flags, subtype
+
 # Organizationally Specific OUIs
 OUI_8021 = b"\x00\x80\xc2"
 OUI_8023 = b"\x00\x12\x0f"
 OUI_MED = b"\x00\x12\xbb"
 OUI_NAMES = {
+    OUI_CEE: "CEE-DCBX",
     OUI_8021: "IEEE-802.1",
     OUI_8023: "IEEE-802.3",
     OUI_MED: "LLDP-MED",
@@ -203,9 +256,20 @@ FINDINGS: Dict[str, Tuple[str, str, str]] = {
     "LLDP-052": ("RESERVED_TLV_TYPE", "medium", "structural"),
     "LLDP-053": ("TRAILING_DATA_AFTER_END", "medium", "structural"),
     "LLDP-054": ("END_TLV_MISSING", "low", "structural"),
+    # --- Class A, DCBX sub-band: structural -------------------------------
+    "LLDP-060": ("DCBX_TLV_MALFORMED", "high", "structural"),
+    "LLDP-061": ("DCBX_ETS_BANDWIDTH_INVALID", "high", "structural"),
+    "LLDP-062": ("DCBX_ETS_FIELD_INVALID", "high", "structural"),
+    "LLDP-063": ("DCBX_PFC_FIELD_INVALID", "high", "structural"),
+    "LLDP-064": ("DCBX_APP_TABLE_INVALID", "medium", "structural"),
+    "LLDP-065": ("DCBX_DUPLICATE_FEATURE", "medium", "structural"),
+    "LLDP-066": ("DCBX_VERSION_CONFLICT", "medium", "structural"),
+    "LLDP-067": ("DCBX_CEE_SUBTLV_MALFORMED", "high", "structural"),
     # --- Class C: abuse ----------------------------------------------------
     "LLDP-048": ("LLDP_FLOOD", "high", "abuse"),
     "LLDP-049": ("FORGED_NEIGHBOUR_INJECTION", "high", "abuse"),
+    "LLDP-068": ("DCBX_CONFIG_CONFLICT", "high", "abuse"),
+    "LLDP-069": ("DCBX_CONFIG_CHURN", "medium", "abuse"),
 }
 
 GROUP_ORDER = ("screening", "structural", "abuse")
@@ -500,6 +564,23 @@ class Config:
     max_mgmt_oid_len: int = SPEC_MAX_MGMT_OID_LEN
     max_med_inventory: int = SPEC_MED_INVENTORY_MAX
     max_org_specific: int = SPEC_MAX_ORG_SPECIFIC
+    # 256, not 512: the 9-bit TLV length field caps at 511, so a 512-octet
+    # ceiling is a branch no frame can ever reach. A dead RULE is invisible
+    # to the dead-knob check, which only proves a config key is READ.
+    # Realistic DCBX sizes are ETS 25, PFC 6, CEE with every feature ~100,
+    # and an Application table of 40 entries 125.
+    max_dcbx_tlv: int = 256
+    # OFF BY DEFAULT, and the reason is the tap topology rather than caution.
+    # DCBX is a point-to-point link-local negotiation, so on a single access
+    # or trunk port exactly one neighbour speaks it and two disagreeing
+    # speakers would be an injection. But Ragnar is routinely deployed on a
+    # SPAN/mirror port aggregating many links, where every mirrored link
+    # carries its own legitimately different DCB configuration — so the rule
+    # fires on ordinary traffic there. It needs the operator to know which
+    # kind of tap this is, so it is opt-in, exactly like LLDP-049.
+    dcbx_conflict_enforce: bool = False
+    dcbx_churn_window: float = 60.0
+    dcbx_churn_threshold: int = 2
 
     # Class C
     flood_window: float = 10.0
@@ -531,6 +612,10 @@ class Config:
             "max_mgmt_oid_len": self.max_mgmt_oid_len,
             "max_med_inventory": self.max_med_inventory,
             "max_org_specific": self.max_org_specific,
+            "max_dcbx_tlv": self.max_dcbx_tlv,
+            "dcbx_conflict_enforce": self.dcbx_conflict_enforce,
+            "dcbx_churn_window": self.dcbx_churn_window,
+            "dcbx_churn_threshold": self.dcbx_churn_threshold,
             "flood_window": self.flood_window,
             "flood_threshold": self.flood_threshold,
             "flood_distinct_src": self.flood_distinct_src,
@@ -569,12 +654,14 @@ class Config:
             "max_mgmt_oid_len",
             "max_med_inventory",
             "max_org_specific",
+            "max_dcbx_tlv",
+            "dcbx_churn_threshold",
             "flood_threshold",
             "flood_distinct_src",
             "neigh_max",
         )
-        floats = ("flood_window", "suppress_window")
-        bools = ("allow_fcs_tail", "enforce")
+        floats = ("flood_window", "suppress_window", "dcbx_churn_window")
+        bools = ("allow_fcs_tail", "enforce", "dcbx_conflict_enforce")
         for k in ints:
             if k in data:
                 v = data[k]
@@ -914,6 +1001,9 @@ class Engine:
         self._src_window: List[Tuple[float, str]] = []
         self._neigh: Dict[str, float] = {}
         self._flood_active = False
+        self._dcbx_seen: Dict[str, Dict[str, Any]] = {}
+        self._dcbx_cfg: Dict[str, Any] = {}
+        self._dcbx_churn: Dict[str, List[float]] = {}
         self.families: List[Family] = list(BUILTIN_FAMILIES)
         for key, spec in self.cfg.extra_families.items():
             self.families.append(
@@ -1084,6 +1174,7 @@ class Engine:
             self._check_tlv(fr, tlv, now)
 
         self._check_grammar(fr, walk, types_seen, now)
+        self._dcbx_frame_rules(fr, walk, now)
 
         if walk.end_seen and walk.tail_kind == "data":
             self.finding(
@@ -1418,6 +1509,16 @@ class Engine:
             return
         oui = bytes(v[0:3])
         sub = v[3]
+
+        # DCBX owns its own validation end to end — length included — so it
+        # is dispatched BEFORE the generic fixed-length table and before the
+        # general ceiling. Those two would otherwise report a malformed ETS
+        # TLV as a nameless org-specific length error, losing the one thing
+        # an operator needs to know: which DCB feature is wrong.
+        if self._is_dcbx(oui, sub):
+            self._check_dcbx(fr, tlv, oui, sub, now)
+            return
+
         fixed = ORG_FIXED_LEN.get((oui, sub))
         if fixed is not None and tlv.length not in fixed:
             self.finding(
@@ -1497,6 +1598,332 @@ class Engine:
                 ts=now, tlv_offset=off, oui=oui.hex("-"), subtype=sub,
                 tlv_length=tlv.length, limit=self.cfg.max_org_specific,
             )
+
+    # -- DCBX ---------------------------------------------------------------
+    @staticmethod
+    def _is_dcbx(oui: bytes, sub: int) -> bool:
+        return ((oui == OUI_8021 and sub in QAZ_SUBTYPES)
+                or (oui == OUI_CEE and sub == DCBX_CEE_SUBTYPE))
+
+    def _check_dcbx(self, fr: Frame, tlv: TLV, oui: bytes, sub: int,
+                    now: float) -> None:
+        """Validate one DCBX TLV and record its config for the abuse rules.
+
+        Structural only: every rule here is a violation of 802.1Qaz or of the
+        CEE 1.01 grammar, so none of them needs a baseline. There is no DCBX
+        CVE; this is protocol-abuse detection on the lossless-Ethernet control
+        plane, the same footing stpwatch stands on.
+        """
+        off = tlv.offset
+        body = tlv.value[4:]
+
+        if tlv.length > self.cfg.max_dcbx_tlv:
+            self.finding(
+                "LLDP-060", fr.src,
+                "DCBX TLV at offset %d declares length %d, over the %d-octet "
+                "ceiling." % (off, tlv.length, self.cfg.max_dcbx_tlv),
+                ts=now, tlv_offset=off, oui=oui.hex("-"), subtype=sub)
+            return
+
+        if oui == OUI_CEE:
+            self._check_dcbx_cee(fr, tlv, body, now)
+            return
+
+        want = QAZ_FIXED_TOTAL.get(sub)
+        if want is not None and tlv.length != want:
+            self.finding(
+                "LLDP-060", fr.src,
+                "DCBX %s TLV at offset %d declares length %d; 802.1Qaz fixes "
+                "it at %d. A feature TLV whose length is fixed is read with a "
+                "fixed-size accessor."
+                % (QAZ_SUBTYPES[sub], off, tlv.length, want),
+                ts=now, tlv_offset=off, subtype=sub, dcbx="ieee")
+            return
+
+        if sub in (QAZ_ETS_CONFIG, QAZ_ETS_RECOMMEND):
+            self._check_dcbx_ets(fr, tlv, body, sub, now)
+        elif sub == QAZ_PFC_CONFIG:
+            self._check_dcbx_pfc(fr, tlv, body, now)
+        elif sub == QAZ_APP_PRIORITY:
+            self._check_dcbx_app(fr, tlv, body, now)
+
+    def _check_dcbx_ets(self, fr: Frame, tlv: TLV, body: bytes, sub: int,
+                        now: float) -> None:
+        off = tlv.offset
+        label = QAZ_SUBTYPES[sub]
+        # MAX-TCS ENCODING TRAP: the field is 3 bits and the value 0 MEANS 8.
+        # Pinned against Wireshark; a plain 1..8 range check would reject the
+        # single commonest real-world value.
+        raw_max = body[0] & 0x07
+        max_tcs = 8 if raw_max == 0 else raw_max
+        prio_tc = []
+        for i in range(4):
+            prio_tc.append((body[1 + i] >> 4) & 0x0F)
+            prio_tc.append(body[1 + i] & 0x0F)
+        bw = list(body[5:13])
+        tsa = list(body[13:21])
+
+        bad_tsa = sorted({t for t in tsa if t not in TSA_NAMES})
+        if bad_tsa:
+            self.finding(
+                "LLDP-062", fr.src,
+                "DCBX %s at offset %d uses Transmission Selection Algorithm "
+                "value(s) %s; 802.1Qaz defines only 0 (strict priority), 1 "
+                "(credit-based shaper), 2 (ETS) and 255 (vendor specific)."
+                % (label, off, ", ".join(str(t) for t in bad_tsa)),
+                ts=now, tlv_offset=off, subtype=sub, dcbx="ieee")
+
+        over = sorted({t for t in prio_tc if t >= max_tcs})
+        if over:
+            self.finding(
+                "LLDP-062", fr.src,
+                "DCBX %s at offset %d maps priorities onto traffic class(es) "
+                "%s while advertising only %d traffic classes. A receiver that "
+                "indexes its TC table by this value reads past the end of it."
+                % (label, off, ", ".join(str(t) for t in over), max_tcs),
+                ts=now, tlv_offset=off, subtype=sub, max_tcs=max_tcs,
+                dcbx="ieee")
+
+        # 802.1Qaz: the bandwidth percentages of the ETS-allocated traffic
+        # classes MUST total 100. Self-marking, no baseline — the single best
+        # structural signal a forged ETS advertisement leaves.
+        ets_total = sum(bw[i] for i in range(8) if tsa[i] == TSA_ETS)
+        if any(t == TSA_ETS for t in tsa) and ets_total != 100:
+            self.finding(
+                "LLDP-061", fr.src,
+                "DCBX %s at offset %d allocates %d%% across its ETS traffic "
+                "classes; 802.1Qaz requires exactly 100%%. Bandwidth that does "
+                "not sum to 100 is either a forged ETS advertisement or a "
+                "misconfiguration, and either way the receiving scheduler is "
+                "being told something the standard forbids."
+                % (label, off, ets_total),
+                ts=now, tlv_offset=off, subtype=sub, ets_total=ets_total,
+                dcbx="ieee")
+        # A non-ETS traffic class must not be given bandwidth.
+        stray = sorted({i for i in range(8) if tsa[i] != TSA_ETS and bw[i]})
+        if stray:
+            self.finding(
+                "LLDP-062", fr.src,
+                "DCBX %s at offset %d assigns bandwidth to traffic class(es) "
+                "%s whose selection algorithm is not ETS, where a bandwidth "
+                "share has no meaning."
+                % (label, off, ", ".join(str(i) for i in stray)),
+                ts=now, tlv_offset=off, subtype=sub, dcbx="ieee")
+        if sub == QAZ_ETS_CONFIG:
+            self._dcbx_seen.setdefault(fr.src, {})["ets"] = (
+                tuple(prio_tc), tuple(bw), tuple(tsa))
+
+    def _check_dcbx_pfc(self, fr: Frame, tlv: TLV, body: bytes,
+                        now: float) -> None:
+        off = tlv.offset
+        # PFC capability is a 4-BIT field and 8 encodes 8 — a DIFFERENT
+        # encoding from the ETS Max-TCs field above, which encodes 8 as 0.
+        # Both pinned against the dissector; assuming one rule for both is
+        # the mistake this comment exists to prevent.
+        cap = body[0] & 0x0F
+        enable = body[1]
+        enabled = [i for i in range(8) if enable & (1 << i)]
+        if cap > 8:
+            self.finding(
+                "LLDP-063", fr.src,
+                "DCBX PFC Configuration at offset %d advertises a capability "
+                "of %d lossless traffic classes; the field cannot exceed 8."
+                % (off, cap),
+                ts=now, tlv_offset=off, pfc_cap=cap, dcbx="ieee")
+        elif cap and len(enabled) > cap:
+            self.finding(
+                "LLDP-063", fr.src,
+                "DCBX PFC Configuration at offset %d enables Priority Flow "
+                "Control on %d priorities (%s) while advertising capacity for "
+                "only %d. Enabling more lossless classes than the device can "
+                "honour is how a forged PFC advertisement starves a traffic "
+                "class."
+                % (off, len(enabled), ", ".join(str(p) for p in enabled), cap),
+                ts=now, tlv_offset=off, pfc_cap=cap,
+                pfc_enabled=enabled, dcbx="ieee")
+        self._dcbx_seen.setdefault(fr.src, {})["pfc"] = (cap, enable)
+
+    def _check_dcbx_app(self, fr: Frame, tlv: TLV, body: bytes,
+                        now: float) -> None:
+        off = tlv.offset
+        if tlv.length < QAZ_APP_BASE:
+            self.finding(
+                "LLDP-064", fr.src,
+                "DCBX Application Priority at offset %d declares length %d; "
+                "the minimum is %d (OUI, subtype and the reserved octet) even "
+                "with an empty table." % (off, tlv.length, QAZ_APP_BASE),
+                ts=now, tlv_offset=off, dcbx="ieee")
+            return
+        table = body[1:]
+        if len(table) % QAZ_APP_ENTRY:
+            self.finding(
+                "LLDP-064", fr.src,
+                "DCBX Application Priority at offset %d carries a %d-octet "
+                "table; entries are %d octets each, so the table is truncated "
+                "mid-entry." % (off, len(table), QAZ_APP_ENTRY),
+                ts=now, tlv_offset=off, dcbx="ieee")
+            return
+        bad = []
+        for i in range(0, len(table), QAZ_APP_ENTRY):
+            sel = table[i] & 0x07
+            if sel not in APP_SELECTORS:
+                bad.append((i // QAZ_APP_ENTRY, sel))
+        if bad:
+            self.finding(
+                "LLDP-064", fr.src,
+                "DCBX Application Priority at offset %d uses reserved "
+                "selector value(s): %s. 802.1Qaz defines only 1 (EtherType), "
+                "2 (TCP port), 3 (UDP/DCCP/SCTP port) and 4 "
+                "(TCP/SCTP/UDP/DCCP port)."
+                % (off, ", ".join("entry %d selector %d" % b for b in bad)),
+                ts=now, tlv_offset=off, dcbx="ieee")
+
+    def _check_dcbx_cee(self, fr: Frame, tlv: TLV, body: bytes,
+                        now: float) -> None:
+        """CEE 1.01: the body is a run of LLDP-shaped sub-TLVs.
+
+        Bounds and the pinned Control/PG/PFC body sizes are checked. The
+        Application feature's entry grammar is NOT decoded — it is bounded and
+        left opaque, because the layout could not be pinned against the
+        dissector here and a guessed grammar is worse than none.
+        """
+        off = tlv.offset
+        if not body:
+            self.finding(
+                "LLDP-067", fr.src,
+                "CEE DCBX TLV at offset %d carries no sub-TLVs; the Control "
+                "sub-TLV is mandatory, so there is nothing for a peer to "
+                "negotiate against." % off,
+                ts=now, tlv_offset=off, dcbx="cee")
+            return
+        i = 0
+        seen: Dict[int, int] = {}
+        while i < len(body):
+            if len(body) - i < 2:
+                self.finding(
+                    "LLDP-067", fr.src,
+                    "CEE DCBX TLV at offset %d ends with a single stray octet; "
+                    "a sub-TLV header is 2 octets." % off,
+                    ts=now, tlv_offset=off, dcbx="cee")
+                return
+            hdr = (body[i] << 8) | body[i + 1]
+            st, slen = (hdr >> 9) & 0x7F, hdr & 0x1FF
+            if i + 2 + slen > len(body):
+                self.finding(
+                    "LLDP-067", fr.src,
+                    "CEE DCBX sub-TLV %s at offset %d declares length %d but "
+                    "only %d octets remain inside the enclosing TLV."
+                    % (CEE_SUBTLV_NAMES.get(st, "type %d" % st), off, slen,
+                       len(body) - i - 2),
+                    ts=now, tlv_offset=off, cee_subtype=st, dcbx="cee")
+                return
+            want = CEE_FIXED_BODY.get(st)
+            if want is not None and slen != want:
+                self.finding(
+                    "LLDP-067", fr.src,
+                    "CEE DCBX %s sub-TLV at offset %d declares length %d; the "
+                    "pinned layout is %d octets."
+                    % (CEE_SUBTLV_NAMES[st], off, slen, want),
+                    ts=now, tlv_offset=off, cee_subtype=st, dcbx="cee")
+                return
+            if st in seen:
+                self.finding(
+                    "LLDP-065", fr.src,
+                    "CEE DCBX carries two %s sub-TLVs in one TLV at offset %d; "
+                    "each feature may appear once."
+                    % (CEE_SUBTLV_NAMES.get(st, "type %d" % st), off),
+                    ts=now, tlv_offset=off, cee_subtype=st, dcbx="cee")
+            seen[st] = seen.get(st, 0) + 1
+            i += 2 + slen
+        self._dcbx_seen.setdefault(fr.src, {})["cee"] = True
+
+    def _dcbx_frame_rules(self, fr: Frame, walk: Walk, now: float) -> None:
+        """Per-LLDPDU and segment-scoped DCBX rules.
+
+        Segment-scoped means state this engine accumulated during its own run,
+        the way the flood counter does — NOT an operator-supplied baseline. So
+        these stay in the grab-and-go core.
+        """
+        qaz: Dict[int, int] = {}
+        cee = 0
+        for t in walk.tlvs:
+            if t.type != TLV_ORG_SPECIFIC or t.length < 4:
+                continue
+            oui, sub = bytes(t.value[0:3]), t.value[3]
+            if oui == OUI_8021 and sub in QAZ_SUBTYPES:
+                qaz[sub] = qaz.get(sub, 0) + 1
+            elif oui == OUI_CEE and sub == DCBX_CEE_SUBTYPE:
+                cee += 1
+        if not qaz and not cee:
+            return
+
+        dupes = sorted(k for k, n in qaz.items() if n > 1)
+        if dupes:
+            self.finding(
+                "LLDP-065", fr.src,
+                "LLDPDU carries more than one %s TLV; 802.1Qaz permits at most "
+                "one of each DCB feature, and which copy a receiver keeps is "
+                "implementation-defined."
+                % ", ".join(QAZ_SUBTYPES[k] for k in dupes),
+                ts=now, duplicated=[QAZ_SUBTYPES[k] for k in dupes])
+        if cee > 1:
+            self.finding(
+                "LLDP-065", fr.src,
+                "LLDPDU carries %d CEE DCBX TLVs; one is permitted." % cee,
+                ts=now, dcbx="cee")
+        if qaz and cee:
+            self.finding(
+                "LLDP-066", fr.src,
+                "LLDPDU advertises BOTH IEEE 802.1Qaz DCBX and the older CEE "
+                "variant. A port runs one or the other; advertising both "
+                "leaves the peer's choice to its version-negotiation order, "
+                "which is where a downgrade to the weaker variant is won.",
+                ts=now, dcbx="both")
+
+        cfg = self._dcbx_seen.get(fr.src)
+        if not cfg:
+            return
+        key = (cfg.get("ets"), cfg.get("pfc"), cfg.get("cee"))
+
+        # Two sources advertising DIFFERENT DCB config on one segment.
+        # OPT-IN (see dcbx_conflict_enforce): on a point-to-point port this
+        # is an injected advertisement, but on a SPAN port aggregating many
+        # links it is just the normal state of a data centre, so the operator
+        # has to tell us which vantage this is.
+        for other, ocfg in (self._dcbx_cfg.items()
+                            if self.cfg.dcbx_conflict_enforce else ()):
+            if other == fr.src:
+                continue
+            if ocfg != key:
+                self.finding(
+                    "LLDP-068", fr.src,
+                    "DCB configuration from %s conflicts with %s on the same "
+                    "segment. Two neighbours advertising different ETS or PFC "
+                    "settings cannot both be right: on a lossless fabric the "
+                    "disagreement is resolved by whichever the peer accepts, "
+                    "which is exactly what a forged advertisement exploits."
+                    % (fr.src, other),
+                    ts=now, conflicting_with=other)
+                break
+
+        prev = self._dcbx_cfg.get(fr.src)
+        if prev is not None and prev != key:
+            hist = self._dcbx_churn.setdefault(fr.src, [])
+            hist.append(now)
+            self._dcbx_churn[fr.src] = [
+                t for t in hist if now - t <= self.cfg.dcbx_churn_window]
+            if len(self._dcbx_churn[fr.src]) > self.cfg.dcbx_churn_threshold:
+                self.finding(
+                    "LLDP-069", fr.src,
+                    "DCB configuration from %s changed %d times in %.0fs. "
+                    "Sustained ETS or PFC churn is the observable half of a "
+                    "pause attack: repeatedly re-advertising which priorities "
+                    "are lossless starves a traffic class without ever sending "
+                    "a malformed frame."
+                    % (fr.src, len(self._dcbx_churn[fr.src]),
+                       self.cfg.dcbx_churn_window),
+                    ts=now, changes=len(self._dcbx_churn[fr.src]))
+        self._dcbx_cfg[fr.src] = key
 
     def _check_grammar(self, fr: Frame, walk: Walk, types_seen: List[int], now: float) -> None:
         """First three TLVs MUST be Chassis ID, Port ID, TTL, in that order."""

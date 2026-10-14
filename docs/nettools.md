@@ -107,7 +107,7 @@ matrix to zoom (`/web/images/osi/`).
 | [PTP Timing Detection](#ptp-timing-detection) | Diagnostics · L2 | `POST /api/net/ptp` |
 | [LACP Watch](#lacp-watch) | Diagnostics · L2 | `GET /api/net/lacp-watch` |
 | [OAM Watch](#oam-watch) | Diagnostics · L2 | `GET /api/net/oam-watch`, `POST /api/net/oam-reset` |
-| [CFM Watch](#cfm-watch) | Diagnostics · L2 | `GET /api/net/cfm-watch`, `POST /api/net/cfm-reset`, `GET|POST /api/net/cfm-ring` |
+| [CFM Watch](#cfm-watch) | Diagnostics · L2 | `GET /api/net/cfm-watch`, `POST /api/net/cfm-reset`, `GET|POST /api/net/cfm-ring`, `GET|POST /api/net/cfm-evc` |
 | [L2 Link Health](#l2-link-health) | Diagnostics · L2 | `POST /api/net/l2-health` |
 | [ARP Scan](#arp-scan) | Diagnostics · L2 | `GET /api/net/arp-scan` |
 | [Locate Port](#locate-port) | Diagnostics · L1 | `POST /api/net/locate-port` |
@@ -578,6 +578,28 @@ verdict:
    must never read as a clone. True NDP cache poisoning is
    [ndpwatch](watchtower.md)'s job — macwatch only consumes NDP to learn
    bindings.
+6. **L2 security (MACsec / 802.1X-EAPOL / MKA)** — **opt-in passive sniff.** The
+   neighbour-table/arp-scan model above can only see what reaches the ARP/NDP
+   caches; the link-security control plane rides dedicated EtherTypes that never
+   do. Tick **L2 security** (`l2sec=1`) to add a short, harmless capture
+   (`tcpdump`, no frames emitted) of MACsec (802.1AE, `0x88E5`) and 802.1X /
+   EAPOL / MKA (`0x888E`), parse the SecTAG and EAPOL headers directly off the
+   wire, and fold the result into the verdict:
+   - **MACSEC-010** — a MACsec **packet number that rolls backwards** inside one
+     secure association (replay protection off, or an active replay) → **spoofed**.
+   - **MACSEC-011** — a secure-channel **SCI whose system-identifier contradicts
+     the frame's own source MAC** (a spoofed secure channel) → **spoofed**.
+   - **MACSEC-012** — a **confidentiality downgrade**: an association once seen
+     encrypted (`TCI.E=1`) now arriving integrity-only (forced cipher-off) → **spoofed**.
+   - **EAPOL-010** — an **EAPOL-Logoff burst** that force-deauthenticates an
+     802.1X port (port-access denial of service) → **spoofed**.
+   - **EAPOL-011** — an **EAPOL-Start flood** (supplicant-impersonation / access
+     flood) → **suspicious**.
+   - **MACSEC-013 / EAPOL-012 / MKA-010** — MACsec channels, 802.1X port
+     authentication, and MKA key-agreement participants that are legitimately in
+     use are **inventoried (INFO), never flagged**.
+   This is posture detection, not a CVE probe — MAC Watch carries no CVEs. Off by
+   default so the background / e-Paper path stays fast; enable it per scan.
 
 Every MAC is classified as **Vendor** (universal/burned-in), **FHRP virtual**
 (HSRP/VRRP/GLBP redundancy), **Spoofed**
@@ -605,9 +627,11 @@ limited. True device tracking across a MAC *and* IP change needs 802.11
 probe-request fingerprinting, which is monitor-mode only; MAC Watch labels its
 tracking as the neighbour-table approximation.
 
-- Endpoints: `GET /api/net/mac-watch` `?scan=0|1&interface=<if>`,
+- Endpoints: `GET /api/net/mac-watch` `?scan=0|1&interface=<if>&l2sec=0|1&l2sec_seconds=<2-30>`,
   `POST /api/net/mac-watch-reset` · store: `data/mac_watch.json` · uses
-  `ip neigh` (iproute2) + optional `arp-scan`; OUI DB from `arp-scan`/`nmap`
+  `ip neigh` (iproute2) + optional `arp-scan`; OUI DB from `arp-scan`/`nmap`;
+  the opt-in L2-security sniff uses `tcpdump` + `scapy` (best-effort — silently
+  skipped when absent)
 
 ### 🛡️ Network Integrity Monitor
 The one **passive, alerting** tool in the suite (everything else is on-demand).
@@ -2417,10 +2441,11 @@ crashes or reloads the neighbour's LLDP parser. This is separate from
 Juniper's `l2cpd` also drives STP/RSTP/MSTP, MVRP, ERP and LACP, so an LLDP crash there
 reinitialises spanning tree and flaps aggregation.
 
-There are 30 finding codes (`LLDP-nnn`) in three classes. There is **no disclosure-posture
-class**: a neighbour advertising its name and version over LLDP is how the protocol works.
+There are 40 finding codes (`LLDP-nnn`) in four classes (v3 added the DCBX class). There is
+**no disclosure-posture class**: a neighbour advertising its name and version over LLDP is how
+the protocol works.
 
-- **Class A: structural (13 codes, vendor-agnostic, no baseline).** This is where detection
+- **Class A: structural (21 codes, vendor-agnostic, no baseline).** This is where detection
   happens. The malformed frame looks the same whichever stack it targets.
   - `LLDP-040` *critical*: a TLV length past the end of the frame.
   - `LLDP-041`: an illegal fixed length (End / TTL / System Capabilities), or a stray header octet.
@@ -2447,7 +2472,17 @@ class**: a neighbour advertising its name and version over LLDP is how the proto
   only signal for the memory-leak CVEs (CVE-2020-27827, CVE-2023-20089, CVE-2021-26111),
   which have no single-frame shape. `LLDP-049` (forged neighbour) needs a baseline: it is
   **off** until you click **Trust current**, which trusts the neighbours from the last scan
-  (kept in `data/lldp_watch.json`). **Reset** turns it off again.
+  (kept in `data/lldp_watch.json`). **Reset** turns it off again. `LLDP-068`/`LLDP-069` add
+  DCBX-specific abuse (feature churn / a flapping willing-bit).
+- **Class D: DCBX (`LLDP-060`..`069`, v3).** DCBX (Data Center Bridging eXchange) rides inside
+  LLDP as organizationally-specific TLVs and negotiates the lossless fabric — ETS bandwidth,
+  PFC priorities and the application-priority table. **There is no DCBX CVE**; this is
+  protocol-abuse detection on a fabric where a forged negotiation starves or un-protects a
+  priority. It flags a malformed DCBX TLV (`LLDP-060`), an ETS bandwidth that doesn't sum to
+  100% (`LLDP-061`) or an illegal ETS/TSA field (`LLDP-062`), an invalid PFC field
+  (`LLDP-063`), a malformed application table (`LLDP-064`), a duplicate feature TLV
+  (`LLDP-065`), an IEEE-vs-CEE version conflict (`LLDP-066`) and a malformed CEE sub-TLV
+  (`LLDP-067`). It is point-to-point, so one tap sees one neighbour's advertisement.
 
 The capture runs `tcpdump` to a pcap and walks raw frames, with no scapy on this path. It is
 promiscuous because the LLDP group MACs are multicasts the host never joins. It is
@@ -2473,12 +2508,13 @@ deliberately not named here: CVE-2023-41910 (lldpd's **CDP** decoder) and CVE-20
   `GET/POST /api/net/lldp-baseline` `{action: trust|reset}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py lldp-watch [--iface I] [--seconds N] [--pcap FILE]
   [--json]` (`--pcap` replays a file; the baseline is not used or saved)
-- Self-test: suite `lldp` (41 scenarios). It covers every malformed fixture per code, the
-  benign FP set, screening, flood, the forged-neighbour baseline, dual-stack, and the
-  module's own **2117-check conformance** and **285-check scapy cross-check** tiers, run
-  out-of-process.
+- Self-test: suite `lldp` (50 scenarios). It covers every malformed fixture per code (DCBX
+  included), the benign FP set, screening, flood, the forged-neighbour baseline, dual-stack,
+  and the module's own **2568-check conformance** and **338-check scapy cross-check** tiers,
+  run out-of-process — plus, with `tshark` present, the **130-check DCBX Wireshark-dissector
+  cross-check**.
 - Vendored engine (Solarflere): `python/lldpwatch.py`, `lldpwatch_frames.py`,
-  `lldpwatch_conformance.py`, `lldpwatch_scapy_xcheck.py`. Validated live by replaying
+  `lldpwatch_conformance.py`, `lldpwatch_scapy_xcheck.py`, `lldpwatch_dcbx_xcheck.py`. Validated live by replaying
   malformed and vendor frames with `tcpreplay` over a veth pair in a sealed netns: the
   structural, flood and screening codes fire through the capture path, the four new
   `LLDP-031`..`034` families included, and CVE-2026-22627 is caught both structurally (the
@@ -2546,9 +2582,12 @@ CVE anchor is **CVE-2024-30388** (a specific malformed LACP packet flaps a Junos
 *(v2)* a malformed LACPDU from an external source followed by a member flap within a
 short window is now correlated into a dedicated **`LACP-MALFORMED-INDUCED-FLAP`** finding
 (the effect, not a byte signature Juniper never published; the flapping member's own
-garbage is excluded as a failing NIC). What it flags (37 codes across
-structural / delivery-path / identity / cross-view / state-machine / marker / posture
-groups), reduced to a single card **verdict**:
+garbage is excluded as a failing NIC). *(v3)* the module now also parses the neighbouring
+slow-protocol planes on the same wire — **PAGP** (Cisco's pre-standard aggregation), and
+the MAC-Control **PAUSE / PFC** flow-control opcodes — as posture/abuse tiers (no CVE
+exists for them; a flood or a contradictory advertisement is the signal). What it flags
+(**67 codes** across structural / delivery-path / identity / cross-view / state-machine /
+marker / PAGP / PAUSE-PFC / posture groups), reduced to a single card **verdict**:
 
 - **lag-hijack** (critical — the one that should page you) — fires only when **both**
   classes appear for the same member inside one correlation window: an
@@ -2593,8 +2632,9 @@ a single unauthenticated packet (`OAM-060`). `OAM-062` confirms it, when the pee
 Information TLV reports parser=loopback or multiplexer=discard.
 
 There are **no CVEs.** No Link OAM CVE clears the bar, so every finding is protocol abuse
-seen on the wire, like the IGMP / ICMP work. Nothing here names a CVE. 38 codes in three
-classes:
+seen on the wire, like the IGMP / ICMP work. Nothing here names a CVE. 44 codes in three
+classes (v2 added 6 abuse codes, `OAM-075`..`080`, incl. a divergent-content Event replay
+`OAM-080` distinct from the backwards-sequence `OAM-073`):
 
 - **Posture `OAM-020`..`024`** (notes, never a verdict): the peer advertises remote
   loopback, variable retrieval, active mode or unidirectional operation, or a
@@ -2646,13 +2686,12 @@ VXLAN.
 - Self-test: suite `oam` (19 scenarios). It covers the clean-set silence contract, LACP
   not parsed as OAM, the loopback blackhole, single-flag vs flapping, multi-peer, the
   rate cap, the MIB leak, event replay, structural overrun, peer swap across two scans,
-  and the module's own **297-check conformance** and **163-check Wireshark cross-check**
+  and the module's own **355-check conformance** and Wireshark cross-check
   tiers, run out-of-process.
 - Vendored engine (Solarflere): `python/oamwatch/` (`parser`, `engine`, `registry`,
-  `config`, `sensor`) and its tests in `python/oamwatch_tests/`. Validated live: all 38
-  scenarios replayed with `tcpreplay` over a veth pair in a sealed netns, and **38/38 codes
-  fire** through `do_oam_watch`'s capture path. Not yet validated against production
-  Link OAM traffic.
+  `config`, `sensor`) and its tests in `python/oamwatch_tests/`. Validated live: all 44
+  codes replayed with `tcpreplay` over a veth pair in a sealed netns fire through
+  `do_oam_watch`'s capture path. Not yet validated against production Link OAM traffic.
 
 ### CFM Watch
 A **passive** IEEE 802.1ag **Connectivity Fault Management** / ITU-T **Y.1731** service-OAM
@@ -2670,7 +2709,7 @@ suppresses the alarm for a fault that is really happening. A forged **CCM** rais
 cross-connect or unexpected-MEP defect that takes a service down. A **linktrace sweep** maps
 a provider's MIP chain hop by hop.
 
-**90 codes in ten classes:**
+**107 codes in thirteen classes:**
 
 - **A, structural `CFM-001`..`010`**: First TLV Offset past the end, TLV overrun or
   truncation, a missing End TLV, inconsistent MAID name lengths, a short opcode body, a
@@ -2713,6 +2752,18 @@ a provider's MIP chain hop by hop.
   G.8032v2 sub-ring interconnect propagation, plus the structural R-APS checks that need no
   ring. With **no ring declared**, R-APS presence is still reported as `CFM-200` (ERPS active,
   topology undeclared) and malformed R-APS still fires.
+- **M, Y.1731 measurement & maintenance `210`..`240` (v5)**: malformed or abusive loss/delay
+  measurement (LMM/LMR/DMM/DMR/1DM/SLM/SLR), synthetic-loss (TST) and on-demand maintenance
+  opcodes — a forged measurement skews SLA reporting or masks a real fault.
+- **T, transport & encapsulation `241`..`249` (v5)**: CFM/Y.1731 carried where it should not
+  be — e.g. tunnelled inside **VXLAN** — and encapsulation anomalies that cross a segment
+  boundary CFM is meant to stay within.
+- **L, E-LMI cross-plane `250`..`254` (v5, MEF 16)**: E-LMI (EtherType `0x88EE`) runs the
+  UNI's EVC status plane. Like ERPS, it is **declaration-dependent**: **declare the EVC**
+  (`cfm-evc`, below: `REFERENCE,vlan=VLAN[,name=LABEL]`) and the watcher checks the E-LMI
+  CE-VLAN→EVC status against what CFM reports about the same service (`CFM-251`..`253`); with
+  **no EVC declared**, E-LMI presence is reported as `CFM-254` (undeclared) and the join
+  cannot be checked. The capture BPF now admits `0x88EE` alongside CFM's `0x8902`.
 
 **State is kept per interface across scans** (in memory). That covers MA / MEP tables, APS
 group ownership and the CCM history that disarms `CFM-061`. Each scan reports only the
@@ -2748,20 +2799,22 @@ except the posture inventory, at MEDIUM and above, feeds [Watchtower](watchtower
 VLAN, interval).
 
 - Endpoint: `GET /api/net/cfm-watch` `{interface, seconds, md_ceiling?}` ·
-  `POST /api/net/cfm-reset` `{interface?}` · `GET|POST /api/net/cfm-ring`
-  `{action: list|declare|remove|clear, spec?}` · binary: `tcpdump`
+  `POST /api/net/cfm-reset` `{interface?}` · `GET|POST /api/net/cfm-ring` /
+  `GET|POST /api/net/cfm-evc` `{action: list|declare|remove|clear, spec?}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cfm-watch [--iface I] [--seconds N] [--md-ceiling L]
   [--pcap FILE] [--json]`. `--pcap` replays a file through a fresh engine.
   `python3 network_diagnostics.py cfm-ring [list|declare|remove|clear] [SPEC]` manages the
-  ERPS ring declarations.
-- Self-test: suite `cfm`. All **20** upstream fixtures must fire **exactly** their manifest
-  code sets through the adapter (the ERPS fixtures with their `--ring` declarations), and
-  together they cover all **90** codes. The suite also checks the clean baseline, the CVE
-  tagging, the APS lockout, the MD-ceiling arming, that Link OAM is not parsed as CFM, a MEP
-  moved between two scans (caught only by the persistent engine), per-scan deltas, and the
-  **ring-declaration store** (a declared ring arms the Class R topology rules; undeclared
-  R-APS stays at `CFM-200`). It then runs the module's own **173-check conformance** tier and
-  the Wireshark + scapy dual-dissector cross-check tier, both out of process.
+  ERPS ring declarations; `cfm-evc [...] [SPEC]` manages the E-LMI EVC declarations.
+- Self-test: suite `cfm`. All **26** upstream fixtures must fire **exactly** their manifest
+  code sets through the adapter (the ERPS fixtures with their `--ring` and the E-LMI fixture
+  with its `--evc` declaration), and together they cover all **107** codes. The suite also
+  checks the clean baseline, the CVE tagging, the APS lockout, the MD-ceiling arming, that
+  Link OAM is not parsed as CFM, a MEP moved between two scans (caught only by the persistent
+  engine), per-scan deltas, the **ring-declaration store** (a declared ring arms Class R;
+  undeclared R-APS stays at `CFM-200`) and the **EVC-declaration store** (a declared EVC arms
+  the Class L cross-plane; undeclared E-LMI stays at `CFM-254`). It then runs the module's own
+  **284-check conformance** tier and the Wireshark + scapy dual-dissector cross-check tier,
+  both out of process.
 - Vendored engine (Solarflere): `python/cfmwatch.py`, unmodified. Its fixtures and tiers
   live in `python/cfmwatch_tests/`. **Validated live:** the fixture corpus was replayed with
   `tcpreplay` over a veth pair in a sealed netns, including VLAN-tagged frames, and **54/54
@@ -2796,6 +2849,13 @@ Reduced to a single card **verdict**:
   once), collapsed detection-time, and *(v3)* a **micro-BFD flap storm**
   (`BFD-MICRO-FLAP-STORM` — sustained flapping on a `6784` micro-BFD/LAG session, the
   **CVE-2026-33800** Juniper MX PFEMAN/FPC-crash shape).
+- *(v4)* **Seamless BFD (S-BFD, RFC 7880)** on `udp/7784` — the stateless reflector plane
+  used by SR / SR-TE path monitoring. Six codes flag a reflector in an illegal state
+  (`BFD-SBFD-REFLECTOR-ILLEGAL-STATE`), a reflected discriminator that doesn't mirror the
+  request (`BFD-SBFD-REFLECTOR-MIRROR-MISMATCH`), a discriminator colliding across SR
+  domains, a non-zero initiator interval, a source-port violation, and the reflected-loop
+  primitive — the ways a forged or misconfigured reflector blackholes or loops a monitored
+  SR path. (Still no new CVE — these are protocol-abuse conditions.)
 
 It also reads **auth posture** off the wire without holding any key: mid-session
 **downgrade**, one-sided (**asymmetric**) authentication, and stalled-sequence **replay
@@ -3039,7 +3099,7 @@ control plane — is a forwarding-path injection. It parses the full data plane 
 type 4, RFC 8754, including under an MPLS shim) and the SR control plane from scratch:
 **LDP** (udp/tcp 646, RFC 5036), **RSVP-TE** (ip-proto 46), **BGP-SR** (Prefix-SID
 attribute, RFC 8669; labelled-unicast + VPN SAFIs), **IS-IS-SR** (RFC 8667 sub-TLVs) and
-**OSPFv2-SR** (RFC 7684/8665 opaque LSAs) and *(v3)* **OSPFv3-SR** (RFC 5340 / RFC 8362 extended LSAs / RFC 8666 SR — Prefix-SID / Adj-SID / Router-Information sub-TLVs over IPv6 proto 89). An overrunning OSPFv3 SR sub-TLV fires `SRM-SR-TLV-OVERRUN` (protocol `ospfv3`; the RI path names CVE-2024-31950, and the FRR ospf6d crash CVEs CVE-2025-61101/61103/61106/61107 are reference-only — their receiver `debug`-dump precondition isn't passively observable). Reduced to a single card **verdict**:
+**OSPFv2-SR** (RFC 7684/8665 opaque LSAs) and *(v3)* **OSPFv3-SR** (RFC 5340 / RFC 8362 extended LSAs / RFC 8666 SR — Prefix-SID / Adj-SID / Router-Information sub-TLVs over IPv6 proto 89). An overrunning OSPFv3 SR sub-TLV fires `SRM-SR-TLV-OVERRUN` (protocol `ospfv3`; the RI path names CVE-2024-31950, and the FRR ospf6d crash CVEs CVE-2025-61101/61103/61106/61107 are reference-only — their receiver `debug`-dump precondition isn't passively observable). *(v4)* It also parses the MPLS/SR **OAM plane** — **LSP Ping** (udp/3503 MPLS Echo Request/Reply, RFC 8029 / RFC 8287 segment FECs), **VCCV** pseudowire control-channel checks, and **in-situ OAM (IOAM)** option abuse — plus loss/delay **measurement** anomalies, bringing the catalogue to **56 codes** (still the same 17 named CVEs — these are wire conditions, not product versions). Reduced to a single card **verdict**:
 
 - **segment-injection** (critical — the one that should page you) — an MPLS-labelled
   frame (`SRM-MPLS-ON-CE-PORT`) or an **SRH** (`SRM-SRH-ON-CE-PORT`) on an interface
@@ -3349,7 +3409,11 @@ detects the *exposure conditions* instead (weak auth; opaque/TE LSAs, which are
 the trigger for FRRouting ospfd DoS crashes such as CVE-2024-27913 /
 CVE-2025-61107 / CVE-2025-61105 and the *(v4)* opaque-parser cluster
 CVE-2025-61099 / CVE-2025-61103 / CVE-2025-61104 / CVE-2025-61106, and equivalent
-Cisco ASA/FTD OSPF-LSA advisories) and points at OSV for the version lookup. The
+Cisco ASA/FTD OSPF-LSA advisories; *(v6)* the OSPFv3/IPv6 malformed-LSA DoS class
+is named alongside — Quagga/FRR ospf6d CVE-2011-3323 / CVE-2018-14880, Cisco
+CVE-2018-0466 / CVE-2013-5565 and Arista CVE-2025-8872, plus the no-auth-enabled
+Cisco IOS LSA-manipulation CVE-2013-0149 on the weak-auth advisory) and points at
+OSV for the version lookup. The
 OSPF Segment-Routing opaque-LSA sub-TLV overruns (CVE-2024-31950 / CVE-2024-31951)
 are byte-level detected by [SR-MPLS Watch](#sr-mpls-watch), not re-named here. It **detects, never exploits**, and is
 harmless to the network.
@@ -3407,7 +3471,8 @@ link-local, `ff00::/8` multicast, IPv4-mapped, discard-only). It flags:
 The first scan learns the peers and prefix→origin map as the baseline
 (`data/bgp_watch.json`); **Trust current** re-learns after a legitimate change.
 As with OSPF, software-version CVEs aren't on the wire, so exposure conditions are
-flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** / Juniper rpd
+flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** / **CVE-2024-44070**
+(FRR `bgp_attr_encap`) / Juniper rpd
 **CVE-2024-30395** and the *(v4)* FRR/GoBGP parser corpus: zero-length path-attributes
 **CVE-2023-41358**, MP_UNREACH **CVE-2023-47234**, EOR-bypass **CVE-2023-47235**,
 Prefix-SID **CVE-2024-31948**, FlowSpec **CVE-2026-37457**, MP_REACH **CVE-2026-37458**,

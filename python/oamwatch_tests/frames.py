@@ -71,11 +71,58 @@ def keepalive(flags=FLAGS_OPERATIONAL, src=SRC_A):
     return eth(0x00, b"\x00", flags=flags, src=src)
 
 
-def event_tlv(kind, length=None, timestamp=0):
-    fixed = {0x01: 40, 0x02: 26, 0x03: 28, 0x04: 18}
-    ln = fixed[kind] if length is None else length
-    val = struct.pack("!H", timestamp) + b"\x00" * max(0, ln - 4)
-    return bytes([kind, ln]) + val
+# (timestamp, window, threshold, errors, error_total, event_total) widths,
+# mirroring the parser's table. Duplicated deliberately: a fixture builder
+# that imports the parser's own table could not disagree with it, and a
+# disagreement is exactly what these tests exist to catch.
+_EV_WIDTHS = {
+    0x01: (2, 8, 8, 8, 8, 4),
+    0x02: (2, 2, 4, 4, 8, 4),
+    0x03: (2, 4, 4, 4, 8, 4),
+    0x04: (2, 2, 2, 2, 4, 4),
+}
+_EV_FIXED_LEN = {0x01: 40, 0x02: 26, 0x03: 28, 0x04: 18}
+
+
+def event_tlv(kind, length=None, timestamp=0, window=None, threshold=None,
+              errors=None, error_total=None, event_total=None):
+    """Build a link-monitoring event TLV.
+
+    Defaults form a SELF-CONSISTENT event: a window large enough to hold the
+    errors, an error count at or above the threshold, and running totals that
+    contain the count. Tests override one field at a time to make exactly one
+    rule fire."""
+    ln = _EV_FIXED_LEN[kind] if length is None else length
+    if length is not None and length != _EV_FIXED_LEN[kind]:
+        # deliberately bad length: keep the old opaque-padding shape so the
+        # length check is what fires, not a value rule
+        val = struct.pack("!H", timestamp) + b"\x00" * max(0, ln - 4)
+        return bytes([kind, ln]) + val
+
+    # Width-aware defaults: the ErroredFrame window is only 2 octets (a TIME
+    # period in 100 ms units), while the symbol/frame-period windows are
+    # counts in 8 and 4 octets. One shared default does not fit.
+    if window is None:
+        window = {0x01: 100000,   # symbols
+                  0x02: 10,       # 10 x 100ms = 1 s
+                  0x03: 100000,   # frames
+                  0x04: 1000,     # 1000 x 100ms = 100 s
+                  }[kind]
+    if threshold is None:
+        threshold = 10
+    if errors is None:
+        errors = 20
+    if error_total is None:
+        error_total = 500
+    if event_total is None:
+        event_total = 3
+    vals = (timestamp, window, threshold, errors, error_total, event_total)
+    body = b""
+    for v, w in zip(vals, _EV_WIDTHS[kind]):
+        body += int(v).to_bytes(w, "big")
+    tlv = bytes([kind, ln]) + body
+    assert len(tlv) == ln, (kind, len(tlv), ln)
+    return tlv
 
 
 def event_notification(seq=1, tlvs=None, src=SRC_A, flags=FLAGS_OPERATIONAL):

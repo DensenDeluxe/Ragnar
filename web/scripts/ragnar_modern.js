@@ -1514,6 +1514,7 @@ function showNetworkSubtab(name, layer) {
         _fillIfaceSel('oam-iface');
         _fillIfaceSel('cfm-iface');
         cfmLoadRings();
+        cfmLoadEvcs();
         _certFillIfaces();
         _tlsFillIfaces();
         _lldpFillIfaces();
@@ -10156,6 +10157,47 @@ async function cfmClearRings() {
     try { _cfmRenderRings(await postAPI('/api/net/cfm-ring', { action: 'clear' })); addConsoleMessage('ERPS rings cleared', 'info'); }
     catch (e) { addConsoleMessage('Clear failed: ' + e.message, 'error'); }
 }
+function _cfmRenderEvcs(d) {
+    const box = document.getElementById('cfm-evcs');
+    if (!box) return;
+    const evcs = (d && d.evcs) || [];
+    if (!evcs.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-gray-500 mb-1">Declared E-LMI EVCs (cross-plane rules armed):</div>' +
+        evcs.map(r => {
+            const ok = r.ok !== false;
+            const name = escapeHtml(r.name || '?');
+            const spec = escapeHtml(r.spec || '');
+            const warn = ok ? '' : ` <span class="text-red-400">(invalid: ${escapeHtml(r.error || '')})</span>`;
+            return `<div class="flex items-center gap-2 py-0.5">
+                <span class="font-mono ${ok ? 'text-sky-300' : 'text-red-400'}">${name}</span>
+                <span class="font-mono text-gray-500 flex-1 min-w-0 truncate" title="${spec}">${spec}</span>${warn}
+                <button onclick="cfmRemoveEvc('${spec.replace(/'/g, "\\'")}')" class="text-gray-500 hover:text-red-300 whitespace-nowrap" title="Remove this EVC">✕</button>
+            </div>`;
+        }).join('');
+}
+async function cfmLoadEvcs() {
+    try { _cfmRenderEvcs(await fetchAPI('/api/net/cfm-evc')); } catch (e) { /* non-fatal */ }
+}
+async function cfmDeclareEvc() {
+    const el = document.getElementById('cfm-evc-spec');
+    const spec = el && el.value ? el.value.trim() : '';
+    if (!spec) { addConsoleMessage('Enter an E-LMI EVC spec first (e.g. 7,vlan=500,name=cust-A)', 'warn'); return; }
+    try {
+        const d = await postAPI('/api/net/cfm-evc', { action: 'declare', spec });
+        if (d && d.success) { if (el) el.value = ''; addConsoleMessage('E-LMI EVC declared: ' + (d.name || spec), 'info'); _cfmRenderEvcs(d); }
+        else { addConsoleMessage('Declare failed: ' + ((d && d.error) || 'invalid EVC'), 'error'); }
+    } catch (e) { addConsoleMessage('Declare failed: ' + e.message, 'error'); }
+}
+async function cfmRemoveEvc(spec) {
+    try { _cfmRenderEvcs(await postAPI('/api/net/cfm-evc', { action: 'remove', spec })); }
+    catch (e) { addConsoleMessage('Remove failed: ' + e.message, 'error'); }
+}
+async function cfmClearEvcs() {
+    if (!confirm('Forget all declared E-LMI EVCs? Cross-plane rules go quiet until you declare one again.')) return;
+    try { _cfmRenderEvcs(await postAPI('/api/net/cfm-evc', { action: 'clear' })); addConsoleMessage('E-LMI EVCs cleared', 'info'); }
+    catch (e) { addConsoleMessage('Clear failed: ' + e.message, 'error'); }
+}
 // ---- LLDP Watch (802.1AB malformed-TLV CVE shapes / screening / flood) ------
 const _LLDPW_VERDICT_STYLE = {
     'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No LLDP seen — LLDP is off on this port, or the window was shorter than the ~30 s hello'],
@@ -12002,7 +12044,10 @@ async function runMacWatch(scan) {
     out.innerHTML = '<p class="text-sm text-gray-400">' + (scan ? ('Sweeping ' + (iface ? escapeHtml(iface) : 'the default segment') + ' (arp-scan)…') : 'Reading neighbour table…') + '</p>';
     try {
         _macWatchFillIfaces();
-        const d = await fetchAPI('/api/net/mac-watch?scan=' + (scan ? '1' : '0') + (iface ? '&interface=' + encodeURIComponent(iface) : ''));
+        const l2cb = document.getElementById('macwatch-l2sec');
+        const l2sec = !!(l2cb && l2cb.checked);
+        if (l2sec) out.innerHTML = '<p class="text-sm text-gray-400">' + (scan ? 'Sweeping' : 'Reading') + ' + sniffing MACsec / 802.1X / MKA…</p>';
+        const d = await fetchAPI('/api/net/mac-watch?scan=' + (scan ? '1' : '0') + (iface ? '&interface=' + encodeURIComponent(iface) : '') + (l2sec ? '&l2sec=1' : ''));
         if (!d || d.success === false) {
             out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + '</p>';
             return;
@@ -12027,7 +12072,32 @@ async function runMacWatch(scan) {
             chip(s.tracks || 0, ' tracked devices') +
             chip(s.fhrp_virtual || 0, ' FHRP virtual') +
             chip(s.fhrp_hijacks || 0, ' FHRP hijacks', true) +
+            ((d.l2sec && d.l2sec.ran) ? chip(s.l2sec_high || 0, ' L2-sec high', true) : '') +
             '</div>';
+
+        // L2-security control plane (MACsec / 802.1X-EAPOL / MKA) — opt-in sniff.
+        const l2 = d.l2sec || {};
+        if (l2.ran) {
+            const SEV = { high: 'text-red-300', medium: 'text-amber-300', info: 'text-sky-300' };
+            const fnd = l2.findings || [];
+            const abuse = fnd.filter(f => f.severity !== 'info');
+            const inv = fnd.filter(f => f.severity === 'info');
+            if (abuse.length) {
+                html += '<p class="text-xs uppercase text-red-400 mt-3 mb-1">L2 security — MACsec / 802.1X / MKA</p>' +
+                    '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                    abuse.map(f => `<li><span class="font-mono ${SEV[f.severity] || 'text-gray-300'}">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            if (inv.length) {
+                html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">L2 security inventory (in use — expected)</p>' +
+                    '<ul class="text-xs text-gray-400 list-disc pl-5">' +
+                    inv.map(f => `<li><span class="font-mono text-sky-300">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            if (!fnd.length) {
+                html += '<p class="text-xs text-gray-500 mt-3">L2-security sniff ran — no MACsec / 802.1X / MKA frames observed in the window.</p>';
+            }
+        }
 
         // Spoofed / disguised-vendor MACs
         if (d.spoofed && d.spoofed.length) {

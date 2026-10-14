@@ -379,6 +379,43 @@ def main():
               as_int(row["cfm.aps.bridge_type"]) == want,
               "tshark gave %r" % row["cfm.aps.bridge_type"])
 
+    # ---- E-LMI against Wireshark's dissector -------------------------
+    probe = os.path.join(mk.FIXDIR, "_xcheck_elmi.pcap")
+    specs = [(0x7D, 1, 5, 4, ((7, 0x02),), b"UNI-1"),
+             (0x75, 1, 9, 8, ((9, 0x00), (11, 0x04)), b"UNI-2"),
+             (0x7D, 1, 1, 0, ((3, 0x03),), b"UNI-3")]
+    mk.write_pcap(probe, [
+        (mk.BASE_TS + i * 0.1,
+         mk.elmi(msg=m, version=v, snd=s, rcv=r, evcs=e, uni=u))
+        for i, (m, v, s, r, e, u) in enumerate(specs)])
+    cmd = ["tshark", "-r", probe, "-T", "fields", "-E", "occurrence=a"]
+    for fld in ("elmi.version", "elmi.message_type", "elmi.snd_seq_num",
+                "elmi.rcv_seq_num", "elmi.evc.refid", "elmi.evc.status",
+                "elmi.sub_info.uni_id"):
+        cmd += ["-e", fld]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    rows = [l.split("\t") for l in out.stdout.splitlines()]
+    os.unlink(probe)
+    check("tshark decoded every E-LMI probe frame",
+          len(rows) == len(specs), "%d rows" % len(rows))
+    for row, (msg, ver, snd, rcv, evcs, uni) in zip(rows, specs):
+        ours = cw.parse_elmi(mk.elmi(msg=msg, version=ver, snd=snd,
+                                     rcv=rcv, evcs=evcs, uni=uni), 0, 0.0)
+        ctx = "elmi/uni=%s" % uni.decode()
+        agree("elmi_version", ours.version, as_int(row[0]), "tshark", ctx)
+        agree("elmi_msg_type", ours.msg_type, as_int(row[1]), "tshark",
+              ctx)
+        agree("elmi_snd_seq", ours.snd_seq, as_int(row[2]), "tshark", ctx)
+        agree("elmi_rcv_seq", ours.rcv_seq, as_int(row[3]), "tshark", ctx)
+        agree("elmi_evc_refs",
+              [e["reference"] for e in ours.evcs],
+              [int(x, 0) for x in row[4].split(",") if x], "tshark", ctx)
+        agree("elmi_evc_status",
+              [e["status"] for e in ours.evcs],
+              [int(x, 0) for x in row[5].split(",") if x], "tshark", ctx)
+        agree("elmi_uni_id", ours.uni_id.decode("latin-1"),
+              row[6] or None, "tshark", ctx)
+
     print("\nfield agreement:")
     for (who, fld), (total, ok) in sorted(per_field.items()):
         print("  %-7s %-18s %4d/%-4d" % (who, fld, ok, total))

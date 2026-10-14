@@ -13,7 +13,7 @@ from .parser import (
     CODE_EVENT_NOTIFICATION, CODE_INFORMATION, CODE_LOOPBACK_CONTROL,
     CODE_VARIABLE_REQUEST, CODE_VARIABLE_RESPONSE, LOOPBACK_ENABLE,
     LOOPBACK_DISABLE, PARSER_LOOPBACK, PARSER_NAMES, MUX_DISCARD, MUX_NAMES,
-    CFG_RESERVED_MASK, _mac,
+    CFG_RESERVED_MASK, EV_ERRORED_FRAME_SECONDS, EVENT_FIELD_WIDTHS, _mac,
 )
 
 SEQ_HALF = 0x8000
@@ -53,7 +53,7 @@ class PeerState:
     __slots__ = ("mac", "identity", "config", "operational", "last_flags",
                  "posture_emitted", "flag_events", "last_event_seq",
                  "loopback_reported", "in_remote_loopback", "first_seen",
-                 "pdu_count")
+                 "pdu_count", "event_counters", "seq_content")
 
     def __init__(self, mac, ts):
         self.mac = mac
@@ -68,6 +68,21 @@ class PeerState:
         self.in_remote_loopback = False
         self.first_seen = ts
         self.pdu_count = 0
+        # per event type: (error_total, event_total, timestamp) last seen.
+        # Learned from the link itself within one exchange - this is session
+        # state, NOT an operator-supplied baseline.
+        self.event_counters = {}
+        # sequence number -> content of the Event Notification that carried
+        # it, for telling a conformant retransmission from a divergent replay
+        self.seq_content = {}
+
+    def reset_event_state(self):
+        """A discovery restart resets the peer's OAM sublayer, which zeroes
+        its running totals legitimately. Drop the history rather than report
+        the zeroing as a regression."""
+        self.event_counters.clear()
+        self.seq_content.clear()
+        self.last_event_seq = None
 
 
 _FAILURE_FLAGS = (
@@ -202,6 +217,7 @@ class Engine:
                        "established" % src,
                        {"flags": "0x%04x" % pdu.flags})
             peer.operational = False
+            peer.reset_event_state()
         if pdu.local_stable:
             peer.operational = True
         peer.last_flags = pdu.flags
@@ -322,17 +338,144 @@ class Engine:
         seq = pdu.event_seq
         if seq is None:
             return
+
+        content = _event_content(pdu)
+        prior = peer.seq_content.get(seq)
+        retransmission = prior is not None and prior == content
+
+        if prior is not None and not retransmission:
+            self._emit(out, "OAM-080", ts, src,
+                       "two Event Notification OAMPDUs from %s share sequence "
+                       "number %d but carry different content. IEEE 802.3 "
+                       "permits retransmitting an Event Notification with the "
+                       "same sequence number, but a conformant retransmission "
+                       "is byte-identical." % (src, seq),
+                       {"sequence": seq,
+                        "events": [e.name for e in pdu.events]})
+
         last = peer.last_event_seq
-        if last is not None:
+        if last is not None and not retransmission and seq != last:
             delta = (seq - last) & 0xFFFF
-            if delta == 0 or delta > SEQ_HALF:
+            if delta > SEQ_HALF:
                 self._emit(out, "OAM-073", ts, src,
-                           "Event Notification sequence from %s went %d -> %d "
-                           "(no forward progress); replayed or forged link-event "
-                           "telemetry" % (src, last, seq),
+                           "Event Notification sequence from %s went %d -> %d, "
+                           "backwards; replayed or forged link-event telemetry"
+                           % (src, last, seq),
                            {"previous": last, "observed": seq,
-                            "events": [e[1] for e in pdu.events]})
+                            "events": [e.name for e in pdu.events]})
+
+        # A conformant retransmission repeats content already accounted for.
+        # Re-checking it would double-report; its counters are not new data.
+        if not retransmission:
+            for ev in pdu.events:
+                self._check_event_tlv(out, ev, peer, ts, src, seq)
+
+        peer.seq_content[seq] = content
+        if len(peer.seq_content) > 64:           # bounded: keep recent seqs
+            for k in sorted(peer.seq_content,
+                            key=lambda k: (k - seq) & 0xFFFF,
+                            reverse=True)[:len(peer.seq_content) - 64]:
+                del peer.seq_content[k]
         peer.last_event_seq = seq
+
+    def _check_event_tlv(self, out, ev, peer, ts, src, seq):
+        """Consistency rules over one decoded link-monitoring TLV.
+
+        Every rule here is an INTERNAL CONTRADICTION - the TLV disagreeing
+        with itself or with the peer's own earlier counters. None of them asks
+        whether a number is plausible for the link, which is the question that
+        would need an operator baseline.
+        """
+        base = {"event": ev.name, "sequence": seq, "errors": ev.errors,
+                "threshold": ev.threshold, "window": ev.window}
+
+        # 1. more errors than the window can physically hold
+        bound = ev.window_as_error_units()
+        if bound is not None and ev.errors is not None and ev.errors > bound:
+            unit = "100ms units, %d seconds" % bound \
+                if ev.kind == EV_ERRORED_FRAME_SECONDS \
+                else "%s" % ev.window_unit
+            self._emit(out, "OAM-075", ts, src,
+                       "%s from %s reports %d errors in a window of %d %s: "
+                       "the window cannot contain that many"
+                       % (ev.name, src, ev.errors, ev.window, unit),
+                       dict(base, bound=bound))
+
+        # 2. event announced below its own trigger threshold.
+        #    FP GATE: threshold 0 is the standard's periodic-statistics mode -
+        #    an Event Notification is then sent at the end of EVERY window as
+        #    an asynchronous report, with no error count required. Flagging
+        #    that would fire on a correctly configured peer.
+        if (ev.threshold and ev.errors is not None
+                and ev.errors < ev.threshold):
+            self._emit(out, "OAM-076", ts, src,
+                       "%s from %s announces an event at %d errors, below its "
+                       "own declared threshold of %d; the peer's stated "
+                       "trigger condition was never met"
+                       % (ev.name, src, ev.errors, ev.threshold), dict(base))
+
+        # 3. window count exceeds the cumulative total that must contain it
+        if (ev.errors is not None and ev.error_total is not None
+                and ev.errors > ev.error_total):
+            self._emit(out, "OAM-077", ts, src,
+                       "%s from %s reports %d errors in this window but a "
+                       "cumulative error total of only %d, which must already "
+                       "include them"
+                       % (ev.name, src, ev.errors, ev.error_total),
+                       dict(base, error_total=ev.error_total))
+
+        # 4/5. cross-frame: cumulative counters and timestamp must not regress
+        prev = peer.event_counters.get(ev.kind)
+        if prev is not None:
+            p_err, p_evt, p_ts = prev
+            for label, old, new, width in (
+                    ("error running total", p_err, ev.error_total,
+                     _ERROR_TOTAL_BITS[ev.kind]),
+                    ("event running total", p_evt, ev.event_total, 32)):
+                if old is None or new is None or new >= old:
+                    continue
+                if _is_counter_wrap(old, new, width):
+                    continue
+                self._emit(out, "OAM-078", ts, src,
+                           "%s %s from %s went backwards, %d -> %d, on a "
+                           "session that never restarted; a running total is "
+                           "cumulative and only a sublayer reset clears it"
+                           % (ev.name, label, src, old, new),
+                           dict(base, counter=label, previous=old,
+                                observed=new))
+            if (p_ts is not None and ev.timestamp is not None
+                    and ev.timestamp < p_ts
+                    and not _is_counter_wrap(p_ts, ev.timestamp, 16)):
+                self._emit(out, "OAM-079", ts, src,
+                           "%s timestamp from %s went backwards, %d -> %d "
+                           "(100ms units), on a session that never restarted"
+                           % (ev.name, src, p_ts, ev.timestamp),
+                           dict(base, previous_ts=p_ts,
+                                observed_ts=ev.timestamp))
+
+        peer.event_counters[ev.kind] = (ev.error_total, ev.event_total,
+                                        ev.timestamp)
+
+
+# Error-running-total field width in BITS, per event type. Only
+# ErroredFrameSecondsSummary uses a 32-bit total; the rest are 64-bit and
+# cannot wrap in any realistic deployment.
+_ERROR_TOTAL_BITS = {k: w[4] * 8 for k, w in EVENT_FIELD_WIDTHS.items()}
+
+
+def _is_counter_wrap(old, new, width_bits):
+    """True when old -> new looks like a counter wrapping rather than being
+    rewound. A wrap leaves `old` near the top of the field and `new` near the
+    bottom; a rewind does not."""
+    top = 1 << width_bits
+    return old > top - (top >> 4) and new < (top >> 4)
+
+
+def _event_content(pdu):
+    """Identity of an Event Notification's payload, for telling a conformant
+    retransmission from a divergent replay. Built from the raw TLV bytes, so
+    any altered field changes it."""
+    return tuple(ev.raw for ev in pdu.events)
 
 
 _FLAG_BIT = {"link_fault": 0x0001, "dying_gasp": 0x0002, "critical_event": 0x0004}
