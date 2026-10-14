@@ -4,6 +4,17 @@
 
 ### 2026-10-14
 
+#### [#960](https://github.com/PierreGode/Ragnar/pull/960) — feat(net): Cisco Guard v8 — MDT cleartext telemetry, secure-boot + IE-switch + SMB-default-account + egress-block CVEs (+5)
+*branch `feature/cisco-guard-v8`*
+
+- **Ported the feasible v8 additions into the in-app `do_cisco_guard`.** CVE index **355 → 360 named, 305 → 310 detected** (+5); Cisco Guard now names 38 CVEs. Self-test **43 → 49 scenarios**.
+- **`CG-117 MDT_TELEMETRY_CLEARTEXT` (new, no CVE):** model-driven telemetry (gNMI/gRPC dial-out) running unencrypted. The **definitive** marker is the RFC 9113 §3.4 HTTP/2 connection preface (`PRI * HTTP/2.0…`) — only ever sent for cleartext HTTP/2 with prior knowledge, so it is a statement of fact, not a heuristic; TLS telemetry stays silent (TLS Watch's subject) and the payload is never decoded. BPF now admits the gNMI/gRPC ports 50052 / 57400 / 9339.
+- **`CG-008 SECURE_BOOT_ADVISORY_ONLY` (new):** an identified IOS-XE device surfaces the secure-boot bypass (**CVE-2025-20313 / CVE-2025-20314**) as advisory-only INFO — a local/physical vector with no wire signature. The **IE Switch Device Manager** web-UI DoS (**CVE-2025-20327**) folds into `CG-103`/`CG-260`, the **Catalyst 9000 crafted-frame egress block** (**CVE-2025-20311**) into `CG-220`, and the **EOL SB switch default-privileged-account re-enable** (**CVE-2018-15439**, 9.8) into the `CG-113` SMB cluster.
+- **Deferred, with reasons:** `CG-222` (802.3 length datum not in tcpdump's IP-onward hex), the IS-IS byte codes (covered by IS-IS Scanner), the SNMP/DHCP byte codes (covered by SNMP Watch / DHCP Guardian + the existing `CG-201/202`), and CVE-2024-20271 / CVE-2024-20314 (no public packet signature, per the module).
+- **Fixed a pre-existing #959 CVE-index miscount:** `gen_cve_list` scans **all git-tracked** `.py`/`.js`/`.html`, so once the vendored `python/bgp_pathwatch/` tiers became tracked, their test corpus's parser-CVE strings (CVE-2023-38802 / CVE-2024-44070 / CVE-2024-30395 / …) were counted as live-detected, silently flipping ~13 BGP/SR-MPLS CVEs context→detected (the committed index had stayed at the pre-tracking 305/41 because #959's regen ran before `git add`). `tracked_files()` now excludes `python/bgp_pathwatch/` (self-test-only, no live adapter), restoring those CVEs to their intended **context** classification. Net index after the fix + the v8 CVEs: **360 / 310 / 41** (context unchanged).
+- **Self-test:** 6 new v8 scenarios (CG-117 cleartext + TLS-silent negative, CG-008 secure-boot, the three CVE-fold checks). **Live-validated** in a sealed netns: a cleartext HTTP/2 preface on gNMI port 50052 replayed with `tcpreplay` fires `CG-117` through the real `tcpdump` capture path, verdict `exposure`. `gen_cve_list` owns the new IDs under Cisco Guard and labels them.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard) (v8 additions), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md).
+
 #### [#959](https://github.com/PierreGode/Ragnar/pull/959) — feat(net): BGP Pathwatch v6 passive-analysis tiers — BGPsec / SR-Policy-BGP-LS / tap (169 self-test checks)
 *branch `feature/bgp-pathwatch-v6`*
 
