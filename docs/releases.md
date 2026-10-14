@@ -4,6 +4,13 @@
 
 ### 2026-10-14
 
+#### [#955](https://github.com/PierreGode/Ragnar/pull/955) — fix(test): LACP Watch T75 scapy-free check inspects its own source, not sys.modules
+*branch `fix/lacp-t75-scapy-selfcheck`*
+
+- **Test-harness fix only — the module was always scapy-free.** LACP Watch's Tier-1 `T75` check asserted `"scapy" not in sys.modules` to guarantee `lacpwatch.py` stays pure-python (live capture uses `AF_PACKET` directly). In a **shared interpreter** — Ragnar's aggregate `do_routing_selftest`, where another suite (MAC/DHCP/ARP/…) legitimately imports scapy into the process first — that global check tripped and reported a false **FAIL**, even though `lacpwatch` itself never imports scapy (it passes 150/150 in a fresh process).
+- **Fix:** `T75` now verifies the guarantee from the **module's own source** (`re.search` for a top-of-line `import scapy` / `from scapy` in `__file__`), with a `sys.modules` fallback if the source can't be read. The regex is anchored to the start of a line, so it never matches the check's own text.
+- **Validated:** `lacpwatch` self-test is **150/150** both in a fresh process and with scapy pre-loaded (the aggregate condition). With this plus [#954](https://github.com/PierreGode/Ragnar/pull/954), the full `do_routing_selftest` is now **52/52 suites green** (was 50/52 — the two non-green lines were both self-test-harness artifacts, not detector defects). No detector, CVE-index or docs change.
+
 #### [#954](https://github.com/PierreGode/Ragnar/pull/954) — fix(test): Liebert Guard live-loopback self-test skips cleanly without CAP_NET_RAW
 *branch `fix/liebert-live-selftest-cap-net-raw`*
 

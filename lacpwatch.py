@@ -3246,7 +3246,19 @@ def _tier1() -> None:
     _check("T74 1000 random frames: no exceptions", crashes == 0,
            "crashes=%d" % crashes)
 
-    _check("T75 scapy is never imported", "scapy" not in sys.modules)
+    # T75: lacpwatch is pure-python and scapy-free (live capture uses AF_PACKET
+    # directly — see the module header). Verify this from the module's OWN SOURCE,
+    # not sys.modules: in a shared interpreter (e.g. Ragnar's aggregate self-test)
+    # another module may legitimately pull scapy into the process, which says
+    # nothing about whether *this* module imports it. The regex is anchored to the
+    # start of a line, so it never matches this check's own text.
+    try:
+        _src = open(os.path.abspath(__file__), "r", encoding="utf-8").read()
+        _self_imports_scapy = re.search(
+            r"(?m)^\s*(?:import\s+scapy|from\s+scapy\b)", _src) is not None
+    except OSError:
+        _self_imports_scapy = "scapy" in sys.modules      # fall back to the process check
+    _check("T75 scapy is never imported", not _self_imports_scapy)
 
     # ---------------- pcap round trip --------------------------------------
     import tempfile
