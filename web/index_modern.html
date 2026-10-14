@@ -8486,6 +8486,34 @@
                             </div>
                         </div>
 
+                        <!-- Upload Aircraft (ADS-B) Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                                <h4 class="font-medium">🛩 Aircraft (ADS-B) → Wardrift</h4>
+                                <span id="wd-adsb-badge" class="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400">—</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Upload the unique aircraft the <a href="/adsb-radar" class="text-amber-400 hover:text-amber-300">ADS-B radar</a> hears each UTC day to Wardrift's <span class="text-amber-400">Aircraft Watch</span> (10 different aircraft in a day). Uses your Wardrift sign-in above; needs an RTL-SDR running the radar.
+                            </div>
+                            <div class="flex gap-2 items-center flex-wrap">
+                                <button id="wd-adsb-upload-btn" onclick="uploadAdsbWardrift()" class="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded text-xs transition-colors whitespace-nowrap">&#8593; Upload today</button>
+                                <span id="wd-adsb-today" class="text-xs text-gray-400"></span>
+                            </div>
+                            <label class="flex items-center gap-2 text-xs text-gray-400 mt-3 flex-wrap cursor-pointer">
+                                <input type="checkbox" id="wd-adsb-auto" onchange="saveAdsbWardrift()" class="accent-amber-500">
+                                <span>Auto-upload while receiving, every</span>
+                                <select id="wd-adsb-interval" onchange="saveAdsbWardrift()" class="bg-slate-700 text-white text-xs rounded px-1.5 py-0.5 border border-slate-600">
+                                    <option value="15">15 min</option>
+                                    <option value="30">30 min</option>
+                                    <option value="60">60 min</option>
+                                    <option value="120">120 min</option>
+                                </select>
+                                <span id="wd-adsb-pushnote" class="text-gray-500"></span>
+                            </label>
+                            <div id="wd-adsb-last" class="text-xs text-gray-500 mt-2"></div>
+                            <div id="wd-adsb-msg" class="text-xs mt-1 hidden"></div>
+                        </div>
+
                         <!-- Serial ESP32 Listener Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -9536,7 +9564,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261014-mac-v4-l2sec"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261014-adsb-wardrift-card"></script>
 
 
 
