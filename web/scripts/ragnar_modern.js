@@ -2143,7 +2143,11 @@ function _wifiSdrCheck() {
 function _wifiRtlCheck() {
     fetch('/api/net/rtl/status').then(r => r.json()).then(st => {
         const det = (st && st.detect) || {};
-        _wifiState.rtlAvailable = !!det.available;
+        // Show the SDR-page buttons when an RTL is physically PRESENT, not only
+        // when it's openable right now: `available` flips to false the moment a
+        // tool (e.g. dump1090 for the ADS-B radar) opens the dongle, which would
+        // otherwise hide the very button that leads to the running radar.
+        _wifiState.rtlAvailable = !!(det.available || det.device_present);
         _wifiRfwfShow();
     }).catch(() => {});
     fetch('/api/net/esp/status').then(r => r.json()).then(st => {

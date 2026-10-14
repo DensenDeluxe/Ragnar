@@ -11,6 +11,7 @@
 - Fed by a new cheap `adsb.live_status()` (running / live / today) added to `/api/wardriving/status` — no `lsusb` or type enrichment, safe on the ~2 s status poll.
 - **Auto-start ADS-B with wardriving** (opt-in, *Start the ADS-B radar when a wardrive begins* in the Aircraft card). New engine `SESSION_STARTED_HOOKS` (mirrors the finished hooks) fire from every start path (web/CYD/boot); the webapp frees the RTL-SDR from the sub-GHz tools, starts the radar, and auto-stops it when the drive ends — but only a radar it started, never one the operator started by hand, and it never grabs a radar that's already running.
 - Complements the ADS-B → Wardrift upload card from [#956](https://github.com/PierreGode/Ragnar/pull/956); same per-UTC-day unique-aircraft log, shown live instead of only at upload.
+- **Fix:** the Signal Intelligence nav buttons (ADS-B Radar, Pager, VOR, RF Waterfall) no longer vanish while a radio is in use. They gated on the RTL being *openable* (`rtl/status` `available`), which flips false the moment dump1090 opens the dongle — so starting the ADS-B radar hid the very button that opens it. They now gate on the RTL being physically **present** (`device_present`); the target pages still handle the live device state.
 
 #### [#956](https://github.com/PierreGode/Ragnar/pull/956) — feat(adsb): upload aircraft to Wardrift (Aircraft Watch)
 *branch `feature/adsb-wardrift-upload`*
