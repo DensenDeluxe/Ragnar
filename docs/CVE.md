@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **342** distinct CVE IDs
-- **299** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **344** distinct CVE IDs
+- **301** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **34** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -35,7 +35,7 @@ detector works is in [nettools.md](nettools.md).
 | 2018 | 10 |
 | 2019 | 15 |
 | 2020 | 30 |
-| 2021 | 34 |
+| 2021 | 36 |
 | 2022 | 29 |
 | 2023 | 45 |
 | 2024 | 51 |
@@ -53,7 +53,7 @@ detector works is in [nettools.md](nettools.md).
 | BFD Watch | 5 |
 | BGP Path Watch | 13 |
 | BLE Pentest (active) | 6 |
-| CDP Watch | 25 |
+| CDP Watch | 27 |
 | CFM Watch | 4 |
 | Cisco Guard | 29 |
 | Comware Guard | 2 |
@@ -203,6 +203,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-1251](https://nvd.nist.gov/vuln/detail/CVE-2021-1251) |  | detected | LLDP Watch | — |
 | [CVE-2021-1308](https://nvd.nist.gov/vuln/detail/CVE-2021-1308) |  | detected | LLDP Watch | — |
 | [CVE-2021-1309](https://nvd.nist.gov/vuln/detail/CVE-2021-1309) |  | detected | LLDP Watch | — |
+| [CVE-2021-1368](https://nvd.nist.gov/vuln/detail/CVE-2021-1368) | UDLD port-channel RCE | detected | CDP Watch | — |
 | [CVE-2021-1379](https://nvd.nist.gov/vuln/detail/CVE-2021-1379) | LCDPwn (IP Phone 68xx/78xx/88xx) | detected | CDP Watch | — |
 | [CVE-2021-1521](https://nvd.nist.gov/vuln/detail/CVE-2021-1521) | LCDPwn (Video Surveillance 8000) | detected | CDP Watch | — |
 | [CVE-2021-1563](https://nvd.nist.gov/vuln/detail/CVE-2021-1563) | LCDPwn (Video Surveillance 7000) | detected | CDP Watch | — |
@@ -225,6 +226,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-34527](https://nvd.nist.gov/vuln/detail/CVE-2021-34527) | PrintNightmare | detected | RPC / NetLogon Watch | — |
 | [CVE-2021-34618](https://nvd.nist.gov/vuln/detail/CVE-2021-34618) |  | detected | LLDP Watch | — |
 | [CVE-2021-34703](https://nvd.nist.gov/vuln/detail/CVE-2021-34703) |  | detected | LLDP Watch | — |
+| [CVE-2021-34714](https://nvd.nist.gov/vuln/detail/CVE-2021-34714) | UDLD reload DoS | detected | CDP Watch | — |
 | [CVE-2021-34779](https://nvd.nist.gov/vuln/detail/CVE-2021-34779) |  | detected | LLDP Watch | — |
 | [CVE-2021-34780](https://nvd.nist.gov/vuln/detail/CVE-2021-34780) |  | detected | LLDP Watch | — |
 | [CVE-2021-36942](https://nvd.nist.gov/vuln/detail/CVE-2021-36942) | PetitPotam | detected | RPC / NetLogon Watch, Relay / Coercion Watch | — |
