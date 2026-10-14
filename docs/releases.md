@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): OSPF Watch v6 — OSPFv3 malformed-LSA DoS posture (+6 named CVEs)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Ported the v6 OSPFv3/IPv6 DoS CVE set into the in-app `do_ospf_watch` posture advisories.** The in-app OSPF watcher is tcpdump-**text** based (it can't reconstruct the malformed LSA bytes), so these are named as **exposure posture / context**, not byte-detected — the honest framing the existing opaque-LSA advisory already uses. CVE index **342 → 348 named** (+6 **context**: detected stays **299**, context 34→40).
+- **New names:** the OSPFv3 malformed-LSA DoS class — Quagga/FRR ospf6d **CVE-2011-3323** (invalid IPv6 prefix length) / **CVE-2018-14880** (OSPFv3 parser over-read), Cisco **CVE-2018-0466** / **CVE-2013-5565**, Arista EOS **CVE-2025-8872** — folded into the opaque/malformed-LSA advisory, and the no-auth-enabled Cisco IOS LSA-manipulation **CVE-2013-0149** onto the weak-auth advisory. (CVE-2003-0001 Etherleak is already owned by Trailing-data/Etherleak, so not re-named; the SR opaque-LSA overruns CVE-2024-31950/31951 remain byte-detected by SR-MPLS Watch.)
+- **Self-test:** the `ospf` suite (13 scenarios) still passes. `gen_cve_list` owns the new IDs under OSPF Watch and labels them.
+- **Docs:** [nettools.md › OSPF Security Scanner](nettools.md#ospf-security-scanner), [CREDITS.md](CREDITS.md).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): BFD Watch v4 — Seamless BFD (S-BFD, RFC 7880) reflector plane (+6 codes)
 *branch `feature/lldp-watch-v3` (shared)*
 

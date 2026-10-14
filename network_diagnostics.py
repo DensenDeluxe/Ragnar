@@ -18188,9 +18188,10 @@ _OSPF_ADVISORIES = {
         'detail': ('Auth Type 0 (none) or 1 (plaintext) lets any host on the '
                    'segment inject or spoof LSAs — the enabler for persistent '
                    'route poisoning, disguised-LSA and fight-back-bypass attacks '
-                   '(Nakibly et al.). Enable RFC 5709 HMAC-SHA cryptographic auth '
-                   '(OSPFv2) or IPsec AH/ESP (OSPFv3).'),
-        'refs': ['RFC 5709'],
+                   '(Nakibly et al.; the Cisco IOS OSPF LSA-manipulation shape '
+                   'CVE-2013-0149 is the same no-auth-enabled class). Enable RFC 5709 '
+                   'HMAC-SHA cryptographic auth (OSPFv2) or IPsec AH/ESP (OSPFv3).'),
+        'refs': ['RFC 5709', 'CVE-2013-0149'],
     },
     'opaque_lsa': {
         'severity': 'medium',
@@ -18206,9 +18207,16 @@ _OSPF_ADVISORIES = {
                    'and patch. The OSPF Segment-Routing opaque-LSA sub-TLV overruns '
                    '(CVE-2024-31950 / CVE-2024-31951) are byte-level detected by SR-MPLS '
                    'Watch (SRM-SR-TLV-OVERRUN). Cisco ASA/FTD have had equivalent '
-                   'OSPF-LSA DoS advisories.'),
+                   'OSPF-LSA DoS advisories. On the OSPFv3 (IPv6) side the same '
+                   'malformed-LSA DoS class spans Quagga/FRR ospf6d (CVE-2011-3323 '
+                   'invalid IPv6 prefix length, CVE-2018-14880 OSPFv3 parser over-read), '
+                   'Cisco IOS/IOS-XR (CVE-2018-0466, CVE-2013-5565) and Arista EOS '
+                   '(CVE-2025-8872) — version-specific, so named as posture, not '
+                   'byte-detected by this text watcher.'),
         'refs': ['CVE-2024-27913', 'CVE-2025-61107', 'CVE-2025-61105', 'CVE-2025-61099',
-                 'CVE-2025-61103', 'CVE-2025-61104', 'CVE-2025-61106', _OSPF_OSV_URL],
+                 'CVE-2025-61103', 'CVE-2025-61104', 'CVE-2025-61106', 'CVE-2011-3323',
+                 'CVE-2018-14880', 'CVE-2018-0466', 'CVE-2013-5565', 'CVE-2025-8872',
+                 _OSPF_OSV_URL],
     },
 }
 

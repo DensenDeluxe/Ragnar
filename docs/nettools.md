@@ -3385,7 +3385,11 @@ detects the *exposure conditions* instead (weak auth; opaque/TE LSAs, which are
 the trigger for FRRouting ospfd DoS crashes such as CVE-2024-27913 /
 CVE-2025-61107 / CVE-2025-61105 and the *(v4)* opaque-parser cluster
 CVE-2025-61099 / CVE-2025-61103 / CVE-2025-61104 / CVE-2025-61106, and equivalent
-Cisco ASA/FTD OSPF-LSA advisories) and points at OSV for the version lookup. The
+Cisco ASA/FTD OSPF-LSA advisories; *(v6)* the OSPFv3/IPv6 malformed-LSA DoS class
+is named alongside — Quagga/FRR ospf6d CVE-2011-3323 / CVE-2018-14880, Cisco
+CVE-2018-0466 / CVE-2013-5565 and Arista CVE-2025-8872, plus the no-auth-enabled
+Cisco IOS LSA-manipulation CVE-2013-0149 on the weak-auth advisory) and points at
+OSV for the version lookup. The
 OSPF Segment-Routing opaque-LSA sub-TLV overruns (CVE-2024-31950 / CVE-2024-31951)
 are byte-level detected by [SR-MPLS Watch](#sr-mpls-watch), not re-named here. It **detects, never exploits**, and is
 harmless to the network.
