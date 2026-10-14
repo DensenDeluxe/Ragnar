@@ -88,6 +88,36 @@ EVENT_TLV_NAMES = {
     EV_ERRORED_FRAME_SECONDS: "ErroredFrameSecondsSummary",
 }
 
+# Link-monitoring TLV field layout, in octets after the 2-octet Type/Length
+# header: (timestamp, window, threshold, errors, error_running_total,
+# event_running_total). Widths differ per event type and are NOT symmetric -
+# ErroredFrame carries a 2-octet window with a 4-octet threshold.
+#
+# VERIFIED EMPIRICALLY against Wireshark's independent `oampdu` dissector
+# rather than read off the standard: every field Wireshark exposes
+# (18 of 20) reads back the distinctive value planted at the offset this
+# table predicts. Wireshark has no field for the ErroredFramePeriod or
+# ErroredFrameSecondsSummary error counts, but a counterfactual confirms
+# those two widths are pinned anyway - setting either to a wrong width
+# visibly corrupts the running totals that follow it.
+EVENT_FIELD_WIDTHS = {
+    EV_ERRORED_SYMBOL_PERIOD:   (2, 8, 8, 8, 8, 4),
+    EV_ERRORED_FRAME:           (2, 2, 4, 4, 8, 4),
+    EV_ERRORED_FRAME_PERIOD:    (2, 4, 4, 4, 8, 4),
+    EV_ERRORED_FRAME_SECONDS:   (2, 2, 2, 2, 4, 4),
+}
+
+# What the Window field COUNTS, per event type. This decides whether the
+# error count and the window are even comparable quantities.
+#   "symbols" / "frames" -> same unit as the error count, directly comparable
+#   "time"               -> a duration in 100 ms units, NOT a count
+WINDOW_UNIT = {
+    EV_ERRORED_SYMBOL_PERIOD: "symbols",
+    EV_ERRORED_FRAME: "time",            # errored FRAMES within a TIME window
+    EV_ERRORED_FRAME_PERIOD: "frames",
+    EV_ERRORED_FRAME_SECONDS: "time",    # errored frame-SECONDS within a time window
+}
+
 # --- State field (Information TLV octet 3) --------------------------------
 PARSER_FORWARD, PARSER_LOOPBACK, PARSER_DISCARD, PARSER_RESERVED = 0, 1, 2, 3
 MUX_FORWARD, MUX_DISCARD = 0, 1
@@ -183,6 +213,57 @@ class InfoTLV:
     def identity(self):
         """Stable identity tuple for peer-substitution detection."""
         return (self.oui, self.vendor_info)
+
+
+class EventTLV:
+    """One decoded link-monitoring event TLV.
+
+    `raw` is the exact on-wire TLV. It is what distinguishes a conformant
+    retransmission (byte-identical) from a replay carrying altered content.
+    """
+
+    __slots__ = ("kind", "name", "timestamp", "window", "threshold", "errors",
+                 "error_total", "event_total", "raw")
+
+    def __init__(self, kind):
+        self.kind = kind
+        self.name = EVENT_TLV_NAMES.get(kind, "Event(0x%02x)" % kind)
+        self.timestamp = None
+        self.window = None
+        self.threshold = None
+        self.errors = None
+        self.error_total = None
+        self.event_total = None
+        self.raw = b""
+
+    @property
+    def window_unit(self):
+        return WINDOW_UNIT.get(self.kind)
+
+    @property
+    def window_comparable(self):
+        """True when Window counts the same thing the error count counts, so
+        `errors > window` is a meaningful impossibility rather than a unit
+        confusion."""
+        return self.window_unit in ("symbols", "frames")
+
+    def window_as_error_units(self):
+        """Upper bound the error count cannot exceed, in the error count's own
+        units, or None when the two are not comparable.
+
+        ErroredFrameSecondsSummary is the one conversion: its window is a
+        duration in 100 ms units and its count is errored SECONDS, so the
+        bound is window/10, not window."""
+        if self.window is None:
+            return None
+        if self.kind == EV_ERRORED_FRAME_SECONDS:
+            return self.window // 10
+        if self.window_comparable:
+            return self.window
+        return None
+
+    def totals(self):
+        return (self.error_total, self.event_total)
 
 
 class Oampdu:
@@ -417,8 +498,7 @@ def _parse_event_tlvs(pdu, body, base_off):
                         "%s event TLV length %d, standard fixes it at %d"
                         % (EVENT_TLV_NAMES[t], ln, want), base_off + i)
             else:
-                ts = struct.unpack_from("!H", body, i + 2)[0]
-                pdu.events.append((t, EVENT_TLV_NAMES[t], ts))
+                pdu.events.append(_decode_event_tlv(t, body[i:i + ln]))
         elif t == TLV_ORG_SPECIFIC:
             if ln < 5:
                 pdu.add("OAM-056",
@@ -430,6 +510,21 @@ def _parse_event_tlvs(pdu, body, base_off):
                     "OAMPDU" % t, base_off + i)
         i += ln
     return end_at if end_at is not None else n
+
+
+def _decode_event_tlv(kind, tlv):
+    """Decode one length-checked link-monitoring TLV into an EventTLV."""
+    ev = EventTLV(kind)
+    ev.raw = bytes(tlv)
+    widths = EVENT_FIELD_WIDTHS[kind]
+    off = 2
+    vals = []
+    for w in widths:
+        vals.append(int.from_bytes(tlv[off:off + w], "big"))
+        off += w
+    (ev.timestamp, ev.window, ev.threshold, ev.errors,
+     ev.error_total, ev.event_total) = vals
+    return ev
 
 
 def _parse_var_request(pdu, body, base_off):

@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): OAM Watch v2 — +6 abuse codes (Event-replay refinement)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `oamwatch` package to v2 (v0.2.0)** (`python/oamwatch/` + `python/oamwatch_tests/`; **38→44 codes, no new CVEs** — zero Link OAM CVEs clear the bar, so the index is unchanged at **342 named / 299 detected**). The 6 new codes (`OAM-075`..`080`) all land in the abuse group.
+- **Event-Notification replay refined:** a byte-identical retransmission of the same sequence number is now recognised as **conformant** (silent); `OAM-073` fires only when the sequence goes **backwards**, and a same-sequence-but-**divergent-content** Event is the new `OAM-080`.
+- **Self-test:** the `oam` suite (19 scenarios) updated for the refined OAM-073 behavior; registry assert 38→44 (5 posture / 18 structural / 21 abuse), and the module's own **355-check conformance** tier runs out of process. **Live-validated** in a sealed netns: a backwards Event sequence fires `OAM-073` through the real `do_oam_watch` tcpdump path, verdict `attack`.
+- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch) (44 codes, OAM-075..080).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): LACP Watch v3 — +28 codes (PAGP, PAUSE/PFC flow-control planes)
 *branch `feature/lldp-watch-v3` (shared)*
 

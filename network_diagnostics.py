@@ -26345,8 +26345,8 @@ def _oam_selftest():
     split = {}
     for _n, k, _s, _d in R.REGISTRY.values():
         split[k] = split.get(k, 0) + 1
-    check('registry: 38 codes (5 posture / 18 structural / 15 abuse)',
-          len(R.REGISTRY) == 38 and split == {'posture': 5, 'structural': 18, 'abuse': 15})
+    check('registry: 44 codes (5 posture / 18 structural / 21 abuse)',
+          len(R.REGISTRY) == 44 and split == {'posture': 5, 'structural': 18, 'abuse': 21})
 
     def replay(frames, engine=None, step=0.2):
         eng = engine or E.Engine(C.Config())
@@ -26400,8 +26400,11 @@ def _oam_selftest():
     rows, n, _e = replay([Fr.variable_response()])
     check('Variable Response with MIB contents -> OAM-072 cleartext leak',
           'OAM-072' in codes(rows))
-    rows, n, _e = replay([Fr.event_notification(seq=5), Fr.event_notification(seq=5)])
-    check('repeated Event Notification sequence -> OAM-073 replay',
+    # v2: a conformant (byte-identical) retransmission of the same seq is NOT a
+    # replay; OAM-073 needs the sequence to go BACKWARDS (same-seq-different-content
+    # is the new OAM-080, covered by the conformance tier).
+    rows, n, _e = replay([Fr.event_notification(seq=5), Fr.event_notification(seq=3)])
+    check('Event Notification sequence going backwards -> OAM-073 replay',
           'OAM-073' in codes(rows))
     bad = Fr.information([bytes([0x01, 0x40]) + b'\x00' * 8])
     rows, n, _e = replay([bad])

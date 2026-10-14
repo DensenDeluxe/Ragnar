@@ -312,6 +312,129 @@ def direction4(tmp):
           % sorted(set(got)))
 
 
+# --------------------------------------------------------------------------
+# Direction 5: event TLV field values, read independently by Wireshark
+# --------------------------------------------------------------------------
+# Wireshark exposes named fields for 18 of the 20 link-monitoring values.
+# It has NO field for the ErroredFramePeriod or ErroredFrameSecondsSummary
+# error counts - but those two are still pinned, because a wrong width for
+# either one visibly shifts the running totals that follow it, and those
+# ARE oracled. direction5_counterfactual proves that sandwich has teeth.
+EV_PREFIX = {0x01: "espe", 0x02: "efe", 0x03: "efpe", 0x04: "efsse"}
+EV_ORACLED = {
+    0x01: ("Window", "Threshold", "Errors", "TotalErrors", "TotalEvents"),
+    0x02: ("Window", "Threshold", "Errors", "TotalErrors", "TotalEvents"),
+    0x03: ("Window", "Threshold", "TotalErrors", "TotalEvents"),
+    0x04: ("Window", "Threshold", "TotalErrors", "TotalEvents"),
+}
+_ATTR = {"Window": "window", "Threshold": "threshold", "Errors": "errors",
+         "TotalErrors": "error_total", "TotalEvents": "event_total"}
+
+
+def direction5(tmp):
+    specs = [
+        (0x01, dict(timestamp=0x1234, window=1 << 40, threshold=1 << 33,
+                    errors=1 << 35, error_total=1 << 36, event_total=70000)),
+        (0x02, dict(timestamp=7, window=10, threshold=999,
+                    errors=1000, error_total=1 << 33, event_total=12)),
+        (0x03, dict(timestamp=65535, window=4000000000, threshold=3,
+                    errors=9, error_total=1 << 40, event_total=1)),
+        (0x04, dict(timestamp=1, window=60000, threshold=2,
+                    errors=5000, error_total=4000000000, event_total=9)),
+    ]
+    pcap = os.path.join(tmp, "d5.pcap")
+    write_pcap(pcap, [F.event_notification(seq=100 + i, tlvs=[F.event_tlv(k, **kw)])
+                      for i, (k, kw) in enumerate(specs)])
+
+    fields = ["oampdu.event.sequence", "oampdu.event.timestamp"]
+    for pre in EV_PREFIX.values():
+        for suf in ("Window", "Threshold", "Errors", "TotalErrors",
+                    "TotalEvents"):
+            name = "oampdu.event.%s%s" % (pre, suf)
+            if name in ("oampdu.event.efpeErrors", "oampdu.event.efsseErrors"):
+                continue      # Wireshark has no such field
+            fields.append(name)
+    rows = tshark_fields(pcap, fields)
+    check(len(rows) == len(specs),
+          "tshark read %d event frames, built %d" % (len(rows), len(specs)))
+
+    for i, (kind, kw) in enumerate(specs):
+        if i >= len(rows):
+            break
+        row = rows[i]
+        raw = F.event_notification(seq=100 + i, tlvs=[F.event_tlv(kind, **kw)])
+        ours = parse_frame(raw, ts=1.0 + i)
+        check(ours is not None and not ours.defect_codes(),
+              "event frame %d: our parser reported defects %s"
+              % (i, ours.defect_codes() if ours else "parse failed"))
+        if ours is None or not ours.events:
+            _failures.append("event frame %d: no event TLV decoded" % i)
+            continue
+        ev = ours.events[0]
+
+        ws_seq = _as_int(row["oampdu.event.sequence"].split(",")[0])
+        check(ws_seq == ours.event_seq == 100 + i,
+              "event frame %d sequence: wireshark=%r ours=%r"
+              % (i, ws_seq, ours.event_seq))
+        ws_ts = _as_int(row["oampdu.event.timestamp"].split(",")[0])
+        check(ws_ts == ev.timestamp == kw["timestamp"],
+              "event frame %d timestamp: wireshark=%r ours=%r expected=%r"
+              % (i, ws_ts, ev.timestamp, kw["timestamp"]))
+
+        for suf in EV_ORACLED[kind]:
+            fld = "oampdu.event.%s%s" % (EV_PREFIX[kind], suf)
+            ws = _as_int(row[fld].split(",")[0])
+            mine = getattr(ev, _ATTR[suf])
+            want = kw[_ATTR[suf]]
+            check(ws == mine == want,
+                  "event frame %d %s: wireshark=%r ours=%r expected=%r"
+                  % (i, fld, ws, mine, want))
+
+        # the two un-oracled counts still have to round-trip through OUR
+        # decoder at the offsets the oracled neighbours pin
+        if kind in (0x03, 0x04):
+            check(ev.errors == kw["errors"],
+                  "event frame %d un-oracled error count: ours=%r expected=%r"
+                  % (i, ev.errors, kw["errors"]))
+
+
+def direction5_counterfactual(tmp):
+    """LESSON J: prove the sandwich argument for the two fields Wireshark
+    cannot read. If a WRONG width for the error count left the oracled
+    running totals unchanged, their agreement would prove nothing about the
+    count's offset."""
+    import struct
+
+    def efpe_with_error_width(w):
+        lay = [(2, 0x1111), (4, 0x22222222), (4, 0x33333333),
+               (w, 0x44444444), (8, 0x55555555), (4, 0x66666666)]
+        body = b"".join((v & ((1 << (wd * 8)) - 1)).to_bytes(wd, "big")
+                        for wd, v in lay)
+        tlv = bytes([0x03, 2 + len(body)]) + body
+        return F.eth(0x01, struct.pack("!H", 0x9999) + tlv + b"\x00")
+
+    pcap = os.path.join(tmp, "d5cf.pcap")
+    write_pcap(pcap, [efpe_with_error_width(w) for w in (4, 2, 6)])
+    rows = tshark_fields(pcap, ["oampdu.event.efpeTotalErrors",
+                                "oampdu.event.efpeTotalEvents"])
+    check(len(rows) == 3, "counterfactual: tshark read %d of 3" % len(rows))
+    if len(rows) < 3:
+        return
+    right = (_as_int(rows[0]["oampdu.event.efpeTotalErrors"].split(",")[0]),
+             _as_int(rows[0]["oampdu.event.efpeTotalEvents"].split(",")[0]))
+    check(right == (0x55555555, 0x66666666),
+          "counterfactual: correct width should read the planted totals, got %r"
+          % (right,))
+    for idx, w in ((1, 2), (2, 6)):
+        wrong = (_as_int(rows[idx]["oampdu.event.efpeTotalErrors"].split(",")[0]),
+                 _as_int(rows[idx]["oampdu.event.efpeTotalEvents"].split(",")[0]))
+        check(wrong != right,
+              "counterfactual VACUOUS: a %d-octet error count left the oracled "
+              "running totals reading %r, identical to the correct model - so "
+              "Wireshark's agreement proves nothing about that offset"
+              % (w, wrong))
+
+
 def main():
     if not shutil.which("tshark"):
         print("xcheck: tshark not available - the independent dissector is "
@@ -322,6 +445,8 @@ def main():
         direction2(tmp)
         direction3()
         direction4(tmp)
+        direction5(tmp)
+        direction5_counterfactual(tmp)
     print("oamwatch xcheck: %d checks, %d failure(s)" % (_checks, len(_failures)))
     for f in _failures:
         print("  FAIL: %s" % f)

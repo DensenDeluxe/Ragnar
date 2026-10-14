@@ -2608,8 +2608,9 @@ a single unauthenticated packet (`OAM-060`). `OAM-062` confirms it, when the pee
 Information TLV reports parser=loopback or multiplexer=discard.
 
 There are **no CVEs.** No Link OAM CVE clears the bar, so every finding is protocol abuse
-seen on the wire, like the IGMP / ICMP work. Nothing here names a CVE. 38 codes in three
-classes:
+seen on the wire, like the IGMP / ICMP work. Nothing here names a CVE. 44 codes in three
+classes (v2 added 6 abuse codes, `OAM-075`..`080`, incl. a divergent-content Event replay
+`OAM-080` distinct from the backwards-sequence `OAM-073`):
 
 - **Posture `OAM-020`..`024`** (notes, never a verdict): the peer advertises remote
   loopback, variable retrieval, active mode or unidirectional operation, or a
@@ -2661,13 +2662,12 @@ VXLAN.
 - Self-test: suite `oam` (19 scenarios). It covers the clean-set silence contract, LACP
   not parsed as OAM, the loopback blackhole, single-flag vs flapping, multi-peer, the
   rate cap, the MIB leak, event replay, structural overrun, peer swap across two scans,
-  and the module's own **297-check conformance** and **163-check Wireshark cross-check**
+  and the module's own **355-check conformance** and Wireshark cross-check
   tiers, run out-of-process.
 - Vendored engine (Solarflere): `python/oamwatch/` (`parser`, `engine`, `registry`,
-  `config`, `sensor`) and its tests in `python/oamwatch_tests/`. Validated live: all 38
-  scenarios replayed with `tcpreplay` over a veth pair in a sealed netns, and **38/38 codes
-  fire** through `do_oam_watch`'s capture path. Not yet validated against production
-  Link OAM traffic.
+  `config`, `sensor`) and its tests in `python/oamwatch_tests/`. Validated live: all 44
+  codes replayed with `tcpreplay` over a veth pair in a sealed netns fire through
+  `do_oam_watch`'s capture path. Not yet validated against production Link OAM traffic.
 
 ### CFM Watch
 A **passive** IEEE 802.1ag **Connectivity Fault Management** / ITU-T **Y.1731** service-OAM

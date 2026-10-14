@@ -11,6 +11,13 @@ PRIME DIRECTIVES
   header and no address-family split, the same as LACP. There is no IPv6
   variant to chase and nothing is omitted by its absence.
 
+EVENT-CONTENT TIER (v0.2.0-dev)
+  The four link-monitoring TLVs are decoded and checked for internal
+  contradiction - against their own window, threshold and cumulative totals,
+  and against the counters the same peer sent earlier. These rules need no
+  operator baseline. A forgery whose numbers are internally consistent and
+  plausible for the link is still not detectable; see the README.
+
 HONEST SCOPE
   802.3ah Link OAM has no CVE backbone at the CVSS 6.5 bar. Every finding is
   protocol abuse observable on a cleartext, unauthenticated plane. Link OAM is
@@ -18,6 +25,6 @@ HONEST SCOPE
   on an OAM-enabled link.
 """
 
-__version__ = "0.1.0-dev"
+__version__ = "0.2.0-dev"
 
 from .registry import REGISTRY, CODES  # noqa: F401
