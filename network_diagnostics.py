@@ -14754,6 +14754,17 @@ def _stp_verdict(ids):
     return None
 
 
+def _stp_baseline_is_v2(store):
+    """True only for a v2-engine baseline: it has a 'version' key and every root /
+    MSTI-root record is a BridgeID.to_json() dict (carries 'raw_priority'). Guards
+    against feeding a pre-v2 store to the engine (which would KeyError)."""
+    if not isinstance(store, dict) or not store.get('version'):
+        return False
+    recs = list((store.get('roots') or {}).values()) + \
+        list((store.get('msti_roots') or {}).values())
+    return all(isinstance(v, dict) and 'raw_priority' in v for v in recs)
+
+
 def _stp_scan_frames(frames, iface, baseline=None, edge_ifaces=(), learning=False,
                      start_ts=None):
     """Decode + detect: parse_frame -> Analyzer.process over raw frames. Returns
@@ -14813,7 +14824,11 @@ def do_stp_watch(interface=None, seconds=20, learn=True, edge=()):
 
     with _stp_watch_lock:
         store = _stp_watch_load()
-        baseline = store if (store.get('roots') or store.get('msti_roots')) else None
+        # The v2 engine baseline carries a 'version' key and raw_priority-shaped
+        # root records (BridgeID.to_json). A pre-v2 store is incompatible, so ignore
+        # it and re-learn (the next learn overwrites it in the v2 shape).
+        baseline = store if (_stp_baseline_is_v2(store)
+                             and (store.get('roots') or store.get('msti_roots'))) else None
         learning = bool(learn and baseline is None)
         rows, an, regions, bpdus = _stp_scan_frames(
             frames, iface, baseline=baseline, edge_ifaces=tuple(edge), learning=learning)
