@@ -9335,8 +9335,10 @@ const _STP_VERDICT_STYLE = {
     'bpdu-flood':       ['bg-red-950/60 border-red-800 text-red-300', '🛑 BPDU flood — spanning-tree reconvergence storm (DoS)'],
     'rogue-bridge':     ['bg-red-950/60 border-red-800 text-red-300', '🛑 New STP bridge on the segment — unexpected switch / spoofed bridge'],
     'root-hijack':      ['bg-red-950/60 border-red-800 text-red-300', '🛑 ROOT HIJACK — a superior BPDU is taking over the root bridge (L2 MITM)'],
+    anomaly:            ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ BPDU anomaly — field-sanity / MST / per-MSTI violation (see findings)'],
     unknown:            ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
+const _STP_SEV_STYLE = { critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300', low: 'text-sky-300', info: 'text-gray-400' };
 function _stpFillIfaces() {
     const sel = document.getElementById('stp-iface');
     if (!sel || sel.dataset.filled === '1') return Promise.resolve();
@@ -9374,49 +9376,36 @@ async function runStpWatch() {
             return;
         }
         const [cls, label] = _STP_VERDICT_STYLE[d.verdict] || _STP_VERDICT_STYLE.unknown;
+        const sm = d.summary || {};
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} BPDUs, ${d.bridge_count} bridge(s), ${d.instance_count} instance(s) @ ${d.rate}/s · ${d.tcn_count} TCN${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
-        if ((d.instances || []).length) {
-            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Root bridge per instance</p>' +
-                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
-                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Proto</th><th class="px-2 py-1">VLAN/inst</th><th class="px-2 py-1">Advertised root</th><th class="px-2 py-1">By</th><th class="px-2 py-1">Status</th></tr>' +
-                '</thead><tbody>' +
-                d.instances.map(i => {
-                    const bad = (i.status === 'hijacked' || i.status === 'new');
-                    const st = bad ? `<span class="text-red-300">${escapeHtml(i.status)}</span>` : `<span class="text-gray-500">${escapeHtml(i.status)}</span>`;
-                    return `<tr class="border-t border-slate-800">
-                        <td class="px-2 py-1 text-gray-400">${escapeHtml(i.proto)}</td>
-                        <td class="px-2 py-1 font-mono">${i.vlan}</td>
-                        <td class="px-2 py-1 font-mono ${bad ? 'text-red-300' : ''}">${i.root_prio == null ? '—' : i.root_prio}.${escapeHtml(i.root_mac || '?')}</td>
-                        <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(i.advertised_by || '—')}</td>
-                        <td class="px-2 py-1">${st}</td>
-                    </tr>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${sm.bpdus || 0} BPDUs, ${sm.segments || 0} segment(s), ${sm.msti || 0} MSTI · ${sm.findings || 0} finding(s)${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        // v2 detection findings (STP-001..031), worst severity first.
+        if ((d.findings || []).length) {
+            html += '<p class="text-xs uppercase text-amber-400 mt-2 mb-1">Findings</p>' +
+                '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                d.findings.map(f => {
+                    const sev = (f.severity || 'info');
+                    const scls = _STP_SEV_STYLE[sev] || 'text-gray-400';
+                    const vlan = (f.vlan === null || f.vlan === undefined) ? '' : ` <span class="text-gray-500">vlan=${escapeHtml(String(f.vlan))}</span>`;
+                    return `<li><span class="font-mono ${scls}">[${escapeHtml(f.code)}]</span> <span class="${scls}">${escapeHtml(sev.toUpperCase())}</span> ${escapeHtml(f.summary || f.name || '')}${vlan}${f.count > 1 ? ` <span class="text-gray-500">(x${f.count})</span>` : ''}</li>`;
                 }).join('') +
+                '</ul>';
+        }
+        // Spanning-tree segments observed this capture (compact health view).
+        if ((d.segments || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-3 mb-1">Segments observed (' + d.segments.length + ')</p>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">VLAN/inst</th><th class="px-2 py-1">Root</th><th class="px-2 py-1">Bridges</th><th class="px-2 py-1">BPDUs</th><th class="px-2 py-1">Encap</th></tr>' +
+                '</thead><tbody>' +
+                d.segments.map(s => `<tr class="border-t border-slate-800">
+                        <td class="px-2 py-1 font-mono">${escapeHtml(String(s.vlan))}</td>
+                        <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.root || '—')}</td>
+                        <td class="px-2 py-1">${s.bridges}</td>
+                        <td class="px-2 py-1">${s.bpdus}</td>
+                        <td class="px-2 py-1 text-gray-400">${escapeHtml(s.encap || '—')}</td>
+                    </tr>`).join('') +
                 '</tbody></table>';
         }
-        if ((d.bridges || []).length) {
-            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Bridges seen (' + d.bridges.length + ')</p>' +
-                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
-                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Bridge MAC</th><th class="px-2 py-1">Proto</th><th class="px-2 py-1">Role(s)</th><th class="px-2 py-1">Status</th></tr>' +
-                '</thead><tbody>' +
-                d.bridges.map(b => {
-                    const badge = b.baseline ? '<span class="text-green-400">✓ known</span>' : '<span class="text-amber-300">? new</span>';
-                    return `<tr class="border-t border-slate-800">
-                        <td class="px-2 py-1 font-mono ${b.baseline ? '' : 'text-amber-300'}">${escapeHtml(b.mac)}</td>
-                        <td class="px-2 py-1 text-gray-400">${escapeHtml(b.proto)}</td>
-                        <td class="px-2 py-1 text-gray-400">${escapeHtml((b.roles || []).join(', ') || '—')}</td>
-                        <td class="px-2 py-1">${badge}</td>
-                    </tr>`;
-                }).join('') +
-                '</tbody></table>';
-        }
-        if (d.reasons && d.reasons.length) {
-            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
-                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
-        }
-        (d.advisories || []).forEach(a => {
-            html += `<div class="mt-2 px-3 py-2 rounded border text-xs text-gray-400 border-slate-700 bg-slate-900/40">${escapeHtml(a)}</div>`;
-        });
         out.innerHTML = html;
     } catch (e) {
         out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
@@ -9431,6 +9420,77 @@ async function stpTrustBaseline() {
         await runStpWatch();
     } catch (e) {
         addConsoleMessage('Failed to reset STP baseline: ' + e.message, 'error');
+    }
+}
+
+// ---- MRP Watch (MVRP / MMRP / GVRP / GMRP registration protocols) ----
+const _MRP_VERDICT_STYLE = {
+    clean:      ['bg-green-950/40 border-green-900 text-green-400', '✓ No MVRP / MMRP / GVRP / GMRP registration traffic observed'],
+    observed:   ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Registration protocol(s) in use — inventory only, nothing abusive'],
+    suspicious: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Registration burst / structural anomaly — possible VLAN-hopping setup'],
+    attack:     ['bg-red-950/60 border-red-800 text-red-300', '🛑 LeaveAll flood — forced network-wide re-registration (the standards-based VTP bomb)'],
+    unknown:    ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _MRP_SEV_STYLE = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-sky-300', info: 'text-gray-400' };
+function _mrpFillIfaces() {
+    const sel = document.getElementById('mrp-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runMrpWatch() {
+    const out = document.getElementById('mrp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const iface = (document.getElementById('mrp-iface') || {}).value || '';
+    const secs = (document.getElementById('mrp-secs') || {}).value || '20';
+    const kv = ((document.getElementById('mrp-known-vlans') || {}).value || '').trim();
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing MVRP / MMRP / GVRP / GMRP…</p>';
+    try {
+        _mrpFillIfaces();
+        let qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        if (kv) qs += '&known_vlans=' + encodeURIComponent(kv);
+        const d = await fetchAPI('/api/net/mrp-watch' + qs);
+        if (!d || d.success === false) {
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runMrpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _MRP_VERDICT_STYLE[d.verdict] || _MRP_VERDICT_STYLE.unknown;
+        const sm = d.summary || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${sm.frames || 0} frame(s) · ${sm.findings || 0} finding(s)${(sm.protocols || []).length ? ' · ' + escapeHtml((sm.protocols || []).join(', ')) : ''}</p>`;
+        const fnd = d.findings || [];
+        const abuse = fnd.filter(f => f.severity !== 'info');
+        const inv = fnd.filter(f => f.severity === 'info');
+        if (abuse.length) {
+            html += '<p class="text-xs uppercase text-red-400 mt-2 mb-1">Findings</p><ul class="text-xs text-gray-300 list-disc pl-5">' +
+                abuse.map(f => {
+                    const scls = _MRP_SEV_STYLE[f.severity] || 'text-gray-300';
+                    return `<li><span class="font-mono ${scls}">[${escapeHtml(f.code)}]</span> <span class="text-gray-500">${escapeHtml(f.proto)}</span> ${escapeHtml(f.title)}${f.count > 1 ? ` <span class="text-gray-500">(x${f.count})</span>` : ''}${f.src ? ` <span class="text-gray-500">src ${escapeHtml(f.src)}</span>` : ''}</li>`;
+                }).join('') + '</ul>';
+        }
+        if (inv.length) {
+            html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">In use (inventory)</p><ul class="text-xs text-gray-400 list-disc pl-5">' +
+                inv.map(f => `<li><span class="font-mono text-sky-300">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.title)}${f.src ? ` <span class="text-gray-500">src ${escapeHtml(f.src)}</span>` : ''}</li>`).join('') + '</ul>';
+        }
+        if (!fnd.length) html += '<p class="text-xs text-gray-500 mt-2">Capture ran — no registration traffic observed in the window.</p>';
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
     }
 }
 
