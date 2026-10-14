@@ -4,7 +4,12 @@
 
 ### 2026-10-14
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): Cisco Guard v7 — TWAMP / IP SLA, WLC OOB AP-image (CVE-2025-20188 10.0), SD-WAN (+4 CVEs)
+#### [#953](https://github.com/PierreGode/Ragnar/pull/953) — docs(releases): correct the CDP Watch v5 / Cisco Guard v7 changelog PR reference
+*branch `fix/releases-pr-952-number`*
+
+- **Doc-only.** The CDP Watch v5 and Cisco Guard v7 entries were labelled **#951** (a prediction made before the PR was opened); they actually merged as **[#952](https://github.com/PierreGode/Ragnar/pull/952)**. Corrected both references to #952. No code or CVE-index change.
+
+#### [#952](https://github.com/PierreGode/Ragnar/pull/952) — feat(net): Cisco Guard v7 — TWAMP / IP SLA, WLC OOB AP-image (CVE-2025-20188 10.0), SD-WAN (+4 CVEs)
 *branch `feature/cdp-v5-cisco-v7`*
 
 - **Ported the feasible v7 additions into the in-app `do_cisco_guard`.** CVE index **351 → 355 named, 301 → 305 detected** (+4); Cisco Guard now names 33 CVEs. BPF adds `tcp port 862 or udp port 862 or udp port 1967`.
@@ -15,7 +20,7 @@
 - **Self-test:** the `cisco` suite grows to **43 scenarios** (TWAMP exposed/unauth/malformed, IP SLA, WLC with CVE-2025-20188, SD-WAN). **Live-validated** in a sealed netns: crafted TWAMP greeting + IP SLA + vManage HTTP replayed with `tcpreplay` fire `CG-114`/`CG-115`/`CG-116`/`CG-106` through the real `tcpdump` capture path.
 - **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_twamp` helpers under Cisco Guard and labels the four new IDs.
 
-#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): CDP Watch v5 — UDLD detection (CVE-2021-1368 port-channel RCE, CVE-2021-34714 reload DoS)
+#### [#952](https://github.com/PierreGode/Ragnar/pull/952) — feat(net): CDP Watch v5 — UDLD detection (CVE-2021-1368 port-channel RCE, CVE-2021-34714 reload DoS)
 *branch `feature/cdp-v5-cisco-v7`*
 
 - **Ported the v5 (v1.2.0) UDLD family into the in-app `do_cdp_watch`.** UDLD (UniDirectional Link Detection) rides the same Cisco group MAC as CDP (PID `0x0111`), so the capture BPF now admits both (`ether[20:2] = 0x2000 or 0x0111`). CVE index **349 → 351 named, 299 → 301 detected** (+2); CDP Watch now names 27 CVEs.
