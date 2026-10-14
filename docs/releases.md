@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): SR-MPLS Watch v4 — LSP Ping / VCCV / IOAM OAM plane (+10 codes)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `sr_mplswatch` engine to v4** (root `sr_mplswatch.py`, 3991→5558 lines, 46→**56 codes**; **no new CVEs** — these are wire conditions, so the 17 named CVEs and the index are unchanged at **342 named / 299 detected**). Like LACP, the upstream drop ships only the engine + `main`; the Ragnar integration layer (`do_sr_mpls_watch`, `selftest`, `_srm_capture_pcap`, `_srm_verdict`, Watchtower feed — a self-contained block with its own aliased imports) was spliced back on. The v4 engine API (`Config`, `Emitter`, `SRMPLSEngine`) is unchanged, so the layer and its 12 adapter scenarios port cleanly.
+- **v4 adds the MPLS/SR OAM plane:** **LSP Ping** (udp/3503 MPLS Echo Request/Reply, RFC 8029 / RFC 8287 segment FECs), **VCCV** pseudowire control-channel checks, **in-situ OAM (IOAM)** option abuse, and loss/delay **measurement** anomalies — alongside the existing data-plane (MPLS / SRv6) and SR control-plane (LDP / RSVP-TE / BGP-SR / IS-IS-SR / OSPFv2+v3-SR) detection.
+- **Self-test:** the `srmpls` suite (12 adapter scenarios) passes on the v4 engine. **Live-validated** in a sealed netns: an MPLS label stack arriving on a declared **CE** port fires `SRM-MPLS-ON-CE-PORT` (critical) through the real `do_sr_mpls_watch` tcpdump path, verdict `segment-injection`.
+- **Docs:** [nettools.md › SR-MPLS Watch](nettools.md#sr-mpls-watch) (LSP Ping / VCCV / IOAM, 56 codes).
+
 #### [#951](https://github.com/PierreGode/Ragnar/pull/951) — feat(net): OAM Watch v2 — +6 abuse codes (Event-replay refinement)
 *branch `feature/lldp-watch-v3` (shared)*
 
