@@ -31979,6 +31979,13 @@ function updateWardrivingUI(status) {
     // session count from companions before the first DB stats roll-up.
     updateElement('wd-zigbee-count', String(stats.zigbee_devices || status.zigbee_count || 0));
 
+    // Aircraft (ADS-B) — unique aircraft heard this UTC day (climbs as the radar
+    // sees new ones); sub-line shows how many are overhead now, or that the
+    // radar is off (ADS-B needs an RTL-SDR running the radar).
+    const adsbLive = status.adsb || {};
+    updateElement('wd-adsb-live-count', String(adsbLive.today || 0));
+    updateElement('wd-adsb-live-sub', adsbLive.running ? `${adsbLive.live || 0} overhead` : 'radar off');
+
     // Interfaces
     const ifInfo = document.getElementById('wd-interfaces-info');
     if (status.interfaces && status.interfaces.length > 0) {

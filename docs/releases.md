@@ -4,6 +4,13 @@
 
 ### 2026-10-14
 
+#### [#957](https://github.com/PierreGode/Ragnar/pull/957) — feat(wardriving): live Aircraft (ADS-B) count in the status row
+*branch `feature/adsb-live-card`*
+
+- **A live Aircraft card** now sits in the Wardriving tab's status row next to WiFi / Bluetooth / Cell / Thread-Zigbee. Its number is the **unique aircraft heard this UTC day** and climbs as the ADS-B radar sees new ones; the sub-line shows how many are **overhead now**, or **radar off** when dump1090 isn't running (ADS-B needs an RTL-SDR, which runs alongside the WiFi wardrive on its own radio).
+- Fed by a new cheap `adsb.live_status()` (running / live / today) added to `/api/wardriving/status` — no `lsusb` or type enrichment, safe on the ~2 s status poll.
+- Complements the ADS-B → Wardrift upload card from [#956](https://github.com/PierreGode/Ragnar/pull/956); same per-UTC-day unique-aircraft log, shown live instead of only at upload.
+
 #### [#956](https://github.com/PierreGode/Ragnar/pull/956) — feat(adsb): upload aircraft to Wardrift (Aircraft Watch)
 *branch `feature/adsb-wardrift-upload`*
 

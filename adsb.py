@@ -1002,6 +1002,18 @@ def status():
     return st
 
 
+def live_status():
+    """Cheap status for frequent pollers (e.g. the wardriving status card):
+    whether the radar is running, how many aircraft are overhead right now, and
+    the unique aircraft logged so far this UTC day. No dump1090 detection
+    (lsusb) and no type enrichment, so it is safe to call every couple of
+    seconds."""
+    st = _tracker.status()
+    return {"running": bool(st.get("running")),
+            "live": st.get("aircraft", 0),
+            "today": day_icao_count()}
+
+
 def aircraft():
     d = _tracker.aircraft()
     enrich_types(d.get("aircraft") or [])       # fill ICAO type (A320/B738) from adsb.lol, cached

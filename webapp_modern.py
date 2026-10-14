@@ -14750,6 +14750,12 @@ def wardriving_status():
         status = engine.get_status()
         status['enabled'] = True
         status['allow_backfill'] = bool(shared_data.config.get('wardriving_allow_backfill', False))
+        # Live ADS-B tally for the wardriving status card (cheap; no lsusb).
+        try:
+            import adsb
+            status['adsb'] = adsb.live_status()
+        except Exception:
+            pass
         return jsonify(status)
     except Exception as e:
         logger.error(f"Wardriving status error: {e}")

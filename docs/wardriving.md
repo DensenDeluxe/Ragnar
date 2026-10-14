@@ -829,8 +829,11 @@ via dump1090) can feed Wardrift's **Aircraft Watch** (detect 10 different
 aircraft in a UTC day). Ragnar's live radar only shows what is overhead now, so
 `adsb.py` also logs every **unique ICAO** it hears per UTC day to
 `data/adsb/day_YYYYMMDD.jsonl` (one row per aircraft, plus one enrichment row
-when a callsign first becomes known). Both the **Wardriving tab** (Aircraft card) and the ADS-B radar page's
-**Wardrift Aircraft Watch** card upload that day's aircraft:
+when a callsign first becomes known). The Wardriving tab's status row shows a
+live **Aircraft** card — the day's unique count climbing as the radar hears new
+planes, with how many are overhead now (or *radar off*) underneath. Both the
+**Wardriving tab** (upload card) and the ADS-B radar page's **Wardrift Aircraft
+Watch** card upload that day's aircraft:
 
 - **Same account, same endpoint.** It uses the Wardrift sign-in from the main
   Settings (no separate key) and POSTs to the same `/v1/wardrive/logs` the
