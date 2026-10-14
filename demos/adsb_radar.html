@@ -257,6 +257,29 @@
     <div class="vdl2-list" id="vdl2-list"><div class="empty" id="vdl2-empty">VDL Mode 2 off — the modern datalink (~136 MHz): ACARS-over-VDL2, <b>CPDLC</b> controller↔pilot clearances and <b>ADS-C</b> position contracts, decoded via dumpvdl2 + libacars. One dongle, so this pauses the radar.</div></div>
   </div>
 
+  <div class="card wardriftcard">
+    <div class="tcap">
+      <span class="t">🛩 Wardrift Aircraft Watch <span class="c" id="wd-adsb-count"></span></span>
+      <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="tag idle" id="wd-adsb-tag">—</span>
+        <button class="ctl" id="wd-adsb-upload" style="padding:5px 11px" title="Upload today's unique aircraft to Wardrift">&#8593;&nbsp;Upload today</button>
+      </span>
+    </div>
+    <div style="padding:10px 2px;font-size:12px;color:var(--ink-dim);line-height:1.5">
+      <div id="wd-adsb-note" style="color:var(--muted)">Ragnar logs the unique aircraft it hears each UTC day; upload them to Wardrift to earn aircraft influence, XP and advance Aircraft Watch (10 different aircraft in a day). Uses your Wardrift sign-in from the main Settings.</div>
+      <label style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;cursor:pointer">
+        <input type="checkbox" id="wd-adsb-auto">
+        <span>Auto-upload while receiving, every</span>
+        <select id="wd-adsb-interval" class="tin" style="width:auto">
+          <option value="15">15 min</option><option value="30" selected>30 min</option>
+          <option value="60">60 min</option><option value="120">120 min</option>
+        </select>
+        <span id="wd-adsb-pushnote" style="color:var(--muted)"></span>
+      </label>
+      <div id="wd-adsb-last" style="margin-top:8px;color:var(--muted)"></div>
+    </div>
+  </div>
+
   <footer>
     <div><b>How it works:</b> dump1090 decodes 1090 MHz ADS-B; each aircraft is placed by its own broadcast lat/lon relative to your receiver location. Set <b>My lat/lon</b> (or use the browser location) so the range rings and bearings are correct. Blip colour = altitude. Range rings label in the selected unit.</div>
     <div style="margin-top:6px"><b>✉ ACARS:</b> aircraft VHF datalink (~131 MHz) — position reports, OOOI times, weather, load sheets and free-text crew↔ops messages, in the clear via acarsdec. Matched to the contacts above by tail/flight. One dongle means ACARS and the 1090 MHz radar can't run at once.</div>
@@ -961,6 +984,52 @@
           needsInstall); }
     }).catch(function(){ if(DEMO_ON) synthMode(); });
   }
+
+  // ---- Wardrift Aircraft Watch upload ------------------------------------
+  var wdAdsbBusy=false;
+  function wdAdsbRender(d){
+    var tag=document.getElementById('wd-adsb-tag'), cnt=document.getElementById('wd-adsb-count'),
+        note=document.getElementById('wd-adsb-note'), last=document.getElementById('wd-adsb-last'),
+        upBtn=document.getElementById('wd-adsb-upload'), auto=document.getElementById('wd-adsb-auto'),
+        iv=document.getElementById('wd-adsb-interval'), push=document.getElementById('wd-adsb-pushnote');
+    var n=d.today_aircraft||0;
+    cnt.textContent = n ? ('· '+n+(n<10?('/10'):'')) : '';
+    if(!d.signed_in){ tag.textContent='sign in'; tag.className='tag idle';
+      note.innerHTML='Not signed in to Wardrift. Open the main dashboard → Settings → Wardrift and sign in; this uses the same account.';
+      upBtn.disabled=true; upBtn.style.opacity=.5; auto.disabled=true; iv.disabled=true; return; }
+    tag.textContent=d.username||'ready'; tag.className='tag net';
+    upBtn.disabled = n===0 || wdAdsbBusy; upBtn.style.opacity = (n===0||wdAdsbBusy)?.5:1;
+    auto.checked=!!d.auto; iv.value=String(d.interval_min||30); auto.disabled=false; iv.disabled=false;
+    push.textContent = d.pushover_ready==='off' ? '· Pushover is off in Settings'
+                     : d.pushover_ready==='missing' ? '· set up Pushover for alerts' : '';
+    var rec=(d.days||[]).filter(function(x){return x.day===d.today;})[0] || (d.days||[])[0];
+    if(rec && rec.state){
+      var map={ok:['✓','var(--live)'],processing:['…','var(--accent)'],failed:['✕','#e06b6b'],skipped:['–','var(--muted)'],unknown:['?','var(--muted)']};
+      var m=map[rec.state]||['·','var(--muted)'];
+      var txt=rec.state==='ok' ? (rec.exp?('uploaded, +'+rec.exp+' XP'):'uploaded')
+            : rec.state==='processing' ? 'Wardrift is processing…'
+            : rec.state==='skipped' ? 'nothing to upload' : (rec.message||rec.state);
+      last.innerHTML='<span style="color:'+m[1]+'">'+m[0]+'</span> '+esc(rec.day)+': '+esc(txt);
+    } else last.textContent='';
+  }
+  function loadWardrift(){ fetch('/api/adsb/wardrift').then(function(r){return r.json();}).then(function(d){ if(!d.error) wdAdsbRender(d); }).catch(function(){}); }
+  function saveWardriftAuto(){ fetch('/api/adsb/wardrift',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({auto:document.getElementById('wd-adsb-auto').checked, interval_min:parseInt(document.getElementById('wd-adsb-interval').value,10)})})
+      .then(function(r){return r.json();}).then(function(d){ if(!d.error) wdAdsbRender(d); }).catch(function(){}); }
+  document.getElementById('wd-adsb-auto').addEventListener('change',saveWardriftAuto);
+  document.getElementById('wd-adsb-interval').addEventListener('change',saveWardriftAuto);
+  document.getElementById('wd-adsb-upload').addEventListener('click',function(){
+    if(wdAdsbBusy) return; wdAdsbBusy=true;
+    var last=document.getElementById('wd-adsb-last'); last.innerHTML='<span style="color:var(--accent)">…</span> uploading…';
+    fetch('/api/adsb/wardrift/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(function(r){return r.json();}).then(function(res){
+        wdAdsbBusy=false;
+        if(res.success){ last.innerHTML='<span style="color:var(--accent)">…</span> '+(res.duplicate?'already on Wardrift':'sent '+(res.count||0)+' aircraft — Wardrift is processing');
+        } else { last.innerHTML='<span style="color:#e06b6b">✕</span> '+esc(res.error||'upload failed'); }
+        loadWardrift();
+      }).catch(function(e){ wdAdsbBusy=false; last.innerHTML='<span style="color:#e06b6b">✕</span> '+esc(String(e)); });
+  });
+  loadWardrift(); setInterval(loadWardrift, 20000);
 
   loadRx();
   if(rx.lat==null){ ensureLocation(); }   // no saved location → auto-locate so the radar can place aircraft

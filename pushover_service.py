@@ -331,6 +331,16 @@ class PushoverService:
         threading.Thread(target=self.send, args=(message[:1024], title, priority), daemon=True).start()
         return True
 
+    def notify_adsb_upload(self, message, title="Ragnar — ADS-B upload", priority=0):
+        """Summary of an ADS-B auto-upload to Wardrift (once the upload has a
+        final verdict). Gated by pushover_enabled + pushover_notify_adsb_upload."""
+        if not self.is_enabled():
+            return False
+        if not self.shared_data.config.get("pushover_notify_adsb_upload", True):
+            return False
+        threading.Thread(target=self.send, args=(message[:1024], title, priority), daemon=True).start()
+        return True
+
     def notify_cellular_uplink(self, message, title="Ragnar — Cellular uplink", priority=0):
         """Uplink failover to / restore from a USB-tethered cellular hotspot
         (cellular_uplink.py). Gated by pushover_enabled +

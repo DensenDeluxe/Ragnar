@@ -643,6 +643,9 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 | POST | `/api/wardriving/wardrift/signout` | Forget the Wardrift session token |
 | GET | `/api/wardriving/wardrift/dashboard` | Proxy of Wardrift `GET /v1/dashboard` (character level, EXP, currency, route stats) |
 | GET/POST | `/api/wardriving/wardrift/mesh` | Mesh-node reporter status (node, link, ports, last report) / settings: `enabled`, `key`, `conn` (`usb`\|`wifi`), `port`, `host`, `interval`, `report_now` |
+| GET/POST | `/api/adsb/wardrift` | ADS-B → Wardrift status (today's unique aircraft, recent days, Pushover readiness) / settings: `auto`, `interval_min` |
+| POST | `/api/adsb/wardrift/upload` | Upload a day's aircraft to Wardrift — body `{"day": "YYYYMMDD"}` (default today) |
+| GET | `/api/adsb/export?day=YYYYMMDD` | Download a day's aircraft as an SBS/BaseStation log |
 
 > **Mutually exclusive with On-Screen Network Diagnostic mode.** Both take over
 > the e-Paper panel and HAT keys, so starting wardriving turns Network Diagnostic
@@ -819,6 +822,33 @@ are marked *(not set up)*.
   `data/upload_history.json` and shown under **Recent uploads** in the card:
   ✓ uploaded (e.g. "431 readings saved, +285 XP"), ✕ failed with the reason,
   … still processing, – skipped.
+
+### ADS-B → Wardrift (Aircraft Watch)
+Separate from ground wardrives, the [ADS-B radar](#) (`/adsb-radar`, 1090 MHz
+via dump1090) can feed Wardrift's **Aircraft Watch** (detect 10 different
+aircraft in a UTC day). Ragnar's live radar only shows what is overhead now, so
+`adsb.py` also logs every **unique ICAO** it hears per UTC day to
+`data/adsb/day_YYYYMMDD.jsonl` (one row per aircraft, plus one enrichment row
+when a callsign first becomes known). Both the **Wardriving tab** (Aircraft card) and the ADS-B radar page's
+**Wardrift Aircraft Watch** card upload that day's aircraft:
+
+- **Same account, same endpoint.** It uses the Wardrift sign-in from the main
+  Settings (no separate key) and POSTs to the same `/v1/wardrive/logs` the
+  wardrive route uses. Ragnar exports the day as an **SBS/BaseStation** log
+  (`# timezone=UTC` header, one `MSG` row per aircraft); Wardrift auto-detects
+  the format, credits eligible aircraft (ICAO + observation time; **no receiver
+  GPS needed**) and does **not** create a ground route.
+- **Each ICAO counts once per account per UTC day** across all uploads, so the
+  day's growing log can be re-sent safely — repeats add nothing.
+- **Manual or auto.** The ↑ *Upload today* button sends the current day; the
+  *Auto-upload while receiving* toggle re-sends the day's aircraft every
+  `adsb_wardrift_interval_min` minutes (default 30) while the radar is running
+  and only when the unique count has grown.
+- **Verdict + Pushover.** Wardrift answers *pending* then decides; Ragnar
+  follows `GET /v1/wardrive/uploads/{id}` to the result and (for auto-uploads)
+  sends a Pushover summary — *Wardrive Aircraft upload* / `pushover_notify_adsb_upload`,
+  on by default.
+- **Download.** `GET /api/adsb/export?day=YYYYMMDD` returns the day's `.sbs`.
 
 **[Wardrift](https://wardrift.net)** (faction / territory wardriving game, API at
 `https://wardrift.net/v1`, overridable via the `wardrift_base_url` config key)

@@ -34153,6 +34153,82 @@ async function loadWardriveUploadConfig() {
     _renderAutoUpload(d);
     _renderWardriftConfig(d);
     loadWardriftMesh();
+    loadAdsbWardrift();
+}
+
+// ---- Aircraft (ADS-B) -> Wardrift Aircraft Watch (same backend as the radar page's card)
+let _adsbWardriftBusy = false;
+
+function _adsbWardriftRender(d) {
+    const badge = document.getElementById('wd-adsb-badge');
+    const today = document.getElementById('wd-adsb-today');
+    const upBtn = document.getElementById('wd-adsb-upload-btn');
+    const auto = document.getElementById('wd-adsb-auto');
+    const iv = document.getElementById('wd-adsb-interval');
+    const last = document.getElementById('wd-adsb-last');
+    const push = document.getElementById('wd-adsb-pushnote');
+    const n = d.today_aircraft || 0;
+    if (badge) {
+        if (!d.signed_in) { badge.textContent = 'sign in above'; badge.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400'; }
+        else { badge.textContent = (d.username || 'ready'); badge.className = 'text-xs px-2 py-0.5 rounded-full bg-amber-900/60 text-amber-300'; }
+    }
+    if (today) today.textContent = n ? `${n} aircraft today${n < 10 ? ' (' + n + '/10)' : ''}` : 'no aircraft logged yet today';
+    if (upBtn) { upBtn.disabled = !d.signed_in || n === 0 || _adsbWardriftBusy; upBtn.style.opacity = upBtn.disabled ? 0.5 : 1; }
+    if (auto) auto.checked = !!d.auto;
+    if (iv) iv.value = String(d.interval_min || 30);
+    if (push) push.textContent = d.pushover_ready === 'off' ? '· Pushover is off in Settings'
+        : d.pushover_ready === 'missing' ? '· set up Pushover for alerts' : '';
+    if (last) {
+        const rec = (d.days || []).find(x => x.day === d.today) || (d.days || [])[0];
+        if (rec && rec.state) {
+            const icon = { ok: ['✓', 'text-emerald-400'], processing: ['…', 'text-amber-300'], failed: ['✕', 'text-red-400'], skipped: ['–', 'text-gray-500'], unknown: ['?', 'text-gray-400'] }[rec.state] || ['·', 'text-gray-400'];
+            const txt = rec.state === 'ok' ? (rec.exp ? `uploaded, +${rec.exp} XP` : 'uploaded')
+                : rec.state === 'processing' ? 'Wardrift is processing…'
+                : rec.state === 'skipped' ? 'nothing to upload' : (rec.message || rec.state);
+            last.innerHTML = `<span class="${icon[1]}">${icon[0]}</span> ${escapeHtml(rec.day)}: ${escapeHtml(txt)}`;
+        } else last.textContent = '';
+    }
+}
+
+async function loadAdsbWardrift() {
+    try {
+        const r = await fetch('/api/adsb/wardrift');
+        const d = await r.json();
+        if (!d.error) _adsbWardriftRender(d);
+    } catch (e) { /* radar/SDR may be absent — leave the card idle */ }
+}
+
+async function saveAdsbWardrift() {
+    try {
+        const r = await fetch('/api/adsb/wardrift', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto: !!document.getElementById('wd-adsb-auto')?.checked,
+                                   interval_min: parseInt(document.getElementById('wd-adsb-interval')?.value || '30', 10) })
+        });
+        const d = await r.json();
+        if (!d.error) _adsbWardriftRender(d);
+    } catch (e) { /* ignore */ }
+}
+
+async function uploadAdsbWardrift() {
+    if (_adsbWardriftBusy) return;
+    _adsbWardriftBusy = true;
+    const msg = document.getElementById('wd-adsb-msg');
+    if (msg) { msg.textContent = 'Uploading…'; msg.className = 'text-xs mt-1 text-amber-300'; }
+    try {
+        const r = await fetch('/api/adsb/wardrift/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const d = await r.json();
+        _adsbWardriftBusy = false;
+        if (msg) {
+            if (d.success) { msg.textContent = d.duplicate ? '✓ Already on Wardrift' : `✓ Sent ${d.count || 0} aircraft — Wardrift is processing`; msg.className = 'text-xs mt-1 text-emerald-400'; }
+            else { msg.textContent = '✕ ' + (d.error || 'Upload failed'); msg.className = 'text-xs mt-1 text-red-400'; }
+            msg.classList.remove('hidden');
+        }
+        loadAdsbWardrift();
+    } catch (e) {
+        _adsbWardriftBusy = false;
+        if (msg) { msg.textContent = '✕ ' + e.message; msg.className = 'text-xs mt-1 text-red-400'; msg.classList.remove('hidden'); }
+    }
 }
 
 // ---- Wardrift mesh node: Ragnar reports a Meshtastic node (USB or WiFi) to /v1/ingest/mesh

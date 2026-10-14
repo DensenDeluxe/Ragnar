@@ -4,6 +4,14 @@
 
 ### 2026-10-14
 
+#### [#956](https://github.com/PierreGode/Ragnar/pull/956) — feat(adsb): upload aircraft to Wardrift (Aircraft Watch)
+*branch `feature/adsb-wardrift-upload`*
+
+- **ADS-B now feeds Wardrift's Aircraft Watch** (detect 10 different aircraft in a UTC day), wired up like the wardrive upload. The live radar only shows what is overhead now, so `adsb.py` additionally logs every **unique ICAO** heard per UTC day to `data/adsb/day_YYYYMMDD.jsonl` (one row per aircraft, plus one enrichment row when a callsign is first decoded), pruned after 21 days.
+- **Same account, same endpoint.** The radar page's new **Wardrift Aircraft Watch** card uploads the day as an **SBS/BaseStation** log (`# timezone=UTC` header, one `MSG` row per aircraft — type 3/1/8 by the fields present) to the same signed-in `/v1/wardrive/logs` the wardrive route uses. Wardrift auto-detects the format, credits eligible aircraft (ICAO + observation time; **no receiver GPS needed**) and makes **no** ground route. Each ICAO counts once per account per UTC day, so the day's growing log re-sends safely.
+- **Manual or auto.** ↑ *Upload today*, or an *Auto-upload while receiving* toggle that re-sends the day every `adsb_wardrift_interval_min` min (default 30) while the radar runs and only when the unique count grew. Wardrift's async verdict is followed to *succeeded/failed*, and auto-uploads send a **Pushover** summary (`pushover_notify_adsb_upload`, on by default).
+- **New endpoints:** `GET/POST /api/adsb/wardrift`, `POST /api/adsb/wardrift/upload`, `GET /api/adsb/export?day=YYYYMMDD`. Reuses the existing Wardrift sign-in (no new secret). Tests: `tests/test_adsb_export.py` (dedup, field back-fill, SBS shape/round-trip through `parse_sbs`, mid-day restart reseed). ALPR threat influence from the same release is left for later. **Unverified against a live Wardrift ADS-B upload** (the dev box's session token is expired).
+
 #### [#955](https://github.com/PierreGode/Ragnar/pull/955) — fix(test): LACP Watch T75 scapy-free check inspects its own source, not sys.modules
 *branch `fix/lacp-t75-scapy-selfcheck`*
 
