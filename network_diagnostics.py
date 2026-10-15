@@ -26205,18 +26205,27 @@ def _modbus_selftest():
     def codes(e):
         return {f.code for f in e.findings}
 
+    # v2: the cleartext-posture exposure codes (MBW-040 OT-subnet, MBW-041/042
+    # secure-Modbus availability) are orthogonal to the abuse/framing/enum
+    # detectors and fire once per slave on any armed plaintext 502. Strip them
+    # when a scenario is focused on an abuse/framing code; the dedicated
+    # posture scenarios below assert them with the full `codes()` set.
+    def abuse_codes(e):
+        return codes(e) - {'MBW-040', 'MBW-041', 'MBW-042'}
+
     V4, V6 = _sock.AF_INET, _sock.AF_INET6
     M, A, PLC = '10.20.0.5', '10.20.0.99', '10.20.0.20'
     read = _st.pack('>BHH', 3, 0, 5)
     coil = _st.pack('>BHH', 5, 0, 0xFF00)
 
-    # Registry + severity split (11 codes: 3 high / 4 medium / 3 low / 1 info).
+    # Registry + severity split (v2: 12 codes — 3 high / 4 medium / 3 low / 2 info;
+    # the new MBW-042 is the info/exposure "cleartext, no secure peer seen" code).
     reg = F.REGISTRY
     split = {}
     for v in reg.values():
         split[v[2]] = split.get(v[2], 0) + 1
-    check('registry: 11 codes, 3 high / 4 medium / 3 low / 1 info',
-          len(reg) == 11 and split == {'high': 3, 'medium': 4, 'low': 3, 'info': 1})
+    check('registry: 12 codes, 3 high / 4 medium / 3 low / 2 info',
+          len(reg) == 12 and split == {'high': 3, 'medium': 4, 'low': 3, 'info': 2})
 
     # Parser: framing cross-checks (MBW-030 is load-bearing in parse()).
     a = P.parse(adu(1, read))
@@ -26242,14 +26251,14 @@ def _modbus_selftest():
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, coil)), now=10.0)
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
-    check('engine: learned master reading + writing raises nothing (FP guard)',
-          not e.findings)
+    check('engine: learned master reading + writing raises no abuse (FP guard)',
+          abuse_codes(e) == set())
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, coil)), now=10.0)
-    check('engine: write from an unlearned master -> MBW-001', codes(e) == {'MBW-001'})
+    check('engine: write from an unlearned master -> MBW-001', abuse_codes(e) == {'MBW-001'})
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, read)), now=10.0)
-    check('engine: read from an unlearned master -> MBW-004', codes(e) == {'MBW-004'})
+    check('engine: read from an unlearned master -> MBW-004', abuse_codes(e) == {'MBW-004'})
     e = eng(window=3600.0)
     e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, coil)), now=10.0)
     check('engine: no off-baseline alert while the learning window is open',
@@ -26259,7 +26268,7 @@ def _modbus_selftest():
     check('engine: FC8 sub 0x0004 Force Listen Only -> MBW-002', 'MBW-002' in codes(e))
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, _st.pack('>BHH', 8, 1, 0))), now=10.0)
-    check('engine: FC8 restart-comm -> MBW-003', codes(e) == {'MBW-003'})
+    check('engine: FC8 restart-comm -> MBW-003', abuse_codes(e) == {'MBW-003'})
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, M, PLC, 1),
            P.parse(adu(1, _st.pack('>BHH', 8, 4, 0)), is_response=True), now=10.0)
@@ -26293,7 +26302,7 @@ def _modbus_selftest():
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(umas(0x23)), now=10.0)
     check('engine: UMAS write with no preceding read -> MBW-010 only, no MBW-011',
-          codes(e) == {'MBW-010'})
+          abuse_codes(e) == {'MBW-010'})
     e = eng(learned=[(V4, M, PLC, 1)])
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(umas(0x20)), now=10.0)
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(umas(0x23)), now=100.0)
@@ -26303,13 +26312,26 @@ def _modbus_selftest():
     _c, ot = _modbus_parse_subnets(['10.20.0.0/24'])
     e = eng(learned=[(V4, '192.168.1.5', '192.168.1.20', 1)], ot_subnets=ot)
     e.feed(S.FlowKey(V4, '192.168.1.5', '192.168.1.20', 1), P.parse(adu(1, read)), now=10.0)
-    check('engine: Modbus outside the declared OT subnet -> MBW-040', codes(e) == {'MBW-040'})
+    check('engine: Modbus outside the declared OT subnet -> MBW-040', 'MBW-040' in codes(e))
     e = eng(learned=[(V4, M, PLC, 1)], ot_subnets=ot)
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
-    check('engine: Modbus inside the declared OT subnet -> no MBW-040', not e.findings)
+    check('engine: Modbus inside the declared OT subnet -> no MBW-040', 'MBW-040' not in codes(e))
     e = eng(learned=[(V4, M, PLC, 1)], security_hosts={(V4, PLC)})
     e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
     check('engine: plain 502 to a host seen on 802 -> MBW-041', codes(e) == {'MBW-041'})
+    # v2 MBW-042: armed, no 802 ever seen for the slave -> cleartext-without-secure-peer
+    # (once per family/slave); a legit read from the learned master still exposes it.
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: plain 502, no 802 seen for the slave -> MBW-042', codes(e) == {'MBW-042'})
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=11.0)
+    check('engine: MBW-042 fires once per (family, slave)',
+          [f.code for f in e.findings].count('MBW-042') == 1)
+    # once the slave is seen on 802, it is never re-reported as 042 (-> MBW-041 instead).
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.note_security_host(V4, PLC)
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: a slave later seen on 802 is MBW-041, never MBW-042', codes(e) == {'MBW-041'})
 
     # Malformed framing + dual-stack.
     e = eng(learned=[(V4, M, PLC, 1)])
@@ -26319,10 +26341,11 @@ def _modbus_selftest():
     e = eng(learned=[(V6, '2001:db8::5', '2001:db8::20', 1)])
     e.feed(S.FlowKey(V6, '2001:db8::99', '2001:db8::20', 1), P.parse(adu(1, coil)), now=10.0)
     e.feed(S.FlowKey(V4, '2001:db8::5', '2001:db8::20', 1), P.parse(adu(1, coil)), now=10.0)
+    _abuse = [f for f in e.findings if f.code not in ('MBW-040', 'MBW-041', 'MBW-042')]
     check('engine: IPv6 off-baseline write -> MBW-001, and a v6 master is not trusted '
           'on v4 (families tracked apart)',
-          [f.code for f in e.findings] == ['MBW-001', 'MBW-001']
-          and {f.key.family for f in e.findings} == {V4, V6})
+          [f.code for f in _abuse] == ['MBW-001', 'MBW-001']
+          and {f.key.family for f in _abuse} == {V4, V6})
 
     # Adapter: baseline persistence + verdict ladder.
     bl = S.Baseline(window_s=60.0)
@@ -26385,11 +26408,13 @@ def _modbus_selftest():
                 got = {f['code'] for f in r.get('findings') or []}
                 fam_ok = all(f['af'] == ('v4' if label == 'IPv4' else 'v6')
                              for f in r.get('findings') or [])
+                # v2: the orthogonal cleartext-posture note MBW-042 fires once per
+                # slave on the armed plaintext; strip it to assert the abuse set.
                 ok = (r.get('success') and r.get('verdict') == 'plc-abuse'
-                      and got == {'MBW-001', 'MBW-002', 'MBW-004'} and fam_ok
-                      and r.get('adus') == 11)
+                      and got - {'MBW-040', 'MBW-041', 'MBW-042'} == {'MBW-001', 'MBW-002', 'MBW-004'}
+                      and fam_ok and r.get('adus') == 11)
                 check('e2e %s pcap: off-baseline write + Force Listen Only -> plc-abuse '
-                      '(learned master stays quiet)' % label, ok)
+                      '(learned master raises no abuse)' % label, ok)
                 ok_all = ok_all and ok
             e2e = {'ran': True, 'pass': ok_all, 'scenarios_run': len(legs)}
         except Exception as ex:

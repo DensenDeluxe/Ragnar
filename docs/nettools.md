@@ -1088,6 +1088,7 @@ Eleven finding codes (`MBW-nnn`):
 | `MBW-030` | Malformed MBAP/PDU framing (libmodbus trigger: **CVE-2019-14462**, **CVE-2019-14463**, **CVE-2024-10918**) | medium |
 | `MBW-040` | Modbus outside the declared OT subnet(s) | low |
 | `MBW-041` | Plain `502` to a host also seen on Modbus Security (`802`/TLS) | info |
+| `MBW-042` | Cleartext Modbus on `502`, **no** secure Modbus ever seen for the peer (v2) | info |
 
 `MBW-030` compares the MBAP length field with the bytes that actually arrived, and an FC15/FC16
 byte count with its quantity and its trailing data. This is the input shape of the
@@ -1095,7 +1096,13 @@ libmodbus out-of-bounds reads and over-length reply. It is a **trigger** finding
 the packet, but it cannot confirm the PLC runs libmodbus. A malformed ADU is not used for
 the abuse checks. `MBW-040` only runs once you declare OT subnet(s) in the card or with
 `--ot-subnet`; the list is saved with the baseline. Modbus Security on `802` is TLS, so
-only its presence is recorded.
+only its presence is recorded. **`MBW-042` (v2)** is the cleartext-posture floor: after the
+learning window, any plaintext `502` to a slave for which **no** `802`/TLS session has ever
+been seen fires once per (family, slave) — the "this PLC has no secure-Modbus option in
+use" inventory. It is orthogonal to the abuse/framing codes (a legitimate learned master
+still exposes the slave), and the cadence is deliberate: an `802` session seen during
+learning suppresses it, and a slave later seen on `802` is reported as `MBW-041` instead,
+never re-reported as `042`.
 
 **Dual-stack.** IPv4 and IPv6 are tracked separately end to end: a master learned on IPv6 is
 not trusted on IPv4. The sensor walks IPv6 extension headers to reach the TCP header. The

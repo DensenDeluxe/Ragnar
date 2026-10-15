@@ -23,8 +23,7 @@ from scapy.layers.inet6 import (
     IPv6ExtHdrFragment,
 )
 
-# Ragnar: relative imports inside the vendored package (see findings.py).
-try:
+try:  # Ragnar: relative inside the vendored package, bare for flat standalone.
     from .parser import parse, MODBUS_TCP_PORT, MODBUS_SECURITY_PORT
     from .state import FlowKey
     from .findings import Engine
@@ -85,7 +84,7 @@ def process_packet(pkt, engine: Engine) -> None:
     # when the same host is also reached in plaintext on 502.
     if MODBUS_SECURITY_PORT in (sport, dport):
         host = dst if dport == MODBUS_SECURITY_PORT else src
-        engine.security_hosts.add((family, host))
+        engine.note_security_host(family, host)
         return  # TLS payload is opaque; nothing to decode
 
     is_response = sport == MODBUS_TCP_PORT  # slave speaks from 502

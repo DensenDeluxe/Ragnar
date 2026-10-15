@@ -51,7 +51,11 @@ REGISTRY = {
     "MBW-030": ("Malformed MBAP/PDU framing (libmodbus trigger)", "exposure", "medium", "medium"),
     "MBW-040": ("Modbus/TCP cleartext on non-isolated segment", "exposure", "low", "low"),
     "MBW-041": ("Plain 502 where 802/TLS option exists", "exposure", "info", "low"),
+    "MBW-042": ("Cleartext Modbus on 502, no secure Modbus seen for peer", "exposure", "info", "low"),
 }
+
+# Codes reported once per flow (family, master, slave, unit) rather than per request.
+ONCE_PER_FLOW = frozenset({"MBW-004", "MBW-040", "MBW-041"})
 
 
 @dataclass
@@ -88,11 +92,28 @@ class Engine:
         self.findings: list[Finding] = []
         # operator-declared OT subnets as list of (family, ip_network); enables MBW-040
         self.ot_subnets = ot_subnets or []
-        # (family, host) pairs ever seen speaking port 802; enables MBW-041
+        # (family, host) pairs ever seen speaking port 802; enables MBW-041/042
         self.security_hosts = security_hosts or set()
+        # dedupe state
+        self._flow_reported: set[tuple[str, FlowKey]] = set()
+        # (family, slave) already reported for MBW-042
+        self._mbw042_reported: set[tuple[int, str]] = set()
 
     def _emit(self, code: str, key: FlowKey, detail: str, now: float) -> None:
+        if code in ONCE_PER_FLOW:
+            tag = (code, key)
+            if tag in self._flow_reported:
+                return
+            self._flow_reported.add(tag)
         self.findings.append(Finding(code, key, detail, now))
+
+    def note_security_host(self, family: int, host: str) -> None:
+        """
+        Record a host seen on Modbus Security (802). A slave that shows up on 802
+        is no longer an MBW-042 candidate: it will not (re)fire 042, and further
+        plaintext 502 to it is reported as MBW-041 instead.
+        """
+        self.security_hosts.add((family, host))
 
     def feed(self, key: FlowKey, adu: Adu, dst_port: int = 502,
              now: float | None = None) -> None:
@@ -156,10 +177,18 @@ class Engine:
                 self._emit("MBW-040", key,
                            "Modbus/TCP outside declared OT subnet", now)
 
-        # --- MBW-041: plain 502 where the talker is known to offer 802 ---
+        # --- MBW-041 / MBW-042: plaintext 502 vs secure-Modbus availability ---
         if is_req and dst_port != MODBUS_SECURITY_PORT:
-            if (key.family, key.dst) in self.security_hosts:
+            slave = (key.family, key.dst)
+            if slave in self.security_hosts:
                 self._emit("MBW-041", key, "plain 502 to a host that offers 802", now)
+            elif (not self.baseline.learning(now)
+                  and slave not in self._mbw042_reported):
+                # Only after the learning window, so an 802 session seen during
+                # learning counts. Once per (family, slave).
+                self._mbw042_reported.add(slave)
+                self._emit("MBW-042", key,
+                           "slave reached on 502, never seen on 802", now)
 
     def _in_declared_ot(self, key: FlowKey) -> bool:
         import ipaddress
