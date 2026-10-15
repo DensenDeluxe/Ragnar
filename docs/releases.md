@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-10-16
+
+#### [#962](https://github.com/PierreGode/Ragnar/pull/962) — feat(net): Modbus Watch v2 — MBW-042 cleartext-without-secure-peer posture + dual-stack re-vendor
+*branch `feature/modbus-watch-v2`*
+
+- **Re-vendored the Solarflere `modbuswatch` package to v2** (`python/modbuswatch/` — `findings.py` +67, `sensor.py` +14, `modbuswatch.py`; `parser.py` / `state.py` byte-identical, kept). Bare sibling imports converted to the package's try/except relative-then-bare form (so `findings`/`state` never collide with `dns_doctor_passive`'s same-named modules). **No new CVEs** — the 4 named IDs (CVE-2019-14462/14463, CVE-2024-10918 under MBW-030; CVE-2021-22779 ModiPwn under MBW-011) and the CVE index are unchanged.
+- **New code `MBW-042 CLEARTEXT_NO_SECURE_PEER` (info/exposure):** the cleartext-posture floor — after the learning window, any plaintext `502` to a slave for which **no** `802`/TLS session has ever been seen fires **once per (family, slave)**, the "this PLC has no secure-Modbus option in use" inventory. Orthogonal to the abuse/framing codes (a legitimate learned master still exposes the slave); an `802` session seen during learning suppresses it, and a slave later seen on `802` is reported as `MBW-041` instead, never re-reported as `042`. Registry now **12 codes** (3 high / 4 medium / 3 low / **2 info**).
+- **Self-test:** `modbus` suite updated to **33 scenarios** — the registry assert bumped to 12/info-2, three new MBW-042 cadence cases (fires once per slave; suppressed once the slave is seen on 802), and the focused abuse/framing/enum + e2e assertions now strip the orthogonal cleartext-posture codes (MBW-040/041/042) so they test the abuse detector in isolation. The capture BPF is unchanged (the Ragnar-optimized `tcp port 502/802 or ip6-with-extension-header` form, kept over v2's broader `or ip6`). Aggregate `do_routing_selftest` 56 suites, all green.
+- **Live-validated** in a sealed netns: cleartext Modbus/TCP reads replayed with `tcpreplay` in two bursts spanning the learn window fire **MBW-042** through the real `do_modbus_watch` tcpdump capture path, verdict `exposure`.
+- **Docs:** [nettools.md › Modbus Watch](nettools.md#modbus-watch) (MBW-042 row + cadence).
+
 ### 2026-10-14
 
 #### [#961](https://github.com/PierreGode/Ragnar/pull/961) — fix(net): L2 Data Link layer button count 16 → 18
