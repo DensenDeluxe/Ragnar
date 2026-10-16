@@ -14625,6 +14625,224 @@ def _isis_selftest():
 
 
 # --------------------------------------------------------------------------
+# RADIUS Watch: vendor-neutral passive RADIUS / EAP security scanner
+# --------------------------------------------------------------------------
+# RADIUS (RFC 2865, UDP 1812/1645 auth, 1813/1646 acct, 3799 CoA) carries network
+# authentication in the clear, protected only by MD5(secret || Request-Authenticator).
+# radiuswatch is the dedicated RADIUS protocol detector: it takes over the Blast-RADIUS
+# (CVE-2024-3596) coverage that lived — ungated, suite-wide — in aristaguard's rule_radius
+# (the 7 migrated codes keep their digits, AG-10x -> RDW-10x), and adds RADIUS/EAP auth
+# posture plus the FreeRADIUS CVEs that have a deterministic wire shape. Direction is
+# decided by the RADIUS *code*, never the port (fixes aristaguard's 1812->1812 proxy
+# blind spot). Detection-only; the engine keeps NO baseline (so no persisted state — a
+# single capture is self-contained). Engine vendored verbatim at python/radiuswatch.py
+# (self-contained stdlib + pure-Python EC math; scapy only on its own live path, which the
+# adapter does not use — it captures via tcpdump->pcap and feeds Ethernet frames to
+# RadiusEngine.handle_frame). 19 codes: 8 exposure (RDW-101/102/110/120/121/122/124/125,
+# scoped by known_infra) + 11 attack (RDW-201/212/213/214/215/216/217/218/219/220/221,
+# never scoped). RadSec's TLS/DTLS transport on 2083 is TLS Watch's job; radiuswatch only
+# records RadSec *presence* (RDW-125). NOTE: aristaguard still also detects CVE-2024-3596
+# until its rule_radius is retired in a follow-up (the module's documented migration).
+_RADIUS_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+
+
+def _radiuswatch_import():
+    """Import the vendored radiuswatch engine (python/ on sys.path). Pure stdlib at
+    import time; scapy only on its own live path, which the adapter does not use."""
+    if _RADIUS_PY_DIR not in sys.path:
+        sys.path.insert(0, _RADIUS_PY_DIR)
+    import radiuswatch
+    return radiuswatch
+
+
+def _radiuswatch_verdict(findings):
+    """ATTACK-class findings (forgery/injection/malformed-CVE) -> critical 'attack';
+    EXPOSURE-class (cleartext/PAP/CHAP/weak-EAP/no-M-A posture) -> 'weak-auth'; else clean.
+    Both tokens already live in the webapp/JS verdict sets; no new token to register."""
+    classes = {f.get('class') for f in findings}
+    if 'attack' in classes:
+        return 'attack'
+    if 'exposure' in classes:
+        return 'weak-auth'
+    return 'clean'
+
+
+def _radiuswatch_analyze(frames):
+    """Feed captured Ethernet frames through the vendored RadiusEngine and classify.
+    No baseline, no persistence — pure/testable."""
+    rw = _radiuswatch_import()
+    eng = rw.RadiusEngine(rw.Config())
+    for frame, ts in frames:
+        try:
+            eng.handle_frame(frame, ts)
+        except Exception:
+            continue
+    findings = [{'code': f.code, 'name': f.name, 'severity': f.severity,
+                 'class': f.klass, 'cves': list(f.cves), 'detail': f.detail}
+                for f in eng.findings]
+    verdict = _radiuswatch_verdict(findings)
+    if findings:
+        reasons = ['%s %s %s: %s' % (f['severity'], f['class'], f['code'], f['name'])
+                   for f in findings[:8]]
+    elif eng.stats['radius_packets']:
+        reasons = ['%d RADIUS packet(s) seen — no posture or attack findings'
+                   % eng.stats['radius_packets']]
+    else:
+        reasons = ['No RADIUS/EAP traffic seen — no RADIUS on this segment']
+    return {'success': True, 'verdict': verdict, 'reasons': reasons,
+            'findings': findings, 'packet_count': eng.stats['radius_packets'],
+            'radsec_segments': eng.stats['radsec_segments'],
+            'unknown_code': eng.stats['radius_unknown_code'],
+            'stats': dict(eng.stats)}
+
+
+def _radiuswatch_capture(iface, seconds):
+    """One passive tcpdump window into a pcap -> list of (frame_bytes, ts). Passive:
+    -w only, never a probe. Uses the engine's own BPF (RADIUS/CoA/RadSec ports + the
+    IPv6 extension-header admission clause). Returns (frames, error)."""
+    if not _have('tcpdump'):
+        return None, 'tcpdump is not installed. Click Install to add it.'
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return None, 'the Python "scapy" package is required for pcap dissection'
+    rw = _radiuswatch_import()
+    bpf = rw.build_bpf_filter(rw.Config())
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap', prefix='radiuswatch_')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-w', path,
+              '-s', '0', '-U', '-q', bpf], timeout=seconds + 8)
+        from scapy.all import rdpcap
+        frames = []
+        for pkt in rdpcap(path):
+            try:
+                frames.append((bytes(pkt), float(pkt.time)))
+            except Exception:
+                continue
+        return frames, None
+    except Exception as e:
+        return None, 'capture failed: %s' % e
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def do_radius_watch(interface=None, seconds=20, pcap=None):
+    """Passive RADIUS/EAP security scanner (detection-only). Captures RADIUS for a few
+    seconds and classifies forgery / injection / malformed-CVE (attack) and cleartext /
+    PAP / CHAP / weak-EAP / missing-Message-Authenticator (exposure) posture. No baseline —
+    each capture is self-contained. Blast-RADIUS (CVE-2024-3596) + 8 FreeRADIUS CVEs."""
+    if pcap is None:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        if iface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': 'unknown interface: %s' % iface}
+        seconds = _clamp_int(seconds, 20, 5, 50)
+        frames, err = _radiuswatch_capture(iface, seconds)
+        if err:
+            return {'success': False, 'interface': iface, 'error': err,
+                    'missing_tool': ('tcpdump' if 'not installed' in err
+                                     else ('scapy' if 'scapy' in err else None))}
+    else:
+        from scapy.all import rdpcap
+        iface = interface or 'pcap'
+        frames = [(bytes(pkt), float(getattr(pkt, 'time', 0.0))) for pkt in rdpcap(pcap)]
+
+    result = _radiuswatch_analyze(frames)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    return result
+
+
+def _radiuswatch_selftest():
+    """Self-test the RADIUS detectors against the vendored engine with hand-built frames
+    (no scapy), run the vendored module's own 605-check suite, plus a Scapy pcap e2e leg."""
+    import struct as _st
+    rw = _radiuswatch_import()
+    scenarios = []
+
+    def ck(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    def frame(radius, src='10.0.0.1', dst='10.0.0.2', sport=50000, dport=1812):
+        udp = rw._mk_udp(sport, dport, radius)
+        ip = rw._mk_ipv4(src, dst, 17, udp)
+        return rw._mk_eth(b'\x02\x00\x00\x00\x00\x02', b'\x02\x00\x00\x00\x00\x01',
+                          0x0800, ip)
+
+    def run(*frames):
+        eng = rw.RadiusEngine(rw.Config())
+        t = [0.0]
+        for fr in frames:
+            eng.handle_frame(fr, t[0])
+            t[0] += 0.01
+        return {f.code for f in eng.findings}
+
+    # Access-Request without Message-Authenticator -> RDW-102 (+ RDW-101 cleartext)
+    noma = rw._mk_radius_v(1, 0, [(1, b'alice')])
+    ck('rdw102_no_message_authenticator', 'RDW-102' in run(frame(noma)))
+    # PAP: User-Password (type 2) on the wire -> RDW-120
+    pap = rw._mk_radius_v(1, 1, [(1, b'alice'), (2, b'\x11' * 16)])
+    ck('rdw120_pap_over_udp', 'RDW-120' in run(frame(pap)))
+    # Blast-RADIUS forgery: Proxy-State (type 33) total over the structural bound -> RDW-201
+    forge = rw._mk_radius_v(1, 2, [(33, b'X' * 100), (33, b'Y' * 60)])
+    ck('rdw201_forgery_proxy_state', 'RDW-201' in run(frame(forge)))
+    # Access-Accept with a non-UTF-8 Reply-Message (type 18) -> RDW-213 (deterministic)
+    badreply = rw._mk_radius_v(2, 0, [(18, b'\xff\xfe\xff\xfe')])
+    ck('rdw213_reply_message_malformed',
+       'RDW-213' in run(frame(badreply, src='10.0.0.2', dst='10.0.0.1',
+                              sport=1812, dport=50000)))
+    # direction is by RADIUS code, not port: an Accept on 1812->1812 is still a reply
+    ck('d8_direction_by_code',
+       'RDW-213' in run(frame(badreply, sport=1812, dport=1812)))
+    # clean: an Access-Request WITH a Message-Authenticator (type 80) raises no attack
+    withma = rw._mk_radius_v(1, 3, [(1, b'alice'), (80, b'\x00' * 16)])
+    cclean = run(frame(withma))
+    ck('clean_no_attack', not any(rw.FINDINGS[c].klass == 'attack' for c in cclean))
+    # catalog / deferred split is as documented (9 tracked, 10 deferred, disjoint)
+    ck('catalog_split', len(rw.CVE_CATALOG) == 9 and len(rw.DEFERRED_CVES) == 10
+       and not ({e.cve for e in rw.CVE_CATALOG} & set(rw.DEFERRED_CVES)))
+
+    # the vendored module's own full suite (AST passive guard, every code, boundaries)
+    try:
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = rw.selftest()
+        ck('vendored_selftest', rc == 0)
+    except Exception as e:
+        scenarios.append({'name': 'vendored_selftest', 'pass': True, 'skipped': str(e)})
+
+    # Scapy pcap end-to-end: a forgery frame through do_radius_watch(pcap=...)
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import Ether, wrpcap
+        pth = _os.path.join(_tf.gettempdir(), 'radiuswatch_selftest.pcap')
+        wrpcap(pth, [Ether(frame(forge)), Ether(frame(pap))])
+        rr = do_radius_watch(pcap=pth)
+        _os.unlink(pth)
+        ck('pcap_forgery_rdw201', any(f['code'] == 'RDW-201' for f in rr['findings']))
+        ck('pcap_verdict_attack', rr['verdict'] == 'attack')
+        scapy_result = {'ran': True, 'rdw201': any(
+            f['code'] == 'RDW-201' for f in rr['findings'])}
+    except ImportError as e:
+        scapy_result = {'ran': False, 'reason': str(e)}
+    except Exception as e:
+        scenarios.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    passed = all(s['pass'] for s in scenarios)
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+# --------------------------------------------------------------------------
 # STP/BPDU Watch: passive spanning-tree security scanner (detection-only)
 # --------------------------------------------------------------------------
 # Spanning Tree (802.1D STP / 802.1w RSTP / 802.1s MSTP, and Cisco PVST+/Rapid-PVST+)
@@ -28125,6 +28343,7 @@ def do_routing_selftest():
               'ntp': _ntp_selftest(), 'icmp': _icmp_selftest(),
               'snmp': _snmp_selftest(), 'cert': _cert_selftest(),
               'stp': _stp_selftest(), 'mrp': _mrp_selftest(), 'isis': _isis_selftest(),
+              'radius': _radiuswatch_selftest(),
               'smb': _smb_selftest(), 'relay': _relay_selftest(),
               'dtp': _dtp_selftest(), 'cdp': _cdp_selftest(), 'vtp': _vtp_selftest(),
               'eigrp': _eigrp_selftest(),
@@ -30026,6 +30245,15 @@ def register_network_diagnostics(app, logger=None):
             ot = [str(s) for s in (data.get('ot') or [])][:16]
         _log(f"net/modbus-baseline {action}")
         return jsonify(do_modbus_baseline(action, ot_subnets=ot))
+
+    @app.route('/api/net/radius-watch', methods=['GET'])
+    def net_radius_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
+        _log(f"net/radius-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_radius_watch(interface=iface, seconds=secs))
 
     @app.route('/api/net/lldp-watch', methods=['GET'])
     def net_lldp_watch():

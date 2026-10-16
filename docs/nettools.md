@@ -49,6 +49,7 @@ matrix to zoom (`/web/images/osi/`).
 | [DNS Watch (passive)](#dns-watch) | Diagnostics · L7 | `GET /api/net/dns-watch` |
 | [NTP Watch](#ntp-watch) | Diagnostics · L7 | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
 | [SNMP Watch](#snmp-watch) | Diagnostics · L7 | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
+| [RADIUS Watch](#radius-watch) | Diagnostics · L7 | `GET /api/net/radius-watch` |
 | [Modbus Watch](#modbus-watch) | Diagnostics · L7 | `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline` |
 | [SMB Watch](#smb-watch) | Diagnostics · L7 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
 | [LDAP Watch](#ldap-watch) | Diagnostics · L7 | `GET /api/net/ldap-watch` |
@@ -148,7 +149,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1058,6 +1059,61 @@ ifAdminStatus / …), and the community-reuse correlator — see
 
 - Endpoint: `GET /api/net/snmp-watch` `{interface, seconds}`,
   `POST /api/net/snmp-baseline` `{action: reset}` · binary: `tcpdump`
+
+### RADIUS Watch
+A **passive**, vendor-neutral RADIUS / EAP security scanner — the dedicated RADIUS
+protocol detector. RADIUS (RFC 2865; auth UDP 1812/1645, accounting 1813/1646, CoA
+3799) carries network **authentication** — 802.1X, Wi-Fi, VPN and admin logins — in
+the clear, protected only by `MD5(secret ‖ Request-Authenticator)`. **Detection-only**:
+no socket, no probe, scapy loaded lazily only on the live path. Attribute values
+(passwords, secrets, `State`, `Proxy-State`, `Reply-Message`, VSA contents) **never
+enter a finding** — findings carry digests, lengths and booleans only.
+
+It **takes over the Blast-RADIUS (`CVE-2024-3596`) engine** that previously lived,
+un-gated and suite-wide, in [Arista Guard](#arista-guard)'s `rule_radius` (the seven
+migrated codes keep their digits: `AG-101 → RDW-101` … `AG-214 → RDW-214`), and adds
+RADIUS/EAP authentication posture plus the FreeRADIUS CVEs that have a deterministic
+wire shape. **Direction is decided by the RADIUS *code*, never the port** — fixing an
+`aristaguard` blind spot where `1812 → 1812` proxy traffic read every response as a
+request (and so missed injected `Proxy-State`). The engine keeps **no baseline**, so a
+single capture is self-contained. Engine vendored at `python/radiuswatch.py`
+(self-contained stdlib + pure-Python EC math — no new dependency).
+
+**19 finding codes** in two bands — **1xx exposure** (scoped by `known_infra`) and
+**2xx attack** (never scoped):
+
+- **Exposure (8):** `RDW-101` cleartext RADIUS observed · `RDW-102` Access-Request with
+  no Message-Authenticator · `RDW-110` unauthenticated response · `RDW-120` PAP over UDP
+  · `RDW-121` CHAP in use · `RDW-122` weak EAP method answered (MD5/LEAP) · `RDW-124` CoA
+  without M-A · `RDW-125` a NAS↔server pair that speaks RadSec **and** cleartext RADIUS.
+- **Attack (11):** `RDW-201` forgery (a `Proxy-State` collision block over the structural
+  bound — Blast-RADIUS) · `RDW-212` `Proxy-State` injected on the NAS-side leg (the forged
+  Access-Accept, request↔response correlated) · `RDW-213` non-UTF-8 `Reply-Message` ·
+  `RDW-214` opaque high-entropy Vendor-Specific exfil · `RDW-215` malformed WiMAX VSA
+  (`CVE-2017-10979`/`-10984`) · `RDW-216` zero-length concat attribute (`CVE-2017-10985`)
+  · `RDW-217` EAP-pwd reflected Commit — Dragonblood (`CVE-2019-11234`) · `RDW-218` EAP-pwd
+  invalid Commit, scalar/curve checks (`CVE-2019-11235`) · `RDW-219` EAP-SIM unknown
+  non-skippable attribute (`CVE-2022-41860`) · `RDW-220` Ascend abinary filter overflow
+  (`CVE-2022-41861`) · `RDW-221` short Ascend secret (`CVE-2017-10978`). `RDW-123` and
+  `RDW-202` are retired and never reused.
+
+**9 tracked CVEs** (`CVE-2024-3596` Blast-RADIUS + the 8 FreeRADIUS shapes above) are
+detected by wire shape — whether the server runs a vulnerable FreeRADIUS is not
+observable passively. **10 CVEs are triaged and deferred** (carried in `DEFERRED_CVES`,
+disjoint from the catalog, counted as *context*, never detected): the six FreeRADIUS
+**DHCP-decoder** CVEs (`CVE-2017-10980/81/82/83/86/87` — UDP 67, not the RADIUS wire),
+three **EAP-pwd side channels** (`CVE-2019-17185`/`-13456`, `CVE-2022-41859` — nothing
+anomalous on the wire) and a **logrotate** local priv-esc (`CVE-2019-10143`).
+
+RadSec's TLS/DTLS transport on 2083 (RFC 6614 / 7360) and RADIUS/1.1 (RFC 9765) are
+[TLS Watch](#tls-watch)'s job; RADIUS Watch only records RadSec **presence** and raises
+`RDW-125` when the same pair also falls back to cleartext. The capture filter admits the
+RADIUS/CoA/RadSec ports plus IPv6 behind a Hop-by-Hop/Routing/Fragment/AH/Dest-Options
+extension header (the bounded walk decides in software) and VLAN-tagged frames.
+*(Migration note: Arista Guard still also detects `CVE-2024-3596` until its `rule_radius`
+is retired in a follow-up; Arista Guard keeps its EOS-specific CVEs.)*
+
+- Endpoint: `GET /api/net/radius-watch` `{interface, seconds}` · binary: `tcpdump`
 
 ### Modbus Watch
 A **passive** Modbus/TCP posture monitor for OT / PLC segments. It is **detection-only** and

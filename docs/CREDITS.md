@@ -14,13 +14,16 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **310 CVEs detected from the wire.** 360 distinct CVE IDs are named across Ragnar's
-  code; 310 of them a passive detector actually identifies. The rest are named, not detected:
-  41 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **318 CVEs detected from the wire.** 378 distinct CVE IDs are named across Ragnar's
+  code; 318 of them a passive detector actually identifies. The rest are named, not detected:
+  51 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
-  cannot reconstruct on the wire — and the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
-  names only to say it does not apply to APC, and CFM Watch's two screened-out CFM CVEs), 3 in card prose as related context, and 6 **active** BLE
+  cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
+  names only to say it does not apply to APC, CFM Watch's two screened-out CFM CVEs, and
+  **RADIUS Watch's ten triaged/deferred CVEs** — the FreeRADIUS DHCP-decoder set, the EAP-pwd
+  side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage),
+  3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
 - **28 years of coverage** — from **CVE-1999-0113** (the rlogin `-froot` bypass) to
