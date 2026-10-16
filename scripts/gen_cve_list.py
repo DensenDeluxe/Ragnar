@@ -51,6 +51,7 @@ FILE_OWNERS = {
     'python/lldpwatch_conformance.py': 'LLDP Watch',
     'python/lldpwatch_scapy_xcheck.py': 'LLDP Watch',
     'python/cfmwatch.py': 'CFM Watch',
+    'python/ripwatch.py': 'RIP Watch',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
@@ -92,6 +93,7 @@ ND_PREFIXES = [
     ('_parse_autokey', 'NTP Watch'),
     ('_EIGRP', 'EIGRP Watch'), ('_eigrp', 'EIGRP Watch'),
     ('_isis', 'IS-IS Watch'),
+    ('_RIP', 'RIP Watch'), ('_rip', 'RIP Watch'), ('do_rip', 'RIP Watch'),
     ('_igmp', 'IGMP / MLD Watch'), ('_parse_igmp', 'IGMP / MLD Watch'),
     ('_decode_mld', 'IGMP / MLD Watch'),
     ('_dhcp', 'DHCP Guardian'), ('do_dhcp', 'DHCP Guardian'),
