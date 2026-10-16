@@ -8010,7 +8010,8 @@ function _tlsFillIfaces() {
     }).catch(() => {});
 }
 function _tlsVerName(v) {
-    return ({ 772: 'TLS 1.3', 771: 'TLS 1.2', 770: 'TLS 1.1', 769: 'TLS 1.0' })[v] || (v ? '0x' + v.toString(16) : '');
+    return ({ 772: 'TLS 1.3', 771: 'TLS 1.2', 770: 'TLS 1.1', 769: 'TLS 1.0',
+        65276: 'DTLS 1.3', 65277: 'DTLS 1.2', 65279: 'DTLS 1.0' })[v] || (v ? '0x' + v.toString(16) : '');
 }
 async function runTlsWatch() {
     const out = document.getElementById('tls-results');
@@ -8037,7 +8038,7 @@ async function runTlsWatch() {
         }
         const [cls, label] = _TLS_VERDICT_STYLE[d.verdict] || _TLS_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s window · ${d.tls || 0} TLS · ${d.quic || 0} QUIC handshake(s)</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s window · ${d.tls || 0} TLS · ${d.quic || 0} QUIC${d.dtls ? ' · ' + d.dtls + ' DTLS' : ''} handshake(s)</p>`;
         const S = d.sessions || [];
         if (!S.length) {
             html += '<p class="text-sm text-gray-400">No TLS/QUIC handshakes observed. On a switched network you need a SPAN/mirror port to see other hosts.</p>';
@@ -8049,9 +8050,11 @@ async function runTlsWatch() {
                 const neg = s.negotiated_version ? (_tlsVerName(s.negotiated_version) + (s.cipher ? ' ' + s.cipher : '')) : '—';
                 const bad = (s.findings || []).some(f => f.severity === 'high');
                 const dup = (s.count > 1) ? ` <span class="text-slate-500" title="${s.count} duplicate connections collapsed">×${s.count}</span>` : '';
+                const protoCls = s.proto === 'quic' ? 'text-cyan-300' : s.proto === 'dtls' ? 'text-violet-300' : 'text-gray-400';
+                const svc = s.service ? ` <span class="px-1.5 py-0.5 rounded bg-slate-700 text-[10px] text-sky-300 uppercase" title="server-side service port">${escapeHtml(s.service)}</span>` : '';
                 html += `<tr class="border-t border-slate-800 align-top">
-                    <td class="px-2 py-1 uppercase ${s.proto === 'quic' ? 'text-cyan-300' : 'text-gray-400'}">${escapeHtml(s.proto)}</td>
-                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.src)} → ${escapeHtml(s.dst)}${dup}</td>
+                    <td class="px-2 py-1 uppercase ${protoCls}">${escapeHtml(s.proto)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.src)} → ${escapeHtml(s.dst)}${dup}${svc}</td>
                     <td class="px-2 py-1 ${bad ? 'text-red-300' : 'text-gray-200'}">${escapeHtml(s.sni || '—')}</td>
                     <td class="px-2 py-1 text-gray-400">${escapeHtml(alpn)}</td>
                     <td class="px-2 py-1 font-mono text-gray-300" title="${escapeHtml(s.ja4_r || '')}">${escapeHtml(s.ja4 || '—')}</td>

@@ -4,6 +4,17 @@
 
 ### 2026-10-16
 
+#### [#963](https://github.com/PierreGode/Ragnar/pull/963) — feat(net): TLS Watch v8 — DTLS/RadSec decode + RadSec/Modbus-Security service labels
+*branch `feature/tls-watch-v8`*
+
+- **DTLS handshake decode (new in v8).** The in-app passive observer now decodes DTLS on the DTLS port (**UDP/2083**, RadSec over DTLS, RFC 7360): `DTLSPlaintext` records are walked (a declared length overrunning the datagram is rejected, never trusted), handshake fragments are reassembled per `message_seq` (out-of-order, overlapping and whole-flight retransmits tolerated — each message yielded once), the `HelloVerifyRequest` cookie is stripped, and the ClientHello / ServerHello / Certificate run through the **same** parser as TLS. JA4 gets proto **`d`**; cipher/version checks and (for **DTLS 1.2**, whose certificate is cleartext) the `cert_*` findings apply unchanged. DTLS's **inverted** version numbering (`0xfefd`=DTLS 1.2, `0xfefc`=DTLS 1.3, lower is newer) is mapped to each version's TLS equivalent before any ordering/legacy comparison, so DTLS 1.0 is no longer waved through a raw `< TLS 1.2` test. The record-layer **volume** detectors (alert flood, Heartbleed, short record, SWEET32 and D(HE)at accounting) stay TLS-over-TCP only, as upstream — datagram transport has its own retransmission/replay model their accounting does not transfer to unexamined.
+- **Service-port labels (new in v8).** A flow whose server-side port is a known secure-transport port now carries a `service` tag — **`radsec`** (TCP/2083 RFC 6614, UDP/2083 RFC 7360) or **`modbus-security`** (TCP/802, "mbaps") — surfaced as a badge in the session table and added to the capture set. TLS 1.2+ / mutual-TLS is mandated on both, so a legacy version there raises the existing `*_legacy_version` findings; cleartext Modbus posture stays Modbus Watch's job (MBW-041/042), not duplicated. **No new CVEs** — the 11 named TLS/QUIC CVEs and the CVE index are unchanged.
+- **Capture:** `TLS_TCP_PORTS` gains 2083 + 802; the UDP capture set gains 2083 for DTLS, kept **even with `--no-quic`** (which only drops QUIC). The IPv6 extension-header admission clause (v5) is unchanged.
+- **UI:** the TLS Watch session table shows the DTLS handshake count, colours the `dtls` proto, renders DTLS version names, and shows the `radsec` / `modbus-security` service badge (mobile-safe; `ragnar_modern.js` cache-bust bumped).
+- **Self-test:** `tls_watch.selftest()` → **135 checks** (DTLS service labels + version-equiv ordering + record/fragment reassembly + cookie strip, and a full DTLS/RadSec datagram round-trip through `parse_pcap` asserting proto `dtls`, JA4 `d…`, `service=radsec` and a cleartext DTLS 1.2 certificate). Aggregate `do_routing_selftest` 56 suites, all green.
+- **Live-validated** in a sealed netns: a real DTLS 1.2 RadSec handshake replayed with `tcpreplay` over UDP/2083 is decoded by the real `do_tls_watch` tcpdump capture path — proto `dtls`, `ja4=dd2d…`, `service=radsec`, SNI + cleartext certificate recovered.
+- **Docs:** [nettools.md › TLS Watch](nettools.md#tls-watch) (DTLS/RadSec + service-label sections).
+
 #### [#962](https://github.com/PierreGode/Ragnar/pull/962) — feat(net): Modbus Watch v2 — MBW-042 cleartext-without-secure-peer posture + dual-stack re-vendor
 *branch `feature/modbus-watch-v2`*
 
