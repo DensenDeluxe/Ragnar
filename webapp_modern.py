@@ -20304,11 +20304,19 @@ def network_threat_sweep():
         if _req_iface:
             try:
                 import wifi_analyzer as _wa
-                _valid = {i.get('iface') for i in _wa.list_wifi_interfaces()}
+                _valid = [i.get('iface') for i in _wa.list_wifi_interfaces()]
             except Exception:
-                _valid = set()
-            if _req_iface in _valid and re.match(r'^[a-zA-Z0-9._-]+$', _req_iface):
-                iface = _req_iface
+                _valid = []
+            # Hand the subprocess the interface name taken from the trusted
+            # system list (not the request string) so the command argument can
+            # never be attacker-controlled — CWE-78 allowlist. The request value
+            # is only ever compared, never passed through.
+            iface = next(
+                (name for name in _valid
+                 if name and name == _req_iface
+                 and re.match(r'^[a-zA-Z0-9._-]+$', name)),
+                iface,
+            )
 
         # Trigger a fresh scan
         subprocess.run(
