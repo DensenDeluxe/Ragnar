@@ -1451,7 +1451,9 @@ A **passive** TLS/QUIC handshake observer — the session/presentation-layer
 (OSI L5/L6) detector, companion to the active [Cert Watch](#cert-watch). It is
 **detection-only**: it never connects or probes, it sniffs handshakes off the
 wire. One short `tcpdump` window over the TLS ports (443/8443/993/995/465/990/
-4433) and QUIC (UDP/443) is dissected and, per handshake, yields:
+4433, plus **RadSec TCP/2083** and **Modbus-Security TCP/802** *(new in v8)*),
+QUIC (UDP/443) and **DTLS/RadSec (UDP/2083)** *(new in v8)* is dissected and, per
+handshake, yields:
 
 - **Fingerprints** — **JA4** and **JA4_r** (raw) client fingerprints to the FoxIO
   specification, plus legacy **JA3 / JA3S**. Match a client JA4 against a denylist
@@ -1524,6 +1526,32 @@ the client's Destination Connection ID plus a public constant salt (RFC 9001
 §5.2 for v1, RFC 9369 for v2), so it is arithmetic over captured bytes, never an
 active operation. The client Initial's CRYPTO stream is reassembled into the
 ClientHello and fingerprinted with proto `q`.
+
+**DTLS / RadSec *(new in v8)*.** DTLS handshakes on the DTLS port (UDP/2083,
+RadSec over DTLS, RFC 7360) are decoded from their cleartext `DTLSPlaintext`
+records: handshake fragments are reassembled per `message_seq` (out-of-order,
+overlapping and whole-flight retransmits tolerated, each message yielded once), a
+`HelloVerifyRequest` cookie is stripped, and the ClientHello / ServerHello /
+Certificate then run through the **same** parser as TLS — so JA4 (proto **`d`**),
+cipher and version checks and (for **DTLS 1.2**, whose certificate is cleartext)
+the `cert_*` findings all apply unchanged. DTLS version numbering is **inverted**
+(`0xfefd` is DTLS 1.2, `0xfefc` DTLS 1.3, *lower is newer*), so every version
+comparison maps to the TLS version each is defined against before ordering — a raw
+`< TLS 1.2` test would wave DTLS 1.0 straight through. The record-layer *volume*
+detectors (alert flood, Heartbleed, short record, SWEET32 and D(HE)at accounting)
+stay **TLS-over-TCP only**: datagram transport has its own retransmission/replay
+model their accounting does not transfer to unexamined. `--no-quic` drops QUIC but
+keeps the DTLS port.
+
+**Service-port labels *(new in v8)*.** A flow whose server-side port is a known
+secure-transport port carries a `service` tag — **`radsec`** (RADIUS-over-TLS,
+TCP/2083, RFC 6614; over DTLS, UDP/2083) or **`modbus-security`** (Modbus/TCP
+Security, TCP/802, "mbaps") — so the traffic is identifiable without re-deriving it
+from the 5-tuple (shown as a badge in the session table). Ports outside the table
+carry no label rather than a guessed one. Both RadSec and Modbus/TCP Security
+mandate mutual TLS and TLS 1.2+, so a legacy version on those ports raises the
+existing `*_legacy_version` findings; cleartext Modbus posture stays
+[Modbus Watch](#modbus-watch)'s job (MBW-041/042) and is not duplicated here.
 
 The verdict escalates to **compromised** on an `sni_cert_mismatch` or JA4 denylist
 hit, **suspicious** on any other high/warn finding (weak/RC4 cipher, SWEET32, an

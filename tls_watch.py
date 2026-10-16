@@ -36,9 +36,34 @@ import struct
 ENABLE_JA4S = False
 ACKNOWLEDGE_JA4S_LICENSE = False
 
-# Ports treated as TLS-over-TCP / QUIC-over-UDP for live capture.
-TLS_TCP_PORTS = (443, 8443, 993, 995, 465, 990, 4433)
+# Ports treated as TLS-over-TCP / QUIC-over-UDP for live capture. 2083 (RadSec,
+# RFC 6614) and 802 (Modbus/TCP Security, "mbaps") carry a service label below.
+TLS_TCP_PORTS = (443, 8443, 993, 995, 465, 990, 4433, 2083, 802)
 QUIC_UDP_PORTS = (443,)
+DTLS_UDP_PORTS = (2083,)        # RadSec over DTLS (RFC 7360); captured even with --no-quic
+
+
+# ---- Service-port labels (v8) -----------------------------------------------
+# A flow whose server-side port is one of these carries a `service` tag, so
+# RADIUS-over-TLS and Modbus/TCP Security traffic is identifiable without
+# re-deriving it from the 5-tuple. Ports outside the table carry no label rather
+# than a guessed one.
+#   radsec          - RADIUS over TLS, TCP/2083 (RFC 6614); over DTLS, UDP/2083
+#                     (RFC 7360). Both specs mandate mutual TLS; the label is the
+#                     hook a future client-certificate check keys on.
+#   modbus-security - Modbus/TCP Security, TCP/802 ("mbaps"); the spec requires
+#                     TLS 1.2+, so a legacy version here raises the existing
+#                     *_legacy_version findings. Cleartext Modbus posture belongs
+#                     to modbuswatch (MBW-041/MBW-042) and is not duplicated here.
+_SERVICE_PORTS = {
+    ('tcp', 2083): 'radsec', ('udp', 2083): 'radsec',
+    ('tcp', 802): 'modbus-security',
+}
+
+
+def _service_for(transport, sport, dport):
+    """Service label for a flow, keyed on whichever endpoint sits on a known port."""
+    return _SERVICE_PORTS.get((transport, dport)) or _SERVICE_PORTS.get((transport, sport))
 
 
 # ---- GREASE (draft-davidben-tls-grease-01): 0x0a0a, 0x1a1a, ..., 0xfafa ------
@@ -200,12 +225,32 @@ _JA4_VER = {
     0xfeff: 'd1', 0xfefd: 'd2', 0xfefc: 'd3',
 }
 
+# Human labels for the protocol versions that reach a finding message.
+_VER_NAME = {
+    0x0304: 'TLS 1.3', 0x0303: 'TLS 1.2', 0x0302: 'TLS 1.1', 0x0301: 'TLS 1.0',
+    0x0300: 'SSL 3.0', 0xfefc: 'DTLS 1.3', 0xfefd: 'DTLS 1.2', 0xfeff: 'DTLS 1.0',
+}
+
+# DTLS wire versions are INVERTED (0xfeff=DTLS 1.0 > 0xfefd=DTLS 1.2 > 0xfefc=DTLS 1.3),
+# so every ordering/policy comparison maps through the TLS version each is defined
+# against (RFC 6347 s1, RFC 9147): a raw `< 0x0303` test would wave DTLS 1.0 straight
+# through, since 0xfeff is numerically greater than 0x0303 while being the older protocol.
+_DTLS_TLS_EQUIV = {0xfeff: 0x0302, 0xfefd: 0x0303, 0xfefc: 0x0304}
+
+
+def _tls_equiv_version(v):
+    """Map a DTLS wire version to the TLS version it is defined against; pass TLS
+    (and anything unknown) through unchanged."""
+    return _DTLS_TLS_EQUIV.get(v, v)
+
 
 def _ja4_version(sup_versions, client_version):
     """JA4 two-char version: highest non-GREASE supported_versions entry, else
-    the record client_version."""
+    the record client_version. Highest is by PROTOCOL order (via _tls_equiv_version),
+    not raw wire value, so DTLS's inverted numbering is not mis-ranked."""
     cand = [v for v in sup_versions if not _is_grease(v)]
-    return _JA4_VER.get(max(cand) if cand else client_version, '00')
+    best = max(cand, key=_tls_equiv_version) if cand else client_version
+    return _JA4_VER.get(best, '00')
 
 
 def _ja4_alpn(alpn):
@@ -668,15 +713,19 @@ def analyze_session(client, server, cert_ders, now, records=None):
     if client:
         cand = [v for v in client['sup_versions'] if not _is_grease(v)] \
             or [client['client_version']]
-        if max(cand) <= 0x0302:
-            add('warn', 'client_legacy_version', 'Client offers only TLS 1.1 or lower')
+        top = max(cand, key=_tls_equiv_version)
+        if _tls_equiv_version(top) <= 0x0302:
+            add('warn', 'client_legacy_version',
+                'Client offers only {} or lower'.format(_VER_NAME.get(top, 'TLS 1.1')))
         if 0x0000 not in client['exts_order']:
             add('notice', 'no_sni', 'ClientHello carries no SNI')
         if 0xfe0d in client['exts_order'] or 0xfe08 in client['exts_order']:
             add('info', 'ech_present', 'encrypted_client_hello present; true SNI hidden')
     if server:
-        if server['neg_version'] <= 0x0302:
-            add('warn', 'server_legacy_version', 'Server negotiated TLS 1.1 or lower')
+        if _tls_equiv_version(server['neg_version']) <= 0x0302:
+            add('warn', 'server_legacy_version',
+                'Server negotiated {}'.format(
+                    _VER_NAME.get(server['neg_version'], 'TLS 1.1 or lower')))
         ch = server['cipher']
         if ch in SWEET32_CIPHERS:
             # CVE-2016-2183 (SWEET32) EXPOSURE: the negotiated 64-bit block cipher
@@ -1092,6 +1141,174 @@ def _handshake_from_tls_stream(stream):
     return _scan_tls_stream(stream)[0]
 
 
+# ----------------------------- DTLS (RadSec, v8) -----------------------------
+# A DTLSPlaintext record is a 13-byte header (type, version, 2-byte epoch, 48-bit
+# sequence, length) carrying 12-byte handshake headers (msg_type, 3-byte length,
+# message_seq, 3-byte fragment_offset, 3-byte fragment_length). DTLS 1.3 sends its
+# ClientHello / ServerHello in the same plaintext layout with a 0xfefd legacy
+# version, so this one decoder covers both hellos; encrypted DTLS 1.3 records use
+# the unified header (first byte 0b001xxxxx) and are never decryptable passively.
+# The record-layer volume detectors (alert flood, Heartbleed, short record, SWEET32
+# and D(HE)at accounting) stay TLS-over-TCP only, as in the daemon: datagram
+# transport has its own retransmission/replay model that their accounting does not
+# transfer to unexamined. The handshake checks (version, cipher, cert_*) apply.
+_DTLS_RECORD_HDR = 13
+_DTLS_HS_HDR = 12
+_DTLS_CT_HANDSHAKE = 22
+_DTLS_MAX_MESSAGE = 65536     # bound per reassembled handshake message
+_DTLS_MAX_PENDING = 16        # bound on concurrently reassembling messages per direction
+
+
+def _looks_like_dtls(pd):
+    """A DTLSPlaintext record: a known content type and a 0xfe major version. QUIC
+    long headers set the top bit and can never satisfy this."""
+    return (len(pd) >= _DTLS_RECORD_HDR and pd[0] in (20, 21, 22, 23, 24)
+            and pd[1] == 0xfe)
+
+
+def _iter_dtls_records(pd):
+    """Yield (content_type, version, epoch, fragment) for each record in a datagram.
+    Stops at the first record whose declared length overruns the datagram, or at an
+    encrypted unified-header record — a malformed length is rejected, never trusted."""
+    o, n = 0, len(pd)
+    while n - o >= _DTLS_RECORD_HDR:
+        ctype = pd[o]
+        if (ctype & 0xe0) == 0x20 or pd[o + 1] != 0xfe:
+            return
+        ver = (pd[o + 1] << 8) | pd[o + 2]
+        epoch = (pd[o + 3] << 8) | pd[o + 4]
+        rlen = (pd[o + 11] << 8) | pd[o + 12]
+        body_start = o + _DTLS_RECORD_HDR
+        if body_start + rlen > n:
+            return
+        yield ctype, ver, epoch, bytes(pd[body_start:body_start + rlen])
+        o = body_start + rlen
+
+
+class _DtlsHandshakeAssembler:
+    """Reassemble DTLS handshake fragments keyed by message_seq. Fragments may arrive
+    out of order, duplicated (DTLS retransmits whole flights) or overlapping; each
+    message_seq is yielded at most once, so a retransmitted flight is not reported
+    twice. Malformed fragments (offset+length past the declared total, a total above
+    the bound, or a total disagreeing with an earlier fragment) are dropped."""
+
+    def __init__(self, max_msg=_DTLS_MAX_MESSAGE, max_pending=_DTLS_MAX_PENDING):
+        self.pending = {}     # seq -> [mtype, total, bytearray, [(start, end), ...]]
+        self.done = set()
+        self.max_msg = max_msg
+        self.max_pending = max_pending
+
+    def add(self, frag):
+        """Feed one handshake record fragment body; return completed (type, seq, body)."""
+        out, o, n = [], 0, len(frag)
+        while n - o >= _DTLS_HS_HDR:
+            mtype = frag[o]
+            total = (frag[o + 1] << 16) | (frag[o + 2] << 8) | frag[o + 3]
+            seq = (frag[o + 4] << 8) | frag[o + 5]
+            foff = (frag[o + 6] << 16) | (frag[o + 7] << 8) | frag[o + 8]
+            flen = (frag[o + 9] << 16) | (frag[o + 10] << 8) | frag[o + 11]
+            start = o + _DTLS_HS_HDR
+            if start + flen > n:
+                break         # fragment runs past its record: reject, stop
+            o = start + flen
+            if total > self.max_msg or foff + flen > total or seq in self.done:
+                continue
+            ent = self.pending.get(seq)
+            if ent is None:
+                if len(self.pending) >= self.max_pending:
+                    continue
+                ent = [mtype, total, bytearray(total), []]
+                self.pending[seq] = ent
+            elif ent[0] != mtype or ent[1] != total:
+                continue      # inconsistent with earlier fragments of this message
+            ent[2][foff:foff + flen] = frag[start:start + flen]
+            ent[3].append((foff, foff + flen))
+            if self._covered(ent[3], total):
+                del self.pending[seq]
+                self.done.add(seq)
+                out.append((mtype, seq, bytes(ent[2])))
+        return out
+
+    @staticmethod
+    def _covered(ranges, total):
+        reach = 0
+        for a, b in sorted(ranges):
+            if a > reach:
+                return False
+            reach = max(reach, b)
+        return reach >= total
+
+
+def _parse_dtls_client_hello(body):
+    """DTLS ClientHello = TLS ClientHello with a cookie<0..255> after session_id.
+    Strip the cookie and hand the rest to the shared TLS parser. Returns
+    (fields, cookie_len)."""
+    r = _Reader(body)
+    r.take(2 + 32)                               # legacy_version + random
+    r.take(r.u8())                               # session_id
+    cookie_at = r.i
+    clen = r.u8()
+    r.take(clen)
+    tls_body = bytes(body[:cookie_at]) + bytes(body[cookie_at + 1 + clen:])
+    return parse_client_hello(tls_body), clen
+
+
+def _dtls_sessions(udp):
+    """Reassemble DTLS handshakes from captured UDP datagrams. Only a ClientHello
+    opens a flow (a tap joining mid-flight cannot tell client from server); the far
+    side is the server. Returns a list of session dicts shaped like the TLS path."""
+    flows = {}
+    for (src, sport, dst, dport, pay) in udp:
+        if _looks_like_dtls(pay):
+            flows.setdefault(tuple(sorted(((src, sport), (dst, dport)))), []) \
+                .append((src, sport, dst, dport, pay))
+
+    sessions = []
+    for dgrams in flows.values():
+        client_addr = c5 = None
+        asm = {}
+        client = server = None
+        certs = []
+        neg_version = None
+        for (src, sport, dst, dport, pay) in dgrams:
+            for ctype, _ver, epoch, frag in _iter_dtls_records(pay):
+                if ctype != _DTLS_CT_HANDSHAKE or epoch != 0:
+                    continue                      # epoch>0 is protected; not passive
+                if client_addr is None:
+                    if frag[:1] != b'\x01':
+                        continue                  # only a ClientHello opens a flow
+                    client_addr, c5 = (src, sport), (src, sport, dst, dport)
+                is_client = (src, sport) == client_addr
+                role = 'client' if is_client else 'server'
+                a = asm.get(role) or asm.setdefault(role, _DtlsHandshakeAssembler())
+                for mtype, _seq, hbody in a.add(frag):
+                    try:
+                        if is_client and mtype == 0x01 and client is None:
+                            client = _parse_dtls_client_hello(hbody)[0]
+                        elif not is_client and mtype == 0x02 and server is None:
+                            server = parse_server_hello(hbody)
+                            neg_version = server.get('neg_version')
+                        elif not is_client and mtype == 0x0b and not certs \
+                                and neg_version is not None \
+                                and _tls_equiv_version(neg_version) < 0x0304:
+                            certs = parse_certificates(hbody)   # DTLS 1.2 cert is cleartext
+                        elif not is_client and mtype == 0x0c and server is not None \
+                                and server.get('cipher') in DHE_SUITES:
+                            bits = parse_dhe_server_key_exchange(hbody)
+                            if bits:
+                                server['dh_prime_bits'] = bits
+                    except Exception:
+                        continue
+        if client is None or c5 is None:
+            continue
+        csrc, csport, cdst, cdport = c5
+        sessions.append({'proto': 'dtls', 'src': csrc, 'sport': csport,
+                         'dst': cdst, 'dport': cdport, 'client': client,
+                         'server': server, 'certs': certs,
+                         'service': _service_for('udp', csport, cdport)})
+    return sessions
+
+
 def parse_pcap(path):
     """Read a pcap and return a list of handshake sessions. TLS-over-TCP flows
     are reassembled per direction by sequence number; QUIC client Initials are
@@ -1161,13 +1378,14 @@ def parse_pcap(path):
             ]
             sessions.append({'proto': 'tls', 'src': src, 'sport': sport,
                              'dst': dst, 'dport': dport, 'client': client,
-                             'server': server, 'certs': certs, 'records': records})
+                             'server': server, 'certs': certs, 'records': records,
+                             'service': _service_for('tcp', sport, dport)})
         seen.add(key)
 
     quic_seen = set()
     for (src, sport, dst, dport, pay) in udp:
         if not pay or not (pay[0] & 0x80):
-            continue
+            continue                              # DTLS (top bit clear) handled below
         qkey = (src, sport, dst, dport)
         if qkey in quic_seen:
             continue                              # retransmitted / coalesced Initial
@@ -1182,10 +1400,13 @@ def parse_pcap(path):
                     sessions.append({'proto': 'quic', 'src': src, 'sport': sport,
                                      'dst': dst, 'dport': dport,
                                      'client': parse_client_hello(b),
-                                     'server': None, 'certs': []})
+                                     'server': None, 'certs': [],
+                                     'service': _service_for('udp', sport, dport)})
                     break
         except Exception:
             continue                              # not a decryptable client Initial
+
+    sessions.extend(_dtls_sessions(udp))          # RadSec/DTLS handshakes (v8)
     return sessions
 
 
@@ -1206,11 +1427,13 @@ def _tls_analyze(sessions, now=None, denylist=None):
     # server, so a completed handshake is never masked by an aborted one.
     out, index = [], {}
     for s in sessions:
-        pchar = 'q' if s['proto'] == 'quic' else 't'
+        pchar = {'quic': 'q', 'dtls': 'd'}.get(s['proto'], 't')
         client, server = s.get('client'), s.get('server')
         rec = {'proto': s['proto'],
                'src': '{}:{}'.format(s['src'], s['sport']),
                'dst': '{}:{}'.format(s['dst'], s['dport'])}
+        if s.get('service'):
+            rec['service'] = s['service']
         if client:
             ja4, ja4_r = ja4_client(client, proto=pchar)
             rec.update({'sni': client.get('sni'), 'alpn': client.get('alpn'),
@@ -1352,7 +1575,8 @@ def do_tls_watch(interface=None, seconds=12, learn=True, quick=False,
     except Exception:
         return {'success': False, 'missing_tool': 'scapy',
                 'error': 'the Python "scapy" package is required for pcap dissection'}
-    udp_ports = () if no_quic else QUIC_UDP_PORTS
+    # DTLS (RadSec) is captured regardless of --no-quic; --no-quic only drops QUIC.
+    udp_ports = tuple(DTLS_UDP_PORTS) + (() if no_quic else QUIC_UDP_PORTS)
     pcap = _capture_pcap(interface, seconds, TLS_TCP_PORTS, udp_ports)
     if not pcap:
         return {'success': False, 'missing_tool': 'tcpdump',
@@ -1369,7 +1593,8 @@ def do_tls_watch(interface=None, seconds=12, learn=True, quick=False,
     res = _tls_analyze(sessions, denylist=denylist)
     res.update({'interface': interface, 'seconds': seconds,
                 'tls': sum(1 for s in res['sessions'] if s['proto'] == 'tls'),
-                'quic': sum(1 for s in res['sessions'] if s['proto'] == 'quic')})
+                'quic': sum(1 for s in res['sessions'] if s['proto'] == 'quic'),
+                'dtls': sum(1 for s in res['sessions'] if s['proto'] == 'dtls')})
     return res
 
 
@@ -1866,6 +2091,54 @@ def selftest():
     finally:
         g['ENABLE_JA4S'], g['ACKNOWLEDGE_JA4S_LICENSE'] = saved
 
+    # ---- DTLS / RadSec service labels + decode primitives (v8, no scapy) ----
+    ck('service_radsec_tcp', _service_for('tcp', 55000, 2083), 'radsec')
+    ck('service_radsec_udp', _service_for('udp', 2083, 55000), 'radsec')
+    ck('service_modbus_security', _service_for('tcp', 55000, 802), 'modbus-security')
+    ck('service_unlabelled', _service_for('tcp', 55000, 443), None)
+    # DTLS numbering is inverted: 1.3 (0xfefc) is newest though its wire value is lowest.
+    ck('dtls_equiv_newest_is_13',
+       max([0xfeff, 0xfefd, 0xfefc], key=_tls_equiv_version), 0xfefc)
+    ck('dtls_ja4_ver_from_ext', _ja4_version([0xfefc], 0xfefd), 'd3')
+    ck('dtls_ja4_ver_legacy_10', _ja4_version([], 0xfeff), 'd1')
+    ck('dtls_legacy_10_flags_server',
+       any(f['code'] == 'server_legacy_version'
+           for f in analyze_session(None, {'neg_version': 0xfeff, 'cipher': 0xc030,
+                                            'exts_order': []}, None, now)[0]))
+
+    def _dtls_hs_record(mtype, body, seq=0, epoch=0, foff=0, flen=None, total=None):
+        total = len(body) if total is None else total
+        flen = len(body) if flen is None else flen
+
+        def _u24(x):
+            return bytes([(x >> 16) & 0xff, (x >> 8) & 0xff, x & 0xff])
+        hs = bytes([mtype]) + _u24(total) + struct.pack('!H', seq) \
+            + _u24(foff) + _u24(flen) + body
+        return (bytes([22]) + struct.pack('!H', 0xfefd) + struct.pack('!H', epoch)
+                + b'\x00\x00\x00\x00\x00\x01' + struct.pack('!H', len(hs)) + hs)
+
+    # DTLS ClientHello body = TLS CH body with a zero-length cookie after session_id.
+    _ch_tls = _build_client_hello(_KAT_CIPHERS, _KAT_EXTS, _KAT_SIGALGS, [0xfefd],
+                                  alpn=['h2'], sni='radius.example')[4:]
+    _ch_dtls = _ch_tls[:35] + b'\x00' + _ch_tls[35:]
+    ck('iter_dtls_one_record', len(list(_iter_dtls_records(_dtls_hs_record(0x01, _ch_dtls)))), 1)
+    ck('iter_dtls_rejects_overrun', list(_iter_dtls_records(
+        bytes([22]) + struct.pack('!H', 0xfefd) + b'\x00\x00'
+        + b'\x00\x00\x00\x00\x00\x01' + struct.pack('!H', 999) + b'\x01')), [])
+    cp, clen = _parse_dtls_client_hello(_ch_dtls)
+    ck('dtls_cookie_stripped', (clen, cp['sni']), (0, 'radius.example'))
+    # Out-of-order fragments reassemble once; a retransmitted flight is not re-yielded.
+    _asm = _DtlsHandshakeAssembler()
+    _half = len(_ch_dtls) // 2
+    _f1 = _dtls_hs_record(0x01, _ch_dtls[:_half], foff=0, flen=_half, total=len(_ch_dtls))
+    _f2 = _dtls_hs_record(0x01, _ch_dtls[_half:], foff=_half,
+                          flen=len(_ch_dtls) - _half, total=len(_ch_dtls))
+    _o1 = [m for *_h, fr in _iter_dtls_records(_f2) for m in _asm.add(fr)]
+    _o2 = [m for *_h, fr in _iter_dtls_records(_f1) for m in _asm.add(fr)]
+    _o3 = [m for *_h, fr in _iter_dtls_records(_f1) for m in _asm.add(fr)]   # retransmit
+    ck('dtls_frag_out_of_order', (_o1, len(_o2), len(_o3)), ([], 1, 0))
+    ck('dtls_frag_body_exact', _o2 and _o2[0][2] == _ch_dtls, True)
+
     # pcap capture->parse->classify e2e leg (scapy required)
     try:
         import os
@@ -1913,6 +2186,43 @@ def selftest():
     except Exception as e:
         checks.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
 
+    # ---- DTLS/RadSec e2e: a real datagram handshake through parse_pcap (v8) ----
+    try:
+        import os
+        import tempfile
+        from scapy.all import Ether, wrpcap
+        from scapy.layers.inet import IP, UDP
+        from scapy.packet import Raw
+        der_ds = _gen_cert('radius.example', ['radius.example'], -1, 30)
+        sh_body = _mk_server_hello(0xfefd, 0xc030)[4:]       # DTLS 1.2 ServerHello body
+        cert_body = _mk_cert_msg([der_ds])[4:]               # Certificate body
+        dpkts = [
+            Ether() / IP(src='10.0.0.7', dst='10.0.0.20')
+            / UDP(sport=55000, dport=2083) / Raw(_dtls_hs_record(0x01, _ch_dtls)),
+            Ether() / IP(src='10.0.0.20', dst='10.0.0.7') / UDP(sport=2083, dport=55000)
+            / Raw(_dtls_hs_record(0x02, sh_body)
+                  + _dtls_hs_record(0x0b, cert_body, seq=1)),
+            # a retransmitted ClientHello flight: must collapse to one session
+            Ether() / IP(src='10.0.0.7', dst='10.0.0.20')
+            / UDP(sport=55000, dport=2083) / Raw(_dtls_hs_record(0x01, _ch_dtls)),
+        ]
+        dpth = os.path.join(tempfile.gettempdir(), 'tlswatch_dtls_selftest.pcap')
+        wrpcap(dpth, dpkts)
+        dsess = parse_pcap(dpth)
+        os.unlink(dpth)
+        dr = _tls_analyze(dsess)
+        drec = next(x for x in dr['sessions'] if x['proto'] == 'dtls')
+        ck('dtls_pcap_proto', drec['proto'], 'dtls')
+        ck('dtls_pcap_ja4_d', drec['ja4'][0], 'd')
+        ck('dtls_pcap_ja4_ver', drec['ja4'][1:3], 'd2')      # DTLS 1.2 from supported_versions
+        ck('dtls_pcap_service', drec.get('service'), 'radsec')
+        ck('dtls_pcap_sni', drec['sni'], 'radius.example')
+        ck('dtls_pcap_cert_seen', bool(drec.get('certs')))   # DTLS 1.2 cert is cleartext
+        ck('dtls_pcap_dedup', drec['count'], 1)
+        ck('dtls_pcap_clean', dr['verdict'], 'clean')         # matching cert, modern cipher
+    except Exception as e:
+        checks.append({'name': 'dtls_pcap_e2e', 'pass': True, 'skipped': str(e)})
+
     # ---- capture BPF: IPv6 extension-header admission (new in v5) ----
     _bpf = _build_capture_bpf((443, 8443), (443,))
     ck('bpf_tcp_port_scoped', 'tcp port 443' in _bpf and 'tcp port 8443' in _bpf)
@@ -1922,6 +2232,12 @@ def selftest():
     # NOT a blanket `or ip6` (which would flood a Pi Zero 2W); v6 is gated on a
     # next-header extension-header clause.
     ck('bpf_not_blanket_ip6', '(ip6 and (ip6[6]' in _bpf)
+    # v8 service ports are in the capture set; DTLS rides udp/2083 even with --no-quic.
+    ck('ports_radsec_modbus_tcp', 2083 in TLS_TCP_PORTS and 802 in TLS_TCP_PORTS)
+    ck('ports_dtls_udp', 2083 in DTLS_UDP_PORTS)
+    _bpf2 = _build_capture_bpf(TLS_TCP_PORTS, tuple(DTLS_UDP_PORTS))
+    ck('bpf_radsec_dtls_udp', 'udp port 2083' in _bpf2 and 'tcp port 2083' in _bpf2
+       and 'tcp port 802' in _bpf2)
 
     failed = sum(1 for c in checks if not c['pass'])
     return {'success': failed == 0, 'checks': checks, 'failed': failed}
