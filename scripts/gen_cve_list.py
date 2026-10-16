@@ -58,7 +58,12 @@ FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
                       'python/modbuswatch/': 'Modbus Watch',
                       'python/oamwatch/': 'OAM Watch',
                       'python/oamwatch_tests/': 'OAM Watch',
-                      'python/cfmwatch_tests/': 'CFM Watch'}
+                      'python/cfmwatch_tests/': 'CFM Watch',
+                      # standalone igmpwatch package (v5) + its selftest name the same 3
+                      # IGMP/MLD CVEs the in-app do_igmp_watch detects — attribute to the
+                      # same owner so they dedupe rather than double-count under a file path.
+                      'igmpwatch/': 'IGMP / MLD Watch',
+                      'selftest.py': 'IGMP / MLD Watch'}
 # Files that only mention CVEs already owned elsewhere (labels, help text).
 MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.js',
                 'web/index_modern.html'}

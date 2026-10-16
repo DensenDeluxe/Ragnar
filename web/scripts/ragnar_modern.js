@@ -11577,6 +11577,81 @@ async function eigrpTrustBaseline() {
     }
 }
 
+// ---- PIM / MSDP Watch (passive multicast routing-control-plane scanner) -----
+const _PIM_VERDICT_STYLE = {
+    clean:   ['bg-green-950/40 border-green-900 text-green-400', '✓ PIM/MSDP control plane healthy — no rogue RP/BSR, injection or malformation'],
+    anomaly: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ PIM/MSDP posture issue — AH-protection loss, SSM violation, Auto-RP/Embedded-RP anomaly, or malformed message'],
+    attack:  ['bg-red-950/60 border-red-800 text-red-300', '🛑 PIM/MSDP attack shape — rogue RP / BSR spoofing / DR hijack / Register or SA injection / flood'],
+    unknown: ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _PIM_SEV_COLOR = { critical: 'text-red-300', warn: 'text-amber-300', notice: 'text-gray-300', info: 'text-gray-500' };
+function _pimFillIfaces() {
+    const sel = document.getElementById('pim-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runPimWatch() {
+    const out = document.getElementById('pim-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('pim-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('pim-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing PIM / MSDP on the segment…</p>';
+    try {
+        _pimFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/pim-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runPimWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _PIM_VERDICT_STYLE[d.verdict] || _PIM_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.pim_packets || 0} PIM / ${d.msdp_packets || 0} MSDP / ${d.autorp_packets || 0} Auto-RP pkt(s) · ${d.neighbors || 0} neighbour(s), ${d.rps || 0} RP(s), ${d.msdp_peers || 0} MSDP peer(s)${d.armed ? '' : ' · <span class="text-slate-400">learning (not armed)</span>'}</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _PIM_SEV_COLOR[f.severity] || 'text-gray-400';
+                const kl = f.class === 'attack' ? 'text-red-300' : 'text-amber-300';
+                const af = f.af ? ('v' + f.af) : '';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 ${kl}">${escapeHtml(f.class || '')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(String(af))}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.title || '')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- FHRP Watch (passive HSRP/VRRP/GLBP/CARP hijack scanner) ----------------
 const _FHRP_VERDICT_STYLE = {
     clean:              ['bg-green-950/40 border-green-900 text-green-400', '✓ FHRP groups/speakers/GLBP forwarders match the trusted baseline'],
