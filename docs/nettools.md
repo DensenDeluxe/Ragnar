@@ -84,6 +84,7 @@ matrix to zoom (`/web/images/osi/`).
 | [IGMP Watch](#igmp-watch) | Diagnostics · L3 | `GET /api/net/igmp-watch`, `POST /api/net/igmp-baseline` |
 | [OSPF Security Scanner](#ospf-security-scanner) | Diagnostics · L3 | `GET /api/net/ospf-watch`, `POST /api/net/ospf-baseline` |
 | [EIGRP Watch](#eigrp-watch) | Diagnostics · L3 | `GET /api/net/eigrp-watch`, `POST /api/net/eigrp-baseline` |
+| [PIM / MSDP Watch](#pim--msdp-watch) | Diagnostics · L3 | `GET /api/net/pim-watch` |
 | [FHRP Watch](#fhrp-watch) | Diagnostics · L3 | `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline` |
 | [IPv6 First-Hop Watch](#ipv6-first-hop-watch) | Diagnostics · L3 | `GET /api/net/ipv6-watch`, `POST /api/net/ipv6-baseline` |
 | [NDP Watch](#ndp-watch) | Diagnostics · L3 | `GET /api/net/ndp-watch`, `POST /api/net/ndp-baseline` |
@@ -149,7 +150,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **PIM / MSDP** (multicast RP-hijack / Register & SA injection / DR hijack / flood), **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -3521,6 +3522,50 @@ parser with the full 16-detector set (adds HMAC-MD5-vs-SHA, DIS-takeover, P2P
 three-way, hello-padding, narrow-metrics, malformed-PDU), per-code severity +
 dedup, baseline learning and a hardened daemon — see
 [isiswatch](isiswatch.md) (`isiswatch.py`).
+
+### PIM / MSDP Watch
+A **passive** scanner for the **multicast routing control plane** — PIM (Protocol
+Independent Multicast) and MSDP. It rides **IP proto 103**, multicast in the clear
+(`224.0.0.13` / `ff02::d`) with no authentication beyond optional IPsec AH (RFC 5796),
+so an on-segment attacker can bend the whole multicast tree. **Detection-only** — it
+never transmits. The engine is vendored at `python/pimwatch.py` (self-contained stdlib;
+scapy only on its own live path, which the adapter does not use — it captures via
+tcpdump→pcap and feeds frames to `PimWatch.handle_frame`). **88 finding codes**
+(37 posture + 51 attack) across the PIM and MSDP planes, and — being a protocol-abuse
+engine rather than a version scanner — **no CVEs**.
+
+**Coverage:** PIM-SM (RFC 7761: Hello, Register, Register-Stop, Join/Prune, Assert),
+PIM-DM (RFC 3973: Graft/Graft-Ack, State Refresh), BiDir-PIM (RFC 5015: DF election),
+PIM-SSM (RFC 4607 range checks), BSR (RFC 5059: Bootstrap, Candidate-RP), RPF-Vector
+(RFC 5496), Anycast-RP (RFC 4610), Embedded-RP (RFC 3956), IPsec-AH posture (RFC 5796),
+Cisco **Auto-RP** (UDP/496 to 224.0.1.39/.40) and **MSDP** (RFC 3618, TCP/639 SA /
+SA-Request / KeepAlive). What it flags:
+
+- **attack** — a forged **Hello** winning the DR election, a rogue **Candidate-RP / BSR**
+  (becoming everyone's RP → multicast MITM / blackhole), a PIM **Register** or an **MSDP
+  SA** injected to pull or poison (S,G) state, **Assert** contention, and Hello /
+  Join-Prune / Graft / SA **floods**. Rate-based attack rules are gated on arming (a
+  static threshold on an unmeasured fabric is a false-positive generator).
+- **posture / structural** — **IPsec-AH protection loss** (a peer that was AH-protected
+  going cleartext, or an SPI change), **SSM-range violations**, **Embedded-RP / Auto-RP**
+  anomalies, bad-checksum / truncated / malformed messages, unexpected TTL/hop-limit on
+  link-local messages, and version anomalies.
+
+**RPF is not on the wire** — it is a router's own decision against its RIB, stated in no
+PIM message. pimwatch covers it with three observable heuristics (a Join/Prune naming an
+upstream that never sent a Hello → `PMW-060`; sustained Assert contention → `PMW-081`; an
+RFC 5496 RPF-Vector pointing outside the learned neighbour/RP set → `PMW-068`) and says
+so in the finding text; a RIB cross-check against the BGP/OSPF watchers is out of scope.
+
+**Dual-stack by protocol pairing:** PIM is IPv4 **and** IPv6 (extension-header chains
+walked); Auto-RP and MSDP have **no IPv6 form**, and their v6 equivalents — Embedded-RP
+and Anycast-RP — are implemented on the PIM side, so the directive is satisfied by the
+protocol family rather than a v6 variant that does not exist. The capture BPF is
+`(ip proto 103) or (ip and udp port 496) or (ip and tcp port 639) or ip6` — the bare
+`ip6` term is load-bearing (a `port`/`proto` primitive cannot walk a v6 extension-header
+chain), with the software gate deciding in Python after the walk. On a short **on-demand
+scan** the engine learns the neighbours/RP set early in the window and arms partway
+through; the standalone daemon uses the full learn window. **API:** `GET /api/net/pim-watch`.
 
 ### OSPF Security Scanner
 A **passive** routing-security scanner for OSPF (the interior routing control
