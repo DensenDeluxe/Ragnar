@@ -50,6 +50,15 @@ fi
 log "First boot — finalising this device"
 log "Board: $(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 
+# ── 0. Unblock radios ──────────────────────────────────────────────────────
+# A freshly flashed image can come up with Wi-Fi/Bluetooth soft-blocked by
+# rfkill; unblock so the radios work out of the box. (ragnar.service also runs
+# this every boot, and a udev rule covers hot-plugged dongles.)
+if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock all >/dev/null 2>&1 || true
+    log "Unblocked all radios (rfkill)"
+fi
+
 # ── 1. Unique SSH host keys ────────────────────────────────────────────────
 # The image build strips host keys; regenerate them here so every device has
 # its own. (Harmless if OpenSSH already regenerated them on first boot.)

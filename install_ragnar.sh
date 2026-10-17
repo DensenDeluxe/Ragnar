@@ -1734,6 +1734,7 @@ After=network.target
 
 [Service]
 ExecStartPre=-/bin/bash -c '/home/ragnar/Ragnar/kill_port_8000.sh; ip link set mon0 down >/dev/null 2>&1; iw dev mon0 del >/dev/null 2>&1; systemctl stop pwnagotchi 2>/dev/null; systemctl stop bettercap 2>/dev/null; true'
+ExecStartPre=-/bin/sh -c 'rfkill unblock all >/dev/null 2>&1 || true'
 EOF
 
     if [ -n "$wipe_exec" ]; then

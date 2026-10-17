@@ -4,6 +4,12 @@
 
 ### 2026-10-17
 
+#### [#975](https://github.com/PierreGode/Ragnar/pull/975) — fix(boot): unblock radios at every boot (rfkill) — both images
+*branch `fix/rfkill-boot-unblock`*
+
+- A freshly flashed image could come up with Wi-Fi/Bluetooth **soft-blocked by rfkill** (the install-time unblock doesn't carry through a chroot image build, and the udev rule didn't reliably catch the built-in radios at cold boot). Now `ragnar.service` runs `ExecStartPre=-/bin/sh -c 'rfkill unblock all …'` **every boot**, so radios are unblocked before Ragnar starts — on **both** the standard and Ulfberht images (both bake `ragnar.service`).
+- `scripts/ragnar-firstboot.sh` also unblocks on first boot (belt-and-braces; previously only mentioned in a comment), and `update_ragnar.sh` Step 6.62 unblocks so already-deployed boxes heal on update. The existing `99-ragnar-rfkill.rules` udev rule (hot-plugged dongles) is unchanged.
+
 #### [#974](https://github.com/PierreGode/Ragnar/pull/974) — feat(ulfberht): Engagements workflow engine + Arsenal (coordinated security workflows)
 *branch `feature/ulfberht-engagements`*
 
