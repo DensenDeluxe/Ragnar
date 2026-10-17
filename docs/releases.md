@@ -4,6 +4,15 @@
 
 ### 2026-10-17
 
+#### [#972](https://github.com/PierreGode/Ragnar/pull/972) — feat(os): Ragnar OS Ulfberht — offensive edition on a Kali ARM base + edition auto-detect
+*branch `feature/ragnar-os-ulfberht`*
+
+- **New image edition: Ragnar OS Ulfberht** — the Ragnar appliance built on a **Kali Linux Raspberry Pi arm64 base** instead of Raspberry Pi OS Lite, for authorized security testing. Deliberately **not** branded "Kali" (trademark); credited as derived from Kali in the docs. Build pipeline lives in the private `PierreGode/RagnarOS` repo under `ulfberht/` and publishes to the public Releases on an `os-ulfberht-v*` tag; the standard pi-gen image is untouched. See [Ragnar OS Ulfberht](ragnar-os-ulfberht.md).
+- **Why Kali:** its RPi kernel ships **Nexmon** (`brcmfmac-nexmon-dkms` + `firmware-nexmon`) so the Pi's **onboard** Wi-Fi does monitor mode + frame injection with no USB adapter (chipset-dependent; Pi 5 restored in Kali 2025.3), plus the full offensive toolset in-repo. Same arm64 Pi coverage as the standard image (Pi 5 / 4 / 3 / Zero 2 W / CM4-5); ARMv6 boards (Pi 1 / original Zero) are out, as Kali dropped ARMel.
+- **"Hidden switch" — edition auto-detect.** New `ragnar_edition.py` (pure stdlib, never raises) reads `/etc/os-release` and reports the base/edition at `GET /api/edition`. On a standard Raspberry Pi OS build it returns `edition=standard` and **nothing in the UI changes**. On the Kali (Ulfberht) base the **System** tab reveals an edition card: the Ulfberht badge, Nexmon onboard-Wi-Fi status, and the offensive tools detected on `PATH` as reference chips. Purely additive and gated — a standard box never sees it.
+- **Installer:** `install_ragnar.sh` now recognizes `ID=kali` as Debian-family (shares the apt branch); it already fell through to apt, so this is a clean, explicit addition. `update_ragnar.sh` is already pure-apt, so deployed boxes heal unchanged.
+- **UI:** System-tab edition card (mobile-friendly, hidden by default); `ragnar_modern.js` cache-bust → `?v=20261017-ulfberht`. **Docs:** new [Ragnar OS Ulfberht](ragnar-os-ulfberht.md), linked from README.
+
 #### [#971](https://github.com/PierreGode/Ragnar/pull/971) — feat(net): Arista Switch & Router Guard v4 — vendored EOS CVE engine (17 CVEs, 29 codes)
 *branch `feature/arista-guard-v4`*
 

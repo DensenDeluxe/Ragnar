@@ -27178,6 +27178,27 @@ def format_bytes(bytes_value):
 # SYSTEM MONITORING ENDPOINTS
 # ============================================================================
 
+@app.route('/api/edition')
+def get_edition_api():
+    """Report the running base OS / Ragnar edition (the Ulfberht "hidden switch").
+
+    On a standard Raspberry Pi OS build this returns edition='standard' and the
+    UI shows nothing extra. On the security-distro (Ulfberht) base it reports
+    the detected offensive toolset and Nexmon onboard-Wi-Fi capability."""
+    try:
+        import ragnar_edition
+        return jsonify(ragnar_edition.detect())
+    except Exception as e:
+        return jsonify({
+            "edition": "standard",
+            "edition_name": "Ragnar OS",
+            "is_security_distro": False,
+            "tools": [],
+            "tool_count": 0,
+            "error": str(e),
+        })
+
+
 @app.route('/api/system/status')
 def get_system_status_api():
     """Get comprehensive system status"""

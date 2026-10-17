@@ -6205,6 +6205,23 @@
                     </button>
                 </div>
 
+                <!-- Ulfberht edition: only revealed by JS on the security-distro base; hidden on standard Raspberry Pi OS builds -->
+                <div id="edition-card" class="glass-card p-4 sm:p-5 mb-4 sm:mb-6 hidden" style="border:1px solid rgba(220,38,38,0.35)">
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <div class="flex items-center gap-2">
+                            <span class="text-lg sm:text-xl">⚔️</span>
+                            <h3 id="edition-name" class="text-lg font-bold">Ragnar OS Ulfberht</h3>
+                            <span class="text-xs px-2 py-0.5 rounded-full" style="background:rgba(220,38,38,0.18);color:#f87171">EDITION</span>
+                        </div>
+                        <div id="edition-base" class="text-xs text-gray-400"></div>
+                    </div>
+                    <div id="edition-nexmon" class="text-sm mt-2 text-gray-300">&nbsp;</div>
+                    <div class="mt-3">
+                        <div class="text-xs text-gray-400 mb-1">Installed offensive tools (<span id="edition-tool-count">0</span>)</div>
+                        <div id="edition-tools" class="flex flex-wrap gap-2"></div>
+                    </div>
+                </div>
+
                 <!-- Overview: one compact stat per card -->
                 <div class="sys-stats mb-4 sm:mb-6">
                     <div id="power-card" class="glass-card sys-stat sys-stat-wide hidden">
@@ -9632,7 +9649,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261017-rip-pim-msdp-igmp-v5"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261017-ulfberht"></script>
 
 
 
