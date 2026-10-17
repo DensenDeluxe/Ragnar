@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Ragnar edition / base-OS detection -- the "hidden switch".
+Ragnar edition detection -- the "hidden switch".
 
-Ragnar runs on several Debian-family bases. The standard Ragnar OS image is
-built on Raspberry Pi OS Lite. The "Ulfberht" edition is built on top of a
-security-focused Debian derivative whose Raspberry Pi kernel ships Nexmon
-(onboard Wi-Fi monitor mode + frame injection) and a large offensive toolset.
+The extended capabilities (coordinated security workflows, the offensive tool
+surface, Nexmon onboard-Wi-Fi integration) belong to ONE thing only: the genuine
+**Ragnar OS Ulfberht image**. They are gated on a build-time marker that is
+written exclusively by the image build (see the RagnarOS `ulfberht/` pipeline),
+NEVER by install_ragnar.sh.
 
-When Ragnar detects that base it unlocks extra, additive capabilities and
-surfaces the tools that are already installed so they are one tap away in the
-web UI. On a plain Raspberry Pi OS / Debian box this module reports
+That means: on the standard Ragnar OS image, and on anyone's own Kali box where
+they merely `git clone` Ragnar and run the installer, this reports
 edition="standard" and the UI shows nothing new -- the switch stays hidden.
+Being Kali-based is NOT enough; only the official Ulfberht image carries the
+marker.
 
 Pure standard library, no side effects, never raises, safe to import anywhere.
 """
@@ -22,10 +24,11 @@ import os
 import shutil
 import subprocess
 
-# os-release IDs we treat as the security-distro base that powers the
-# "Ulfberht" edition. A set so a later point release (still ID=kali) keeps
-# working without a code change.
-_SECURITY_BASE_IDS = {"kali"}
+# The ONLY signal that unlocks the edition: a marker file the image build
+# writes. install_ragnar.sh must never create it. (An env override is allowed
+# for development/testing only.)
+_MARKER_PATHS = ("/etc/ragnar-edition", "/boot/firmware/ragnar-edition")
+_ENV_OVERRIDE = "RAGNAR_EDITION"
 
 EDITION_ULFBERHT = "ulfberht"
 EDITION_STANDARD = "standard"
@@ -70,25 +73,41 @@ _TOOL_CATALOG = (
     ("netexec", "NetExec", "smb"),
 )
 
-# Nexmon packages (onboard-Wi-Fi monitor/injection support on the security base).
+# Nexmon packages (onboard-Wi-Fi monitor/injection support on the Ulfberht base).
 _NEXMON_PACKAGES = ("brcmfmac-nexmon-dkms", "firmware-nexmon")
 
 _cache = None
 
 
-def _read_os_release():
+def _read_kv(path):
     data = {}
     try:
-        with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                data[key] = val.strip().strip('"').strip("'")
+                data[key.strip()] = val.strip().strip('"').strip("'")
     except OSError:
         pass
     return data
+
+
+def _read_marker():
+    """The image-build marker, or {} if this isn't the official Ulfberht image."""
+    env = os.environ.get(_ENV_OVERRIDE)
+    if env:
+        return {"edition": env.strip().lower()}
+    for path in _MARKER_PATHS:
+        data = _read_kv(path)
+        if data.get("edition"):
+            return data
+    return {}
+
+
+def _read_os_release():
+    return _read_kv("/etc/os-release")
 
 
 def _dpkg_installed(pkg):
@@ -117,44 +136,44 @@ def _detect_tools():
 
 def _detect_nexmon():
     pkgs = [p for p in _NEXMON_PACKAGES if _dpkg_installed(p)]
-    # Nexmon-patched brcmfmac firmware lands in /lib/firmware/brcm; the exact
-    # file depends on the Pi's wireless chip, so glob rather than hardcode.
     fw = bool(glob.glob("/lib/firmware/brcm/*nexmon*")
               or glob.glob("/usr/lib/firmware/brcm/*nexmon*"))
-    return {
-        "available": bool(pkgs) or fw,
-        "packages": pkgs,
-        "firmware_present": fw,
-    }
+    return {"available": bool(pkgs) or fw, "packages": pkgs, "firmware_present": fw}
 
 
 def detect(refresh=False):
-    """Return a dict describing the running base/edition. Cached; never raises."""
+    """Return a dict describing the running edition. Cached; never raises.
+
+    Extended capabilities are reported only when the official Ulfberht image
+    marker is present -- being on a Kali base is deliberately NOT sufficient.
+    """
     global _cache
     if _cache is not None and not refresh:
         return _cache
 
+    marker = _read_marker()
+    is_ulfberht = (marker.get("edition", "").lower() == EDITION_ULFBERHT)
+    edition = EDITION_ULFBERHT if is_ulfberht else EDITION_STANDARD
+
     osr = _read_os_release()
     base_id = (osr.get("ID") or "unknown").lower()
-    id_like = (osr.get("ID_LIKE") or "").lower()
-    pretty = osr.get("PRETTY_NAME") or base_id
-
-    is_security = base_id in _SECURITY_BASE_IDS
-    edition = EDITION_ULFBERHT if is_security else EDITION_STANDARD
 
     result = {
         "edition": edition,
-        "edition_name": EDITION_NAMES[edition],
-        "is_security_distro": is_security,
+        "edition_name": marker.get("name") or EDITION_NAMES[edition],
+        "is_ulfberht": is_ulfberht,
+        # kept as an alias so existing callers keep working; it now means
+        # "is this the official security edition image", NOT "is the base Kali".
+        "is_security_distro": is_ulfberht,
         "base_id": base_id,
-        "base_id_like": id_like,
-        "base_pretty": pretty,
-        "base_version": osr.get("VERSION") or osr.get("VERSION_ID") or "",
+        "base_pretty": osr.get("PRETTY_NAME") or base_id,
+        "image_build": marker.get("build_date") or marker.get("build") or "",
+        "image_id": marker.get("image_id") or "",
         "nexmon": {"available": False, "packages": [], "firmware_present": False},
         "tools": [],
         "tool_count": 0,
     }
-    if is_security:
+    if is_ulfberht:
         try:
             result["nexmon"] = _detect_nexmon()
         except Exception:

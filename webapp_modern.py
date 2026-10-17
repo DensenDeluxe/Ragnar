@@ -27192,6 +27192,7 @@ def get_edition_api():
         return jsonify({
             "edition": "standard",
             "edition_name": "Ragnar OS",
+            "is_ulfberht": False,
             "is_security_distro": False,
             "tools": [],
             "tool_count": 0,

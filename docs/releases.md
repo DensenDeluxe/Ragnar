@@ -4,7 +4,11 @@
 
 ### 2026-10-17
 
-#### [#972](https://github.com/PierreGode/Ragnar/pull/972) — feat(os): Ragnar OS Ulfberht — offensive edition on a Kali ARM base + edition auto-detect
+#### [#973](https://github.com/PierreGode/Ragnar/pull/973) — fix(os): gate Ulfberht capabilities on the official image marker, not the Kali base
+*branch `fix/ulfberht-image-marker-gate`*
+
+- **Corrects the edition gate.** The extended Ulfberht capabilities must belong to the **official Ragnar OS Ulfberht image only** — not to any Kali box. `ragnar_edition.py` now keys off a **build-time marker** (`/etc/ragnar-edition`, written exclusively by the RagnarOS `ulfberht/` image build, never by `install_ragnar.sh`) instead of `ID=kali`. So a user who merely `git clone`s Ragnar onto their own Kali install gets **standard** behaviour — being Kali-based is deliberately no longer sufficient.
+- `GET /api/edition` now returns `is_ulfberht` (with `is_security_distro` kept as an alias meaning "is the official edition image"); the System-tab card only appears when the marker is present. The `install_ragnar.sh` `kali` package-manager recognition from #972 stays (it's just apt detection, not a capability gate). **Docs** updated to describe marker-gating. Image build writes the marker (RagnarOS repo).
 *branch `feature/ragnar-os-ulfberht`*
 
 - **New image edition: Ragnar OS Ulfberht** — the Ragnar appliance built on a **Kali Linux Raspberry Pi arm64 base** instead of Raspberry Pi OS Lite, for authorized security testing. Deliberately **not** branded "Kali" (trademark); credited as derived from Kali in the docs. Build pipeline lives in the private `PierreGode/RagnarOS` repo under `ulfberht/` and publishes to the public Releases on an `os-ulfberht-v*` tag; the standard pi-gen image is untouched. See [Ragnar OS Ulfberht](ragnar-os-ulfberht.md).
