@@ -28805,8 +28805,54 @@ function refreshSystemStatus() {
     fetchSystemStatus();
     fetchNetworkStats();
     fetchPowerDetail();
+    fetchEdition();
     showSystemSuccess('System status refreshed');
 }
+
+// ── Ulfberht edition ("hidden switch") ──────────────────────────────────────
+// Reveals the System-tab edition card only on the security-distro base; on a
+// standard Raspberry Pi OS build the card stays hidden and nothing changes.
+function fetchEdition() {
+    fetch('/api/edition')
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+            if (!d || !d.is_security_distro) return;  // standard build: stay hidden
+            const card = document.getElementById('edition-card');
+            if (!card) return;
+            const nameEl = document.getElementById('edition-name');
+            if (nameEl && d.edition_name) nameEl.textContent = d.edition_name;
+            const baseEl = document.getElementById('edition-base');
+            if (baseEl) baseEl.textContent = d.base_pretty || '';
+            const nx = document.getElementById('edition-nexmon');
+            if (nx) {
+                if (d.nexmon && d.nexmon.available) {
+                    nx.innerHTML = '<span style="color:#4ade80">●</span> Nexmon ready — onboard Wi-Fi monitor mode &amp; frame injection available';
+                } else {
+                    nx.innerHTML = '<span style="color:#9ca3af">○</span> Nexmon not detected — use a USB adapter for monitor mode';
+                }
+            }
+            const tc = document.getElementById('edition-tool-count');
+            if (tc) tc.textContent = (d.tool_count || 0);
+            const tools = document.getElementById('edition-tools');
+            if (tools) {
+                tools.innerHTML = '';
+                (d.tools || []).forEach(t => {
+                    const chip = document.createElement('span');
+                    chip.className = 'text-xs px-2 py-0.5 rounded';
+                    chip.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12)';
+                    chip.title = (t.category || '') + ' · ' + (t.path || '');
+                    chip.textContent = t.name || t.bin;
+                    tools.appendChild(chip);
+                });
+                if (!(d.tools || []).length) {
+                    tools.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
+                }
+            }
+            card.classList.remove('hidden');
+        })
+        .catch(() => { /* standard build / offline: ignore */ });
+}
+document.addEventListener('DOMContentLoaded', fetchEdition);
 
 function showSystemSuccess(message) {
     showNotification(message, 'success');

@@ -299,7 +299,9 @@ detect_platform() {
     [ "${RAGNAR_FORCE_PI:-0}" = "1" ] && IS_PI=true
 
     case "$OS_ID" in
-        debian|ubuntu|raspbian)
+        debian|ubuntu|raspbian|kali)
+            # kali: the Ragnar OS "Ulfberht" edition is built on a Kali base.
+            # It is Debian-family (apt), so it shares this branch.
             PKG_MGR="apt"
             UPDATE_CMD="apt-get update -y"
             # noninteractive: packages like iperf3 ask debconf questions that
