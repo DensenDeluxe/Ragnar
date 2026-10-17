@@ -28812,47 +28812,178 @@ function refreshSystemStatus() {
 // ── Ulfberht edition ("hidden switch") ──────────────────────────────────────
 // Reveals the System-tab edition card only on the security-distro base; on a
 // standard Raspberry Pi OS build the card stays hidden and nothing changes.
+function _ulfToolChip(t) {
+    const chip = document.createElement('span');
+    chip.className = 'text-xs px-2 py-0.5 rounded';
+    chip.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12)';
+    chip.title = (t.category || '') + ' · ' + (t.path || '');
+    chip.textContent = t.name || t.bin;
+    return chip;
+}
+let ulfEnabled = false;
 function fetchEdition() {
     fetch('/api/edition')
         .then(r => r.ok ? r.json() : null)
         .then(d => {
-            if (!d || !d.is_security_distro) return;  // standard build: stay hidden
+            const on = d && (d.is_ulfberht || d.is_security_distro);
+            if (!on) return;  // standard build / stock Kali: everything stays hidden
+            ulfEnabled = true;
             const card = document.getElementById('edition-card');
-            if (!card) return;
-            const nameEl = document.getElementById('edition-name');
-            if (nameEl && d.edition_name) nameEl.textContent = d.edition_name;
-            const baseEl = document.getElementById('edition-base');
-            if (baseEl) baseEl.textContent = d.base_pretty || '';
-            const nx = document.getElementById('edition-nexmon');
-            if (nx) {
-                if (d.nexmon && d.nexmon.available) {
-                    nx.innerHTML = '<span style="color:#4ade80">●</span> Nexmon ready — onboard Wi-Fi monitor mode &amp; frame injection available';
-                } else {
-                    nx.innerHTML = '<span style="color:#9ca3af">○</span> Nexmon not detected — use a USB adapter for monitor mode';
+            if (card) {
+                const nameEl = document.getElementById('edition-name');
+                if (nameEl && d.edition_name) nameEl.textContent = d.edition_name;
+                const baseEl = document.getElementById('edition-base');
+                if (baseEl) baseEl.textContent = d.base_pretty || '';
+                const nx = document.getElementById('edition-nexmon');
+                if (nx) nx.innerHTML = (d.nexmon && d.nexmon.available)
+                    ? '<span style="color:#4ade80">●</span> Nexmon ready — onboard Wi-Fi monitor mode &amp; frame injection available'
+                    : '<span style="color:#9ca3af">○</span> Nexmon not detected — use a USB adapter for monitor mode';
+                const tc = document.getElementById('edition-tool-count');
+                if (tc) tc.textContent = (d.tool_count || 0);
+                const tools = document.getElementById('edition-tools');
+                if (tools) {
+                    tools.innerHTML = '';
+                    (d.tools || []).forEach(t => tools.appendChild(_ulfToolChip(t)));
+                    if (!(d.tools || []).length) tools.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
                 }
+                card.classList.remove('hidden');
             }
-            const tc = document.getElementById('edition-tool-count');
-            if (tc) tc.textContent = (d.tool_count || 0);
-            const tools = document.getElementById('edition-tools');
-            if (tools) {
-                tools.innerHTML = '';
-                (d.tools || []).forEach(t => {
-                    const chip = document.createElement('span');
-                    chip.className = 'text-xs px-2 py-0.5 rounded';
-                    chip.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12)';
-                    chip.title = (t.category || '') + ' · ' + (t.path || '');
-                    chip.textContent = t.name || t.bin;
-                    tools.appendChild(chip);
-                });
-                if (!(d.tools || []).length) {
-                    tools.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
+            // Reveal the Engagements nav buttons (desktop + mobile)
+            document.querySelectorAll('.ulfberht-nav-btn').forEach(b => b.classList.remove('hidden'));
+            // Arsenal in the Pentest tab
+            const ars = document.getElementById('ulf-arsenal');
+            if (ars) {
+                const ac = document.getElementById('ulf-arsenal-count');
+                if (ac) ac.textContent = (d.tool_count || 0);
+                const at = document.getElementById('ulf-arsenal-tools');
+                if (at) {
+                    at.innerHTML = '';
+                    (d.tools || []).forEach(t => at.appendChild(_ulfToolChip(t)));
+                    if (!(d.tools || []).length) at.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
                 }
+                ars.classList.remove('hidden');
             }
-            card.classList.remove('hidden');
+            ulfLoadPlaybooks();
         })
         .catch(() => { /* standard build / offline: ignore */ });
 }
 document.addEventListener('DOMContentLoaded', fetchEdition);
+
+// ── Ulfberht Engagements (marker-gated workflow engine) ─────────────────────
+let ulfPlaybooks = [];
+let ulfCurrentRun = null;
+let ulfPollTimer = null;
+
+function ulfLoadPlaybooks() {
+    fetch('/api/ulfberht/playbooks').then(r => r.json()).then(d => {
+        if (!d.enabled) return;
+        ulfPlaybooks = d.playbooks || [];
+        const sel = document.getElementById('ulf-playbook');
+        if (sel) {
+            sel.innerHTML = '';
+            ulfPlaybooks.forEach(p => {
+                const o = document.createElement('option');
+                o.value = p.id; o.textContent = p.name; sel.appendChild(o);
+            });
+            ulfPlaybookDesc();
+        }
+    }).catch(() => {});
+}
+
+function ulfPlaybookDesc() {
+    const sel = document.getElementById('ulf-playbook');
+    const desc = document.getElementById('ulf-playbook-desc');
+    if (!sel || !desc) return;
+    const p = ulfPlaybooks.find(x => x.id === sel.value);
+    desc.textContent = p ? p.description : '';
+}
+
+function ulfStartRun() {
+    const pb = (document.getElementById('ulf-playbook') || {}).value;
+    const scope = ((document.getElementById('ulf-scope') || {}).value || '').trim();
+    const active = (document.getElementById('ulf-active') || {}).checked;
+    const msg = document.getElementById('ulf-run-msg');
+    if (!scope) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a scope (IP / CIDR / host).'; } return; }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Starting…'; }
+    fetch('/api/ulfberht/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({playbook: pb, scope: scope, enable_active: active})
+    }).then(r => r.json()).then(d => {
+        if (d.error) { if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error; } return; }
+        ulfCurrentRun = d.run_id;
+        if (msg) { msg.style.color = '#9ca3af'; msg.textContent = d.active_blocked
+            ? 'Started (active phase skipped — enable attacks in settings to run it).' : 'Started.'; }
+        document.getElementById('ulf-run-panel').classList.remove('hidden');
+        document.getElementById('ulf-run-id').textContent = d.run_id;
+        const pre = document.getElementById('ulf-report'); if (pre) pre.classList.add('hidden');
+        if (ulfPollTimer) clearTimeout(ulfPollTimer);
+        ulfPoll();
+    }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfPoll() {
+    if (!ulfCurrentRun) return;
+    fetch('/api/ulfberht/run/' + ulfCurrentRun).then(r => r.json()).then(d => {
+        if (d.error) return;
+        ulfRenderRun(d);
+        if (d.status === 'running') ulfPollTimer = setTimeout(ulfPoll, 2500);
+    }).catch(() => { ulfPollTimer = setTimeout(ulfPoll, 4000); });
+}
+
+function ulfRenderRun(d) {
+    const st = document.getElementById('ulf-run-status');
+    if (st) {
+        const color = d.status === 'completed' ? '#4ade80' : (d.status === 'failed' ? '#f87171' : '#fbbf24');
+        st.innerHTML = '<span style="color:' + color + '">' + d.status + '</span>' + (d.phase ? ' · ' + d.phase : '');
+    }
+    const ph = document.getElementById('ulf-phases');
+    if (ph) {
+        ph.innerHTML = '';
+        ['discovery','diagnostics','assessment','reporting'].forEach(p => {
+            const done = (d.phases_done || []).includes(p);
+            const cur = d.phase === p && d.status === 'running';
+            const sp = document.createElement('span');
+            sp.className = 'px-2 py-0.5 rounded';
+            sp.style.cssText = 'border:1px solid ' + (done ? 'rgba(74,222,128,0.5)' : (cur ? 'rgba(251,191,36,0.6)' : 'rgba(255,255,255,0.12)'));
+            sp.textContent = (done ? '✓ ' : (cur ? '… ' : '')) + p;
+            ph.appendChild(sp);
+        });
+    }
+    const fc = document.getElementById('ulf-finding-count');
+    if (fc) fc.textContent = (d.findings || []).length;
+    const fl = document.getElementById('ulf-findings');
+    if (fl) {
+        fl.innerHTML = '';
+        (d.findings || []).forEach(f => {
+            const col = {high:'#f87171', medium:'#fbbf24', low:'#60a5fa'}[f.severity] || '#9ca3af';
+            const row = document.createElement('div');
+            row.className = 'text-xs p-2 rounded';
+            row.style.cssText = 'background:rgba(255,255,255,0.04)';
+            row.innerHTML = '<span style="color:' + col + '">[' + String(f.severity||'').toUpperCase() + ']</span> <b>' +
+                _esc(f.title) + '</b> — ' + _esc(f.host) + '<br><span class="text-gray-400">' +
+                _esc(f.detail) + (f.ref ? ' · ' + _esc(f.ref) : '') + '</span>';
+            fl.appendChild(row);
+        });
+        if (!(d.findings||[]).length) fl.innerHTML = '<span class="text-xs text-gray-500">no findings yet…</span>';
+    }
+    if (d.status === 'completed') {
+        const b = document.getElementById('ulf-report-btn'); if (b) b.classList.remove('hidden');
+        const dl = document.getElementById('ulf-report-dl');
+        if (dl) { dl.href = '/api/ulfberht/report/' + d.id + '?download=1'; dl.classList.remove('hidden'); }
+    }
+}
+
+function _esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function ulfLoadReport() {
+    if (!ulfCurrentRun) return;
+    fetch('/api/ulfberht/report/' + ulfCurrentRun).then(r => r.json()).then(d => {
+        const pre = document.getElementById('ulf-report');
+        if (pre && d.report_md) { pre.textContent = d.report_md; pre.classList.remove('hidden'); }
+    }).catch(() => {});
+}
 
 function showSystemSuccess(message) {
     showNotification(message, 'success');

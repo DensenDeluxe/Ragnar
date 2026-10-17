@@ -4,6 +4,14 @@
 
 ### 2026-10-17
 
+#### [#974](https://github.com/PierreGode/Ragnar/pull/974) — feat(ulfberht): Engagements workflow engine + Arsenal (coordinated security workflows)
+*branch `feature/ulfberht-engagements`*
+
+- **New: the Ulfberht Engagements engine** — the professional/educational differentiator. `ulfberht_engine.py` runs **playbooks** that chain **discovery → diagnostics → assessment → reporting** over one scope into one **NIST SP 800-115-aligned** report, instead of a drawer of tools. Flagship playbook **Scoped Network Assessment**: `nmap` host/service sweep (XML-parsed) → passive posture analysis (cleartext/legacy/exposed services mapped to CWE / MITRE ATT&CK) → optional active validation (`nuclei` on web services) → report (in-tab + downloadable Markdown).
+- **Image-only (marker-gated).** Engine, the new **⚔️ Engagements** tab, and the **Arsenal** panel (detected offensive tools, on the Pentest tab) only appear when the `/etc/ragnar-edition` marker is present — i.e. the official Ulfberht image. Standard image / stock Kali see nothing; the API returns `enabled:false` / `403`.
+- **Safety:** scope entered once and enforced across phases; discovery + diagnostics are passive and always allowed; the **assessment** phase is double-gated (operator opt-in **and** the server `enable_attacks` flag) or it's skipped and the report says so. Runs in a background thread with per-tool timeouts.
+- **API:** `/api/ulfberht/playbooks`, `POST /api/ulfberht/run`, `/api/ulfberht/run/<id>`, `/api/ulfberht/report/<id>` (all marker-gated). **UI:** Engagements tab (playbook + scope + live phase/finding stream + report view/download), mobile-friendly; `ragnar_modern.js` cache-bust → `?v=20261017-ulfberht-engage`. **Docs:** new [Ulfberht Engagements](ulfberht-workflows.md), linked from [Ragnar OS Ulfberht](ragnar-os-ulfberht.md).
+
 #### [#973](https://github.com/PierreGode/Ragnar/pull/973) — fix(os): gate Ulfberht capabilities on the official image marker, not the Kali base
 *branch `fix/ulfberht-image-marker-gate`*
 

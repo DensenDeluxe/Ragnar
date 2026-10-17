@@ -54,6 +54,15 @@ and that `install_ragnar.sh` never creates. So:
 
 The switch is purely additive: a standard box never sees it.
 
+## Coordinated workflows (Engagements)
+
+Ulfberht's headline capability is the **Engagements** engine — marker-gated
+playbooks that chain **discovery → diagnostics → assessment → reporting** over
+one scope into one NIST SP 800-115-aligned report, rather than a loose pile of
+tools. It appears as the **⚔️ Engagements** tab (and an **Arsenal** panel on the
+Pentest tab) on the official image only. See
+[Ulfberht Engagements](ulfberht-workflows.md).
+
 ## Flashing & first boot
 
 1. Download `RagnarOS-Ulfberht-arm64.img.xz` + its `.sha256` from the
