@@ -27200,6 +27200,78 @@ def get_edition_api():
         })
 
 
+# ============================================================================
+# ULFBERHT ENGAGEMENT ENGINE  (official Ulfberht image only -- marker-gated)
+# ============================================================================
+
+@app.route('/api/ulfberht/playbooks')
+def ulfberht_playbooks_api():
+    """List engagement playbooks. Empty + enabled=false off the Ulfberht image."""
+    try:
+        import ulfberht_engine
+        if not ulfberht_engine.is_enabled():
+            return jsonify({"enabled": False, "playbooks": []})
+        return jsonify({"enabled": True, "playbooks": ulfberht_engine.list_playbooks(),
+                        "runs": ulfberht_engine.list_runs()})
+    except Exception as e:
+        return jsonify({"enabled": False, "playbooks": [], "error": str(e)})
+
+
+@app.route('/api/ulfberht/run', methods=['POST'])
+def ulfberht_run_api():
+    """Start an engagement run. The active/assessment phase runs only when the
+    caller opts in AND the server's enable_attacks flag is on."""
+    try:
+        import ulfberht_engine
+        if not ulfberht_engine.is_enabled():
+            return jsonify({"error": "Ulfberht engine is available only on the Ragnar OS Ulfberht image."}), 403
+        data = request.get_json(silent=True) or {}
+        want_active = bool(data.get('enable_active'))
+        server_allows = bool(shared_data.config.get('enable_attacks', True))
+        active = want_active and server_allows
+        run_id, err = ulfberht_engine.start_run(
+            data.get('playbook', ''), data.get('scope', ''), enable_active=active)
+        if err:
+            return jsonify({"error": err}), 400
+        return jsonify({"run_id": run_id, "active": active,
+                        "active_blocked": want_active and not server_allows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/ulfberht/run/<run_id>')
+def ulfberht_run_status_api(run_id):
+    try:
+        import ulfberht_engine
+        if not ulfberht_engine.is_enabled():
+            return jsonify({"error": "not available"}), 403
+        run = ulfberht_engine.get_run(run_id)
+        if not run:
+            return jsonify({"error": "no such run"}), 404
+        run.pop('report_md', None)  # fetched separately
+        return jsonify(run)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/ulfberht/report/<run_id>')
+def ulfberht_report_api(run_id):
+    try:
+        import ulfberht_engine
+        if not ulfberht_engine.is_enabled():
+            return jsonify({"error": "not available"}), 403
+        md = ulfberht_engine.get_report(run_id)
+        if md is None:
+            return jsonify({"error": "no such run"}), 404
+        if request.args.get('download'):
+            from flask import Response
+            return Response(md, mimetype='text/markdown', headers={
+                'Content-Disposition': f'attachment; filename=engagement-{run_id}.md'})
+        return jsonify({"run_id": run_id, "report_md": md})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/system/status')
 def get_system_status_api():
     """Get comprehensive system status"""
