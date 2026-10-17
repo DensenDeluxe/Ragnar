@@ -37,15 +37,20 @@ Same arm64 range as the standard image:
 | Pi Zero 2 W | ✅ arm64 |
 | Pi 1 / original Pi Zero / Zero W | ❌ ARMv6 — Kali dropped ARMel |
 
-## The "hidden switch" — edition auto-detect
+## The "hidden switch" — edition detection
 
-Ragnar detects its base OS at runtime (`ragnar_edition.py`, exposed at
-`GET /api/edition`). On a standard Raspberry Pi OS build nothing changes. On the
-Ulfberht (Kali) base, the **System** tab reveals an edition card that shows:
+The extended capabilities belong to the **official Ulfberht image only**, not to
+any Kali box. Detection (`ragnar_edition.py`, exposed at `GET /api/edition`) keys
+off a **build-time marker** — `/etc/ragnar-edition` — that the image build writes
+and that `install_ragnar.sh` never creates. So:
 
-- the **Ulfberht** badge and the base OS,
-- **Nexmon status** — whether onboard monitor mode / injection is available,
-- the **offensive tools detected on `PATH`**, as quick reference chips.
+- On the official **Ulfberht image**, the **System** tab reveals an edition card:
+  the **Ulfberht** badge + build info, **Nexmon status** (onboard monitor mode /
+  injection), and the **offensive tools detected on `PATH`** as reference chips.
+- On the standard Ragnar OS image — *and on anyone's own Kali box where they
+  simply `git clone` Ragnar and run the installer* — there is no marker, so it
+  reports `edition=standard` and nothing new appears. Being Kali-based is
+  deliberately **not** enough; only this image carries the marker.
 
 The switch is purely additive: a standard box never sees it.
 
