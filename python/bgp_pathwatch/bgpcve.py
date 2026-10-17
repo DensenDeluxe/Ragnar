@@ -41,6 +41,7 @@ assumed.
 from __future__ import annotations
 
 import struct
+import time
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
@@ -52,6 +53,8 @@ ATTR_AS_PATH = 2
 ATTR_NEXT_HOP = 3
 ATTR_MP_REACH = 14
 ATTR_MP_UNREACH = 15
+NOTIFICATION = bgp.NOTIFICATION
+
 ATTR_PMSI_TUNNEL = 22          # RFC 6514 -- NOT an encap attribute, see d001
 ATTR_TUNNEL_ENCAP = 23         # RFC 9012 (obsoletes RFC 5512)
 ATTR_IPV6_EXT_COMMUNITIES = 25  # RFC 5701
@@ -71,6 +74,19 @@ MANDATORY_ATTRS = (ATTR_ORIGIN, ATTR_AS_PATH)
 SAFI_FLOWSPEC = 133
 SAFI_FLOWSPEC_VPN = 134
 SAFI_SR_POLICY = 73
+
+# --- labelled-VPN NLRI (RFC 8277 + RFC 4364/4659), CVE-2026-93345 ---------- #
+SAFI_MPLS_VPN = 128            # MPLS-labelled VPN unicast (VPNv4 / VPNv6)
+VPN_LABEL_BITS = 24            # one label: 20b label + 3b Rsrv + 1b S
+VPN_RD_BITS = 64               # 8-octet Route Distinguisher
+# RFC 8277 s2: the Length octet counts BITS and covers the label bits as well
+# as the prefix bits, and for SAFI 128 "the prefix is at least 64 bits long"
+# (the RD). One label plus an RD therefore consumes 88 bits before a single
+# address bit exists, so a declared length below 88 describes a route with a
+# NEGATIVE-length address portion. That floor holds whether or not the peers
+# exchanged the Multiple Labels Capability -- extra labels only raise it -- so
+# the check needs no capability state and no baseline.
+VPN_NLRI_MIN_BITS = VPN_LABEL_BITS + VPN_RD_BITS      # 88
 
 # SAFIs whose MP_REACH NLRI really is a plain prefix list ([1B length][prefix]),
 # and which may therefore be prefix-walked. Everything else carries its own
@@ -112,6 +128,13 @@ class Finding:
             "family": self.family, "afi": self.afi,
         }
 
+
+_VPN_NOTE = ("the malformation is invalid for every BGP implementation, so "
+             "this fires on the packet shape from any peer; the RouterOS "
+             "range (all versions before 7.25beta4 -- stable 7.24.2 and "
+             "long-term 7.23.5 included) is enrichment, not a gate. CVSS 3.1 "
+             "7.5 / CVSS 4.0 8.7. Indicates the trigger crossed the tap, not "
+             "that the receiving router crashed -- see PW-BGP-014 for that")
 
 _EXPOSURE_NOTE = ("indicates a message with this trigger shape crossed the tap; "
                   "does not establish that the receiving router is a vulnerable "
@@ -259,6 +282,118 @@ def walk_prefixes(data: bytes, bits: int) -> tuple[int, bool]:
 # --------------------------------------------------------------------------- #
 # Detectors
 # --------------------------------------------------------------------------- #
+@dataclass
+class VpnNlri:
+    """One labelled-VPN NLRI record, decoded leniently."""
+    declared_bits: int
+    address_bits: int = 0        # declared_bits - 88; negative is the defect
+    nbytes: int = 0
+    below_minimum: bool = False
+    overrun: bool = False
+    remaining: int = 0
+
+
+def walk_labelled_vpn_nlri(data: bytes,
+                           min_bits: int = VPN_NLRI_MIN_BITS) -> list:
+    """Decode a run of SAFI 128 NLRI without trusting the length octet.
+
+    Stops at the first structurally impossible record: a malformed length
+    desynchronises everything after it, so continuing would report garbage
+    rather than findings. Never raises.
+    """
+    out: list = []
+    i = 0
+    n = len(data)
+    while i < n:
+        rec = VpnNlri(declared_bits=data[i])
+        i += 1
+        rec.nbytes = (rec.declared_bits + 7) // 8
+        rec.address_bits = rec.declared_bits - min_bits
+        if rec.declared_bits < min_bits:
+            rec.below_minimum = True
+            out.append(rec)
+            return out
+        if i + rec.nbytes > n:
+            rec.overrun = True
+            rec.remaining = n - i
+            out.append(rec)
+            return out
+        i += rec.nbytes
+        out.append(rec)
+    return out
+
+
+def d013_labelled_vpn_nlri(u: RawUpdate,
+                           vpn_safis: tuple = (SAFI_MPLS_VPN,)) -> list:
+    """PW-BGP-013 -- CVE-2026-93345 (MikroTik RouterOS, CWE-1284).
+
+    A labelled-VPN MP_REACH_NLRI whose prefix-length octet is below the
+    structural minimum for the family. RouterOS's labelled-VPN NLRI iterators
+    accept it and then walk a negative-length address portion, crashing the
+    routing service; the session drops with no NOTIFICATION and a single
+    repeated packet holds the BGP plane down indefinitely.
+
+    Pathognomonic and capability-independent: no arming condition, no
+    baseline, no threshold. A length below 88 bits cannot describe a valid
+    labelled-VPN route under any implementation or any label stack depth, so
+    this is zero-false-positive by construction.
+
+    The RouterOS version range is ENRICHMENT on the finding, never the gate --
+    the malformation is invalid for every implementation, and only the
+    consequence (indefinite hold-down rather than a NOTIFICATION) is
+    RouterOS-specific. The rule fires on the shape, from any peer.
+
+    SAFI 129 (labelled-VPN multicast) shares the label+RD structure and can be
+    added via vpn_safis if that family is carried; it is not enabled by default
+    because the advisory names VPNv4/VPNv6 unicast.
+    """
+    out = []
+    for a in iter_attributes(u.attrs):
+        if a.atype not in (ATTR_MP_REACH, ATTR_MP_UNREACH) or a.overrun:
+            continue
+        v = a.value
+        if len(v) < 3:
+            continue
+        afi = struct.unpack("!H", v[:2])[0]
+        safi = v[2]
+        if safi not in vpn_safis:
+            continue
+        if a.atype == ATTR_MP_REACH:
+            if len(v) < 4:
+                continue
+            off = 4 + v[3] + 1              # next hop + reserved octet
+        else:
+            off = 3
+        if off > len(v):
+            continue
+        fam = {AFI_IPV4: "VPNv4", AFI_IPV6: "VPNv6"}.get(afi, f"AFI {afi}")
+        for rec in walk_labelled_vpn_nlri(v[off:]):
+            if rec.below_minimum:
+                out.append(Finding(
+                    "PW-BGP-013", ("CVE-2026-93345",), 7.5,
+                    "Labelled-VPN NLRI prefix-length below the structural "
+                    "minimum", "high",
+                    f"{fam} (AFI {afi}/SAFI {safi}): NLRI length octet is "
+                    f"{rec.declared_bits} bits, below the "
+                    f"{VPN_NLRI_MIN_BITS}-bit minimum "
+                    f"({VPN_LABEL_BITS}b label + {VPN_RD_BITS}b RD), "
+                    f"describing an address portion of "
+                    f"{rec.address_bits} bits",
+                    _VPN_NOTE, afi=afi))
+            elif rec.overrun:
+                out.append(Finding(
+                    "PW-BGP-013", ("CVE-2026-93345",), 7.5,
+                    "Labelled-VPN NLRI length overruns the attribute",
+                    "medium",
+                    f"{fam} (AFI {afi}/SAFI {safi}): NLRI length octet is "
+                    f"{rec.declared_bits} bits ({rec.nbytes} octets) but only "
+                    f"{rec.remaining} octet(s) remain -- the same length-field "
+                    f"validation defect in the opposite direction to the "
+                    f"shape the advisory describes",
+                    _VPN_NOTE, afi=afi))
+    return out
+
+
 def _attrs_present(u: RawUpdate) -> set:
     return {a.atype for a in iter_attributes(u.attrs) if not a.header_truncated}
 
@@ -865,6 +1000,96 @@ def d012_open_truncated_optparm(body: bytes) -> list:
 
 
 # --------------------------------------------------------------------------- #
+# Session correlation -- CVE-2026-93345's post-trigger artifact
+# --------------------------------------------------------------------------- #
+class BgpCveTracker:
+    """Correlates a PW-BGP-013 trigger with the way the CVE says the session
+    then dies: torn down with NO NOTIFICATION message.
+
+    Standing alone, an abnormal close is weak evidence -- a TCP reset can come
+    from a firewall, a reload, or anything else -- so it is never reported on
+    its own. It is only emitted when all three hold on the same flow:
+
+        1. a PW-BGP-013 trigger was seen,
+        2. the session then tore down,
+        3. no NOTIFICATION was seen on that flow at any point.
+
+    That combination is the CVE's signature end to end, which makes
+    PW-BGP-014 a confirmation ("the trigger landed and the plane dropped")
+    rather than another attempt indicator. Bounded per-flow state.
+    """
+
+    MAX_FLOWS = 4096
+    WINDOW_S = 120.0
+
+    def __init__(self, window_s: float = WINDOW_S):
+        self.window_s = window_s
+        self.flows: dict = {}
+
+    def _state(self, flow) -> dict:
+        st = self.flows.get(flow)
+        if st is None:
+            if len(self.flows) >= self.MAX_FLOWS:
+                self.flows.clear()
+            st = {"trigger_ts": None, "notification": False,
+                  "afi": None, "family": 0, "reported": False}
+            self.flows[flow] = st
+        return st
+
+    def note_message(self, flow, msg_type: int, findings: list,
+                     ts: Optional[float] = None) -> None:
+        """Record what this message means for the correlation. Takes the
+        already-computed findings so the detectors are not run twice."""
+        st = self._state(flow)
+        if msg_type == NOTIFICATION:
+            st["notification"] = True
+        for f in findings or ():
+            if f.code == "PW-BGP-013":
+                st["trigger_ts"] = ts if ts is not None else time.time()
+                st["afi"] = f.afi
+                st["family"] = f.family or st["family"]
+
+    def note_teardown(self, flow, ts: Optional[float] = None,
+                      src: str = "", dst: str = "", family: int = 0) -> list:
+        """Call when the tap sees the session close (RST/FIN).
+
+        Stamps flow context onto the finding itself rather than relying on the
+        caller to do it: this finding is produced at teardown, when no message
+        is in hand to carry src/dst/family, so leaving it to the caller makes
+        an unstamped finding the easy mistake. src/dst/family are taken from
+        the flow tuple when not supplied.
+        """
+        st = self.flows.get(flow)
+        if st is None:
+            return []
+        self.flows.pop(flow, None)
+        if st["reported"] or st["trigger_ts"] is None or st["notification"]:
+            return []
+        now = ts if ts is not None else time.time()
+        if now - st["trigger_ts"] > self.window_s:
+            return []
+        st["reported"] = True
+        # flow is (src, sport, dst, dport) as keyed by bgptap
+        f_src = src or (flow[0] if isinstance(flow, tuple) and flow else "")
+        f_dst = dst or (flow[2] if isinstance(flow, tuple) and len(flow) > 2
+                        else "")
+        fam = family or st.get("family") or 0
+        return [Finding(
+            "PW-BGP-014", ("CVE-2026-93345",), 7.5,
+            "BGP session torn down with no NOTIFICATION after a labelled-VPN "
+            "NLRI trigger", "high",
+            f"a PW-BGP-013 malformation was observed on this session "
+            f"{now - st['trigger_ts']:.1f}s before it closed, and no "
+            f"NOTIFICATION was sent -- the exact post-trigger artifact "
+            f"CVE-2026-93345 describes",
+            "confirms the trigger was followed by an abnormal close on the "
+            "same session; reported only in combination with PW-BGP-013 and "
+            "only when no NOTIFICATION was seen, because an abnormal close on "
+            "its own is ordinary and would be noise",
+            src=f_src, dst=f_dst, family=fam, afi=st["afi"])]
+
+
+# --------------------------------------------------------------------------- #
 # Registry / dispatch
 # --------------------------------------------------------------------------- #
 UPDATE_DETECTORS = (
@@ -898,11 +1123,14 @@ REGISTRY = {
     "PW-BGP-010": (("CVE-2026-37462",), 7.5),
     "PW-BGP-011": (("CVE-2022-40302",), 6.5),
     "PW-BGP-012": (("CVE-2022-43681",), 6.5),
+    "PW-BGP-013": (("CVE-2026-93345",), 7.5),
+    "PW-BGP-014": (("CVE-2026-93345",), 7.5),
 }
 
 
 def inspect_message(msg_type: int, body: bytes,
-                    nhc_type: int = ATTR_NHC_DEFAULT) -> list:
+                    nhc_type: int = ATTR_NHC_DEFAULT,
+                    vpn_safis: tuple = (SAFI_MPLS_VPN,)) -> list:
     """Run every applicable detector over one BGP message body.
 
     Never raises: a detector that fails is contained so one malformed message
@@ -920,6 +1148,10 @@ def inspect_message(msg_type: int, body: bytes,
             findings.extend(d008_nhc_tlv(u, nhc_type))
         except Exception:
             pass
+        try:
+            findings.extend(d013_labelled_vpn_nlri(u, tuple(vpn_safis)))
+        except Exception:
+            pass
     elif msg_type == bgp.OPEN:
         for det in OPEN_DETECTORS:
             try:
@@ -929,10 +1161,11 @@ def inspect_message(msg_type: int, body: bytes,
     return findings
 
 
-def inspect_tap_message(msg, nhc_type: int = ATTR_NHC_DEFAULT) -> list:
+def inspect_tap_message(msg, nhc_type: int = ATTR_NHC_DEFAULT,
+                        vpn_safis: tuple = (SAFI_MPLS_VPN,)) -> list:
     """Run detectors over a bgptap.TapMessage, stamping flow context
     (including transport family, so v4/v6 parity is visible in output)."""
-    findings = inspect_message(msg.msg_type, msg.body, nhc_type)
+    findings = inspect_message(msg.msg_type, msg.body, nhc_type, vpn_safis)
     for f in findings:
         f.src = msg.src
         f.dst = msg.dst

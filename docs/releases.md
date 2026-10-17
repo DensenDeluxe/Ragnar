@@ -4,6 +4,15 @@
 
 ### 2026-10-17
 
+#### [#977](https://github.com/PierreGode/Ragnar/pull/977) — feat(net): BGP Pathwatch v7 — CVE-2026-93345 labelled-VPN NLRI (passive tap)
+*branch `feature/bgp-pathwatch-v7`*
+
+- **BGP Pathwatch v7** updates the vendored passive-tap tier (`python/bgp_pathwatch/`) with **CVE-2026-93345** — a MikroTik RouterOS labelled-VPN NLRI out-of-bounds read (CWE-1284). `PW-BGP-013` fires on a labelled-VPN `MP_REACH_NLRI` (SAFI 128/129, VPNv4/VPNv6) whose prefix-length octet is below the structural minimum for the family — the RouterOS NLRI iterator reads past it — and `PW-BGP-014` is the post-trigger confirmation, the correlated BGP session drop that says the plane crashed. The parser-CVE tier is now **15 detectors / 14 codes** (was 14 / 12).
+- Consistent with the v6 scope (vendored tiers + offline self-tests; live capture adapters/routes remain a planned follow-up): only `bgpcve.py`, `bgptap.py` and `taptest.py` changed — the `bgp.py` / `bgpsec.py` / `bgpsrte.py` / `iptrie.py` modules and the `bgpsectest.py` / `srtetest.py` suites are byte-identical to v6.
+- **CVE index +1 context → 396 named / 336 detected.** CVE-2026-93345 is named as **context** in the in-app `do_bgp_watch` malformed-attribute advisory; `python/bgp_pathwatch/` stays excluded from `gen_cve_list` (so the tier's test corpus can't inflate the count), and the byte-level detection lives in the offline tap. CREDITS.md / README.md synced.
+- **Self-test:** the `bgp_tap` suite grows **57 → 74** scenarios (the CVE-2026-93345 trigger / boundary / PW-BGP-014 correlation / dual-stack / no-false-positive cases); `bgpsec` (47) and `bgp_srte` (65) unchanged — **186 offline tier checks**. Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Docs:** [nettools.md › BGP Pathwatch tiers](nettools.md).
+
 #### [#975](https://github.com/PierreGode/Ragnar/pull/975) — fix(boot): unblock radios at every boot (rfkill) — both images
 *branch `fix/rfkill-boot-unblock`*
 

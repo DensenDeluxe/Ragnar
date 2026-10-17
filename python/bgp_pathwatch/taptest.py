@@ -602,6 +602,245 @@ def t_d010_withdrawn():
     assert "PW-BGP-010" in codes(bgpcve.inspect_message(bgp.UPDATE, body))
 
 
+# --------------------------------------------------------------------------- #
+# PW-BGP-013 / 014 -- CVE-2026-93345, labelled-VPN NLRI (SAFI 128)
+#
+# RFC 8277 s2: the NLRI Length octet counts BITS and covers the label bits as
+# well as the prefix bits; for SAFI 128 the prefix is at least 64 bits (the
+# RD). One label + RD = 88 bits before any address bit exists, so a declared
+# length below 88 describes a negative-length address portion. Both VPNv4
+# (AFI 1) and VPNv6 (AFI 2) are exercised -- the advisory names both.
+# --------------------------------------------------------------------------- #
+_VPN_FILL = (b"\x00\x01\x01"                      # one label, S bit set
+             + b"\x00\x00\x00\x64\x0a\x00\x00\x01"  # 8-octet RD
+             + b"\xcb\x00\x71\x01" * 8)             # address bytes
+
+
+def vpn_nlri(bits, nbytes=None) -> bytes:
+    """One SAFI 128 NLRI record with a given length octet (in bits)."""
+    n = (bits + 7) // 8 if nbytes is None else nbytes
+    return bytes([bits]) + _VPN_FILL[:n]
+
+
+def vpn_mp(afi=1, nlri=b"", safi=128, attr_type=14) -> bytes:
+    """MP_REACH/MP_UNREACH value carrying labelled-VPN NLRI. The VPN next hop
+    is an 8-octet RD plus the address (12 octets v4, 24 v6), per RFC 4364."""
+    if attr_type == 15:
+        return struct.pack("!HB", afi, safi) + nlri
+    nh = (b"\x00" * 8 + socket.inet_pton(socket.AF_INET6, "2001:db8::1")
+          if afi == 2 else b"\x00" * 8 + socket.inet_aton("10.0.0.1"))
+    return struct.pack("!HBB", afi, safi, len(nh)) + nh + b"\x00" + nlri
+
+
+def vpn_update(afi=1, bits=87, nbytes=None, safi=128, attr_type=14) -> bytes:
+    return update_body(attrs=clean_attrs() + attr(
+        0x80, attr_type, vpn_mp(afi, vpn_nlri(bits, nbytes), safi, attr_type)))
+
+
+@check("PW-BGP-013: VPNv4 NLRI length below the 88-bit floor (2026-93345)")
+def t_d013_v4():
+    f = [x for x in bgpcve.inspect_message(bgp.UPDATE, vpn_update(1, 87))
+         if x.code == "PW-BGP-013"]
+    assert f, "87 bits must fire"
+    _eq(f[0].confidence, "high")
+    _eq(f[0].afi, 1)
+    assert "CVE-2026-93345" in f[0].cves
+    assert "-1 bits" in f[0].detail, f[0].detail
+
+
+@check("PW-BGP-013: VPNv6 NLRI length below the 88-bit floor")
+def t_d013_v6():
+    f = [x for x in bgpcve.inspect_message(bgp.UPDATE, vpn_update(2, 40))
+         if x.code == "PW-BGP-013"]
+    assert f and f[0].afi == 2, "VPNv6 must fire with AFI stamped"
+    assert "VPNv6" in f[0].detail
+
+
+@check("PW-BGP-013: the 87/88-bit boundary is exact, both families")
+def t_d013_boundary():
+    for afi in (1, 2):
+        assert "PW-BGP-013" in codes(
+            bgpcve.inspect_message(bgp.UPDATE, vpn_update(afi, 87))), \
+            f"AFI {afi}: 87 bits must fire"
+        assert "PW-BGP-013" not in codes(
+            bgpcve.inspect_message(bgp.UPDATE, vpn_update(afi, 88))), \
+            f"AFI {afi}: 88 bits is a valid /0 and must stay silent"
+
+
+@check("PW-BGP-013: legitimate VPN prefix lengths are all silent")
+def t_d013_valid_silent():
+    # v4: /0 /24 /32 ; v6: /0 /64 /128  (88 + address bits)
+    for afi, lengths in ((1, (88, 112, 120)), (2, (88, 152, 216))):
+        for bits in lengths:
+            got = codes(bgpcve.inspect_message(bgp.UPDATE,
+                                               vpn_update(afi, bits)))
+            _eq(got, [], f"AFI {afi} length {bits} must be silent:")
+
+
+@check("PW-BGP-013: capability-independent -- a two-label stack stays silent")
+def t_d013_multi_label():
+    """With the Multiple Labels Capability the floor rises to 48+64=112, but
+    the 88-bit absolute floor still holds, so no capability state is needed
+    and a legitimately deeper stack must not fire."""
+    for afi in (1, 2):
+        _eq(codes(bgpcve.inspect_message(bgp.UPDATE, vpn_update(afi, 112))),
+            [], f"AFI {afi}: two labels + /0 is valid:")
+
+
+@check("PW-BGP-013: MP_UNREACH withdrawal path is checked too")
+def t_d013_unreach():
+    for afi in (1, 2):
+        f = codes(bgpcve.inspect_message(
+            bgp.UPDATE, vpn_update(afi, 70, attr_type=15)))
+        assert "PW-BGP-013" in f, f"AFI {afi} MP_UNREACH: {f}"
+
+
+@check("PW-BGP-013: NLRI length overrunning the attribute is medium confidence")
+def t_d013_overrun():
+    f = [x for x in bgpcve.inspect_message(
+        bgp.UPDATE, vpn_update(1, 120, nbytes=4)) if x.code == "PW-BGP-013"]
+    assert f and f[0].confidence == "medium", f
+    assert "overrun" in f[0].title.lower()
+
+
+@check("PW-BGP-013: other SAFIs are untouched")
+def t_d013_other_safis():
+    for safi in (1, 4, 71, 73):
+        got = codes(bgpcve.inspect_message(bgp.UPDATE,
+                                           vpn_update(1, 20, safi=safi)))
+        assert "PW-BGP-013" not in got, f"SAFI {safi} must not fire: {got}"
+
+
+@check("PW-BGP-013: SAFI 129 off by default, available by config")
+def t_d013_safi129():
+    from bgpcve import d013_labelled_vpn_nlri, walk_update
+    u = walk_update(vpn_update(1, 70, safi=129))
+    _eq(d013_labelled_vpn_nlri(u), [])
+    assert d013_labelled_vpn_nlri(u, vpn_safis=(128, 129))
+
+
+@check("PW-BGP-014: trigger then teardown with no NOTIFICATION is confirmed")
+def t_d014_correlated():
+    tr = bgpcve.BgpCveTracker()
+    flow = ("10.0.0.1", 50000, "10.0.0.2", 179)
+    f = bgpcve.inspect_message(bgp.UPDATE, vpn_update(1, 87))
+    tr.note_message(flow, bgp.UPDATE, f, ts=100.0)
+    out = tr.note_teardown(flow, ts=102.0)
+    _eq(codes(out), ["PW-BGP-014"])
+    assert "CVE-2026-93345" in out[0].cves
+    _eq(out[0].afi, 1)
+
+
+@check("PW-BGP-014: finding is self-stamped with flow context")
+def t_d014_self_stamped():
+    """The correlation fires at teardown, with no message in hand to carry
+    src/dst/family, so the tracker must stamp them itself rather than leave an
+    unstamped finding as the easy mistake for any caller."""
+    tr = bgpcve.BgpCveTracker()
+    flow = ("10.9.9.1", 50000, "10.9.9.2", 179)
+    f = bgpcve.inspect_message(bgp.UPDATE, vpn_update(2, 70))
+    for x in f:
+        x.family = 6                     # as the tap would have stamped it
+    tr.note_message(flow, bgp.UPDATE, f, ts=100.0)
+    out = tr.note_teardown(flow, ts=101.0)
+    _eq(out[0].src, "10.9.9.1")
+    _eq(out[0].dst, "10.9.9.2")
+    _eq(out[0].family, 6, "transport family must survive to the correlation:")
+    _eq(out[0].afi, 2)
+
+
+@check("PW-BGP-014: silent when a NOTIFICATION was sent")
+def t_d014_notification():
+    tr = bgpcve.BgpCveTracker()
+    flow = ("10.0.0.1", 50000, "10.0.0.2", 179)
+    tr.note_message(flow, bgp.UPDATE,
+                    bgpcve.inspect_message(bgp.UPDATE, vpn_update(1, 87)),
+                    ts=100.0)
+    tr.note_message(flow, bgp.NOTIFICATION, [], ts=101.0)
+    _eq(tr.note_teardown(flow, ts=102.0), [],
+        "a graceful NOTIFICATION close is not the CVE's artifact:")
+
+
+@check("PW-BGP-014: an ordinary reset with no trigger is silent")
+def t_d014_no_trigger():
+    tr = bgpcve.BgpCveTracker()
+    flow = ("10.0.0.1", 50000, "10.0.0.2", 179)
+    tr.note_message(flow, bgp.UPDATE,
+                    bgpcve.inspect_message(bgp.UPDATE, clean_update()),
+                    ts=100.0)
+    _eq(tr.note_teardown(flow, ts=101.0), [],
+        "abnormal closes are ordinary on their own and must not alert:")
+
+
+@check("PW-BGP-014: teardown outside the window is silent")
+def t_d014_window():
+    tr = bgpcve.BgpCveTracker(window_s=30.0)
+    flow = ("10.0.0.1", 50000, "10.0.0.2", 179)
+    tr.note_message(flow, bgp.UPDATE,
+                    bgpcve.inspect_message(bgp.UPDATE, vpn_update(1, 87)),
+                    ts=100.0)
+    _eq(tr.note_teardown(flow, ts=200.0), [])
+
+
+@check("PW-BGP-014: flows are isolated")
+def t_d014_isolation():
+    tr = bgpcve.BgpCveTracker()
+    a = ("10.0.0.1", 50000, "10.0.0.2", 179)
+    b = ("10.0.0.3", 50001, "10.0.0.4", 179)
+    tr.note_message(a, bgp.UPDATE,
+                    bgpcve.inspect_message(bgp.UPDATE, vpn_update(1, 87)),
+                    ts=100.0)
+    _eq(tr.note_teardown(b, ts=101.0), [], "other flow must not inherit:")
+    assert tr.note_teardown(a, ts=101.0)
+
+
+@check("PW-BGP-014: end-to-end through the tap's RST teardown hook")
+def t_d014_via_tap():
+    for fam in (4, 6):
+        tr = bgpcve.BgpCveTracker()
+        fired = []
+        tap = bgptap.BgpTap(
+            on_teardown=lambda flow, src, dst, f, _tr=tr, _o=fired:
+                _o.extend(_tr.note_teardown(flow)))
+        msg = bgp_msg(bgp.UPDATE, vpn_update(2, 50))
+        mk = frame_v4 if fam == 4 else frame_v6
+        for m in tap.feed_packet(mk(msg, seq=1000)):
+            tr.note_message(m.flow, m.msg_type,
+                            bgpcve.inspect_tap_message(m))
+        # session dies without a NOTIFICATION
+        rst = (eth(ipv4(tcp(b"", seq=1000 + len(msg), flags=0x04)), 0x0800)
+               if fam == 4 else
+               eth(ipv6(tcp(b"", seq=1000 + len(msg), flags=0x04)), 0x86DD))
+        tap.feed_packet(rst)
+        _eq(codes(fired), ["PW-BGP-014"], f"fam v{fam}:")
+
+
+@check("PARITY: 013 fires identically for VPNv4 and VPNv6 over all transports")
+def t_d013_parity():
+    results = {}
+    for afi in (1, 2):
+        body = vpn_update(afi, 60)
+        for name, fam, eh in (("v4", 4, ()), ("v6", 6, ()),
+                              ("v6+hbh", 6, [(0, b"")]),
+                              ("v6+rt+ah", 6, [(43, b""), (51, b"\x00" * 12)])):
+            tap = bgptap.BgpTap()
+            mk = (frame_v4(bgp_msg(bgp.UPDATE, body)) if fam == 4
+                  else frame_v6(bgp_msg(bgp.UPDATE, body), ext_headers=eh))
+            got = tap.feed_packet(mk)
+            _eq(len(got), 1, f"AFI {afi} {name}: not framed")
+            f = [x for x in bgpcve.inspect_tap_message(got[0])
+                 if x.code == "PW-BGP-013"]
+            assert f, f"AFI {afi} {name}: 013 did not fire"
+            _eq(f[0].afi, afi, f"AFI {afi} {name}: AFI stamp:")
+            _eq(f[0].family, fam, f"AFI {afi} {name}: family stamp:")
+            results[(afi, name)] = codes(
+                bgpcve.inspect_tap_message(got[0]))
+        base = results[(afi, "v4")]
+        for (a, name), got in results.items():
+            if a == afi:
+                _eq(got, base, f"AFI {afi} parity break on {name}:")
+
+
 @check("PW-BGP-011: OPEN with RFC 9072 extended optional parameter (2022-40302)")
 def t_d011():
     # OPEN: version, my_as, hold, bgp_id, opt_len, then a 0xFF param
@@ -721,14 +960,14 @@ def t_parity_bpf():
         "default filter must admit IPv6 packets whose next-header is not TCP"
 
 
-@check("registry covers 14 CVEs across 12 codes")
+@check("registry covers 15 CVEs across 14 codes")
 def t_registry():
     all_cves = set()
     for cves, cvss in bgpcve.REGISTRY.values():
         all_cves.update(cves)
         assert cvss >= 6.5, f"{cves} below the 6.5 bar"
-    _eq(len(bgpcve.REGISTRY), 12)
-    _eq(len(all_cves), 14)
+    _eq(len(bgpcve.REGISTRY), 14)
+    _eq(len(all_cves), 15)
 
 
 # --------------------------------------------------------------------------- #
