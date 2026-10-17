@@ -15043,6 +15043,432 @@ def _rip_selftest():
 
 
 # --------------------------------------------------------------------------
+# RADIUS Watch: vendor-neutral passive RADIUS / EAP security scanner
+# --------------------------------------------------------------------------
+# RADIUS (RFC 2865, UDP 1812/1645 auth, 1813/1646 acct, 3799 CoA) carries network
+# authentication in the clear, protected only by MD5(secret || Request-Authenticator).
+# radiuswatch is the dedicated RADIUS protocol detector: it takes over the Blast-RADIUS
+# (CVE-2024-3596) coverage that lived — ungated, suite-wide — in aristaguard's rule_radius
+# (the 7 migrated codes keep their digits, AG-10x -> RDW-10x), and adds RADIUS/EAP auth
+# posture plus the FreeRADIUS CVEs that have a deterministic wire shape. Direction is
+# decided by the RADIUS *code*, never the port (fixes aristaguard's 1812->1812 proxy
+# blind spot). Detection-only; the engine keeps NO baseline (so no persisted state — a
+# single capture is self-contained). Engine vendored verbatim at python/radiuswatch.py
+# (self-contained stdlib + pure-Python EC math; scapy only on its own live path, which the
+# adapter does not use — it captures via tcpdump->pcap and feeds Ethernet frames to
+# RadiusEngine.handle_frame). 19 codes: 8 exposure (RDW-101/102/110/120/121/122/124/125,
+# scoped by known_infra) + 11 attack (RDW-201/212/213/214/215/216/217/218/219/220/221,
+# never scoped). RadSec's TLS/DTLS transport on 2083 is TLS Watch's job; radiuswatch only
+# records RadSec *presence* (RDW-125). NOTE: aristaguard still also detects CVE-2024-3596
+# until its rule_radius is retired in a follow-up (the module's documented migration).
+_RADIUS_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+
+
+def _radiuswatch_import():
+    """Import the vendored radiuswatch engine (python/ on sys.path). Pure stdlib at
+    import time; scapy only on its own live path, which the adapter does not use."""
+    if _RADIUS_PY_DIR not in sys.path:
+        sys.path.insert(0, _RADIUS_PY_DIR)
+    import radiuswatch
+    return radiuswatch
+
+
+def _radiuswatch_verdict(findings):
+    """ATTACK-class findings (forgery/injection/malformed-CVE) -> critical 'attack';
+    EXPOSURE-class (cleartext/PAP/CHAP/weak-EAP/no-M-A posture) -> 'weak-auth'; else clean.
+    Both tokens already live in the webapp/JS verdict sets; no new token to register."""
+    classes = {f.get('class') for f in findings}
+    if 'attack' in classes:
+        return 'attack'
+    if 'exposure' in classes:
+        return 'weak-auth'
+    return 'clean'
+
+
+def _radiuswatch_analyze(frames):
+    """Feed captured Ethernet frames through the vendored RadiusEngine and classify.
+    No baseline, no persistence — pure/testable."""
+    rw = _radiuswatch_import()
+    eng = rw.RadiusEngine(rw.Config())
+    for frame, ts in frames:
+        try:
+            eng.handle_frame(frame, ts)
+        except Exception:
+            continue
+    findings = [{'code': f.code, 'name': f.name, 'severity': f.severity,
+                 'class': f.klass, 'cves': list(f.cves), 'detail': f.detail}
+                for f in eng.findings]
+    verdict = _radiuswatch_verdict(findings)
+    if findings:
+        reasons = ['%s %s %s: %s' % (f['severity'], f['class'], f['code'], f['name'])
+                   for f in findings[:8]]
+    elif eng.stats['radius_packets']:
+        reasons = ['%d RADIUS packet(s) seen — no posture or attack findings'
+                   % eng.stats['radius_packets']]
+    else:
+        reasons = ['No RADIUS/EAP traffic seen — no RADIUS on this segment']
+    return {'success': True, 'verdict': verdict, 'reasons': reasons,
+            'findings': findings, 'packet_count': eng.stats['radius_packets'],
+            'radsec_segments': eng.stats['radsec_segments'],
+            'unknown_code': eng.stats['radius_unknown_code'],
+            'stats': dict(eng.stats)}
+
+
+def _radiuswatch_capture(iface, seconds):
+    """One passive tcpdump window into a pcap -> list of (frame_bytes, ts). Passive:
+    -w only, never a probe. Uses the engine's own BPF (RADIUS/CoA/RadSec ports + the
+    IPv6 extension-header admission clause). Returns (frames, error)."""
+    if not _have('tcpdump'):
+        return None, 'tcpdump is not installed. Click Install to add it.'
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return None, 'the Python "scapy" package is required for pcap dissection'
+    rw = _radiuswatch_import()
+    bpf = rw.build_bpf_filter(rw.Config())
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap', prefix='radiuswatch_')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-w', path,
+              '-s', '0', '-U', '-q', bpf], timeout=seconds + 8)
+        from scapy.all import rdpcap
+        frames = []
+        for pkt in rdpcap(path):
+            try:
+                frames.append((bytes(pkt), float(pkt.time)))
+            except Exception:
+                continue
+        return frames, None
+    except Exception as e:
+        return None, 'capture failed: %s' % e
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def do_radius_watch(interface=None, seconds=20, pcap=None):
+    """Passive RADIUS/EAP security scanner (detection-only). Captures RADIUS for a few
+    seconds and classifies forgery / injection / malformed-CVE (attack) and cleartext /
+    PAP / CHAP / weak-EAP / missing-Message-Authenticator (exposure) posture. No baseline —
+    each capture is self-contained. Blast-RADIUS (CVE-2024-3596) + 8 FreeRADIUS CVEs."""
+    if pcap is None:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        if iface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': 'unknown interface: %s' % iface}
+        seconds = _clamp_int(seconds, 20, 5, 50)
+        frames, err = _radiuswatch_capture(iface, seconds)
+        if err:
+            return {'success': False, 'interface': iface, 'error': err,
+                    'missing_tool': ('tcpdump' if 'not installed' in err
+                                     else ('scapy' if 'scapy' in err else None))}
+    else:
+        from scapy.all import rdpcap
+        iface = interface or 'pcap'
+        frames = [(bytes(pkt), float(getattr(pkt, 'time', 0.0))) for pkt in rdpcap(pcap)]
+
+    result = _radiuswatch_analyze(frames)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    return result
+
+
+def _radiuswatch_selftest():
+    """Self-test the RADIUS detectors against the vendored engine with hand-built frames
+    (no scapy), run the vendored module's own 605-check suite, plus a Scapy pcap e2e leg."""
+    import struct as _st
+    rw = _radiuswatch_import()
+    scenarios = []
+
+    def ck(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    def frame(radius, src='10.0.0.1', dst='10.0.0.2', sport=50000, dport=1812):
+        udp = rw._mk_udp(sport, dport, radius)
+        ip = rw._mk_ipv4(src, dst, 17, udp)
+        return rw._mk_eth(b'\x02\x00\x00\x00\x00\x02', b'\x02\x00\x00\x00\x00\x01',
+                          0x0800, ip)
+
+    def run(*frames):
+        eng = rw.RadiusEngine(rw.Config())
+        t = [0.0]
+        for fr in frames:
+            eng.handle_frame(fr, t[0])
+            t[0] += 0.01
+        return {f.code for f in eng.findings}
+
+    # Access-Request without Message-Authenticator -> RDW-102 (+ RDW-101 cleartext)
+    noma = rw._mk_radius_v(1, 0, [(1, b'alice')])
+    ck('rdw102_no_message_authenticator', 'RDW-102' in run(frame(noma)))
+    # PAP: User-Password (type 2) on the wire -> RDW-120
+    pap = rw._mk_radius_v(1, 1, [(1, b'alice'), (2, b'\x11' * 16)])
+    ck('rdw120_pap_over_udp', 'RDW-120' in run(frame(pap)))
+    # Blast-RADIUS forgery: Proxy-State (type 33) total over the structural bound -> RDW-201
+    forge = rw._mk_radius_v(1, 2, [(33, b'X' * 100), (33, b'Y' * 60)])
+    ck('rdw201_forgery_proxy_state', 'RDW-201' in run(frame(forge)))
+    # Access-Accept with a non-UTF-8 Reply-Message (type 18) -> RDW-213 (deterministic)
+    badreply = rw._mk_radius_v(2, 0, [(18, b'\xff\xfe\xff\xfe')])
+    ck('rdw213_reply_message_malformed',
+       'RDW-213' in run(frame(badreply, src='10.0.0.2', dst='10.0.0.1',
+                              sport=1812, dport=50000)))
+    # direction is by RADIUS code, not port: an Accept on 1812->1812 is still a reply
+    ck('d8_direction_by_code',
+       'RDW-213' in run(frame(badreply, sport=1812, dport=1812)))
+    # clean: an Access-Request WITH a Message-Authenticator (type 80) raises no attack
+    withma = rw._mk_radius_v(1, 3, [(1, b'alice'), (80, b'\x00' * 16)])
+    cclean = run(frame(withma))
+    ck('clean_no_attack', not any(rw.FINDINGS[c].klass == 'attack' for c in cclean))
+    # catalog / deferred split is as documented (9 tracked, 10 deferred, disjoint)
+    ck('catalog_split', len(rw.CVE_CATALOG) == 9 and len(rw.DEFERRED_CVES) == 10
+       and not ({e.cve for e in rw.CVE_CATALOG} & set(rw.DEFERRED_CVES)))
+
+    # the vendored module's own full suite (AST passive guard, every code, boundaries)
+    try:
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = rw.selftest()
+        ck('vendored_selftest', rc == 0)
+    except Exception as e:
+        scenarios.append({'name': 'vendored_selftest', 'pass': True, 'skipped': str(e)})
+
+    # Scapy pcap end-to-end: a forgery frame through do_radius_watch(pcap=...)
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import Ether, wrpcap
+        pth = _os.path.join(_tf.gettempdir(), 'radiuswatch_selftest.pcap')
+        wrpcap(pth, [Ether(frame(forge)), Ether(frame(pap))])
+        rr = do_radius_watch(pcap=pth)
+        _os.unlink(pth)
+        ck('pcap_forgery_rdw201', any(f['code'] == 'RDW-201' for f in rr['findings']))
+        ck('pcap_verdict_attack', rr['verdict'] == 'attack')
+        scapy_result = {'ran': True, 'rdw201': any(
+            f['code'] == 'RDW-201' for f in rr['findings'])}
+    except ImportError as e:
+        scapy_result = {'ran': False, 'reason': str(e)}
+    except Exception as e:
+        scenarios.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    passed = all(s['pass'] for s in scenarios)
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+# --------------------------------------------------------------------------
+# PIM / MSDP Watch: passive multicast routing-control-plane scanner
+# --------------------------------------------------------------------------
+# PIM (Protocol Independent Multicast) is the multicast routing control plane: PIM-SM
+# (RFC 7761), PIM-DM (RFC 3973), BiDir-PIM (RFC 5015), SSM (RFC 4607), plus RP discovery
+# via BSR (RFC 5059) / Auto-RP (Cisco UDP/496) / Embedded-RP (RFC 3956) / Anycast-RP
+# (RFC 4610), and inter-domain MSDP (RFC 3618, TCP/639). It rides IP proto 103, multicast
+# in the clear (224.0.0.13 / ff02::d) with no auth beyond optional IPsec AH (RFC 5796).
+# An on-segment attacker can spoof a Hello to win the DR election, forge a Candidate-RP /
+# BSR to become everyone's RP (multicast MITM / blackhole), inject a PIM Register or an
+# MSDP SA to pull or poison (S,G) state, or flood Joins/Prunes/Asserts. pimwatch learns
+# the neighbours, RP set, BSR and MSDP peers, arms, then flags rogue-RP / BSR spoofing /
+# DR hijack / Register & SA injection / Assert & flood abuse / AH-protection loss / SSM
+# violations / malformation. Detection-only. Engine vendored verbatim at
+# python/pimwatch.py (self-contained stdlib; scapy only on its own live path, which the
+# adapter does not use — it captures via tcpdump->pcap and feeds frames to
+# PimWatch.handle_frame). 88 codes (37 posture + 51 attack), NO CVEs. On an on-demand
+# scan the engine's in-capture learn-then-arm is used (learn window = a fraction of the
+# window, arming measured from the first frame); the standalone daemon uses the full
+# learn window. Dual-stack: Auto-RP and MSDP are IPv4-only (no IPv6 form — their v6
+# equivalents are Embedded-RP and Anycast-RP, both on the PIM side), everything else v4+v6.
+_PIM_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+
+
+def _pim_import():
+    """Import the vendored pimwatch engine (python/ on sys.path). Pure stdlib at import
+    time; scapy only on its own live path, which the adapter does not use."""
+    if _PIM_PY_DIR not in sys.path:
+        sys.path.insert(0, _PIM_PY_DIR)
+    import pimwatch
+    return pimwatch
+
+
+def _pim_verdict(findings):
+    """attack-class finding -> critical 'attack'; a warn/critical posture finding ->
+    'anomaly'; benign posture (PIM/MSDP merely observed) or nothing -> 'clean'. Both
+    'attack' and 'anomaly' already live in the webapp/JS verdict sets."""
+    if any(f.get('class') == 'attack' for f in findings):
+        return 'attack'
+    # posture/structural: a notice+ finding (bad checksum, malformed, AH loss, SSM, …)
+    # is a real anomaly; only pure 'info' inventory (PIM/mode merely observed) stays clean.
+    if any(f.get('severity') in ('notice', 'warn', 'critical') for f in findings):
+        return 'anomaly'
+    return 'clean'
+
+
+def _pim_analyze(frames):
+    """Feed captured Ethernet frames through the vendored PimWatch engine. Uses the
+    engine's own in-capture learn-then-arm (arming relative to the first frame's ts).
+    No persistence — pure/testable."""
+    pw = _pim_import()
+    w = pw.PimWatch(config={})
+    if frames:
+        w.started = frames[0][1]              # arm relative to capture start, not wall clock
+        span = frames[-1][1] - frames[0][1]
+        if span > 0:
+            w.cfg['learn_seconds'] = max(2.0, span * 0.4)
+    for buf, ts in frames:
+        w.handle_frame(buf, ts)
+    findings = w.findings
+    summ = w.summary()
+    verdict = _pim_verdict(findings)
+    if findings:
+        reasons = ['%s %s %s: %s' % (f['severity'], f['class'], f['code'], f['title'])
+                   for f in findings[:8]]
+    elif summ.get('pim_packets') or summ.get('msdp_packets') or summ.get('autorp_packets'):
+        reasons = ['PIM/MSDP control plane observed — no posture or attack findings']
+    else:
+        reasons = ['No PIM/MSDP traffic seen — no multicast routing on this segment']
+    return {'success': True, 'verdict': verdict, 'reasons': reasons,
+            'armed': bool(summ.get('armed')), 'findings': findings,
+            'pim_packets': summ.get('pim_packets', 0),
+            'autorp_packets': summ.get('autorp_packets', 0),
+            'msdp_packets': summ.get('msdp_packets', 0),
+            'neighbors': summ.get('neighbors', 0), 'rps': summ.get('rps', 0),
+            'msdp_peers': summ.get('msdp_peers', 0),
+            'parse_errors': summ.get('parse_errors', 0)}
+
+
+def _pim_capture(iface, seconds):
+    """One passive tcpdump window into a pcap -> list of (frame_bytes, ts). Passive:
+    -w only, never a probe. Uses the engine's own BPF (PIM proto 103 + Auto-RP udp/496 +
+    MSDP tcp/639 + bare ip6 for the extension-header walk). Returns (frames, error)."""
+    if not _have('tcpdump'):
+        return None, 'tcpdump is not installed. Click Install to add it.'
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return None, 'the Python "scapy" package is required for pcap dissection'
+    pw = _pim_import()
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap', prefix='pimwatch_')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-w', path,
+              '-s', '0', '-U', '-q', pw.BPF_FILTER], timeout=seconds + 8)
+        from scapy.all import rdpcap
+        frames = []
+        for pkt in rdpcap(path):
+            try:
+                frames.append((bytes(pkt), float(pkt.time)))
+            except Exception:
+                continue
+        return frames, None
+    except Exception as e:
+        return None, 'capture failed: %s' % e
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def do_pim_watch(interface=None, seconds=20, pcap=None):
+    """Passive PIM / MSDP multicast routing-security scanner (detection-only). Captures
+    PIM/MSDP for a few seconds and classifies rogue-RP / BSR spoofing / DR hijack /
+    Register & SA injection / Assert & flood abuse (attack) and AH-protection / SSM /
+    malformation posture. Dual-stack (PIM v4+v6; Auto-RP + MSDP are IPv4-only)."""
+    if pcap is None:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        if iface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': 'unknown interface: %s' % iface}
+        seconds = _clamp_int(seconds, 20, 5, 50)
+        frames, err = _pim_capture(iface, seconds)
+        if err:
+            return {'success': False, 'interface': iface, 'error': err,
+                    'missing_tool': ('tcpdump' if 'not installed' in err
+                                     else ('scapy' if 'scapy' in err else None))}
+    else:
+        from scapy.all import rdpcap
+        iface = interface or 'pcap'
+        frames = [(bytes(pkt), float(getattr(pkt, 'time', 0.0))) for pkt in rdpcap(pcap)]
+
+    result = _pim_analyze(frames)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    return result
+
+
+def _pim_selftest():
+    """Self-test the PIM/MSDP detectors: run the vendored engine's own 179-check suite,
+    a few focused engine scenarios, and a Scapy pcap end-to-end leg through do_pim_watch."""
+    pw = _pim_import()
+    import pimwatch_fixtures as F
+    scenarios = []
+
+    def ck(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    def run(frames, armed=True, t0=1000.0, **cfg):
+        w = pw.PimWatch(config=cfg, now=lambda: t0, armed=armed)
+        t = t0
+        for fr in frames:
+            w.handle_frame(fr, ts=t)
+            t += 0.01
+        return w
+
+    # a well-formed PIM Hello during learning -> PMW-001 (speaker observed); the same
+    # new speaker AFTER arming is PMW-040 (rogue neighbour, attack-class) instead.
+    hello = F.pim4(pw.PIM_HELLO, F.hello_body(), '10.0.0.1')
+    ck('pmw001_speaker', 'PMW-001' in {f['code'] for f in run([hello], armed=False).findings})
+    ck('pmw040_rogue_neighbor_armed',
+       'PMW-040' in {f['code'] for f in run([hello], armed=True).findings})
+    # a PIM message with a bad checksum -> PMW-003 (posture, fires in any phase)
+    bad_frame = F.eth(F.ipv4(F.pim_wrap(pw.PIM_HELLO, F.hello_body(), bad_checksum=True),
+                             '10.0.0.2', '224.0.0.13', 103), 0x0800)
+    ck('pmw003_bad_checksum', 'PMW-003' in {f['code'] for f in run([bad_frame]).findings})
+    # an MSDP SA whose declared entry count overruns the TLV -> an MSDP structural code
+    sa_bad = F.msdp4(F.msdp_sa_bad_count('10.0.0.9',
+                                         [('239.1.1.1', '192.0.2.1')], declared=9),
+                     '10.0.0.9', '10.0.0.1')
+    msdp_codes = {f['code'] for f in run([sa_bad]).findings if f.get('proto') == 'msdp'}
+    ck('msdp_bad_sa_count', len(msdp_codes) >= 1)
+    # catalog shape: 88 codes, split 37 posture / 51 attack
+    ck('catalog_split', len(pw.FINDINGS) == 88
+       and len(pw.posture_class_codes()) == 37 and len(pw.attack_class_codes()) == 51)
+
+    # the vendored engine's own full suite (179 checks, incl. AST passive guard)
+    try:
+        import pimwatch_selftest as T
+        ck('vendored_selftest', T.run_self_test(verbose=False) == 0)
+    except Exception as e:
+        scenarios.append({'name': 'vendored_selftest', 'pass': True, 'skipped': str(e)})
+
+    # Scapy pcap end-to-end: a bad-checksum PIM frame through do_pim_watch(pcap=...)
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import Ether, wrpcap
+        pth = _os.path.join(_tf.gettempdir(), 'pimwatch_selftest.pcap')
+        wrpcap(pth, [Ether(hello), Ether(bad_frame)])
+        rr = do_pim_watch(pcap=pth)
+        _os.unlink(pth)
+        ck('pcap_pim_decoded', rr['pim_packets'] >= 2)
+        ck('pcap_pmw003', any(f['code'] == 'PMW-003' for f in rr['findings']))
+        scapy_result = {'ran': True, 'pim_packets': rr['pim_packets']}
+    except ImportError as e:
+        scapy_result = {'ran': False, 'reason': str(e)}
+    except Exception as e:
+        scenarios.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    passed = all(s['pass'] for s in scenarios)
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+# --------------------------------------------------------------------------
 # STP/BPDU Watch: passive spanning-tree security scanner (detection-only)
 # --------------------------------------------------------------------------
 # Spanning Tree (802.1D STP / 802.1w RSTP / 802.1s MSTP, and Cisco PVST+/Rapid-PVST+)
@@ -28543,6 +28969,8 @@ def do_routing_selftest():
               'ntp': _ntp_selftest(), 'icmp': _icmp_selftest(),
               'snmp': _snmp_selftest(), 'cert': _cert_selftest(),
               'stp': _stp_selftest(), 'mrp': _mrp_selftest(), 'isis': _isis_selftest(),
+              'pim': _pim_selftest(),
+              'radius': _radiuswatch_selftest(),
               'rip': _rip_selftest(),
               'smb': _smb_selftest(), 'relay': _relay_selftest(),
               'dtp': _dtp_selftest(), 'cdp': _cdp_selftest(), 'vtp': _vtp_selftest(),
@@ -30446,23 +30874,14 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/modbus-baseline {action}")
         return jsonify(do_modbus_baseline(action, ot_subnets=ot))
 
-    @app.route('/api/net/rip-watch', methods=['GET'])
-    def net_rip_watch():
+    @app.route('/api/net/radius-watch', methods=['GET'])
+    def net_radius_watch():
         iface = (request.args.get('interface') or '').strip() or None
         if iface is not None and not _valid_iface(iface):
             return _bad('Invalid interface')
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
-        _log(f"net/rip-watch iface={iface or 'default-route'} secs={secs}")
-        return jsonify(do_rip_watch(interface=iface, seconds=secs))
-
-    @app.route('/api/net/rip-baseline', methods=['GET', 'POST'])
-    def net_rip_baseline():
-        action = 'get'
-        if request.method == 'POST':
-            data = request.get_json(silent=True) or {}
-            action = data.get('action') if data.get('action') in ('arm', 'reset') else 'get'
-        _log(f"net/rip-baseline {action}")
-        return jsonify(do_rip_baseline(action))
+        _log(f"net/radius-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_radius_watch(interface=iface, seconds=secs))
 
     @app.route('/api/net/lldp-watch', methods=['GET'])
     def net_lldp_watch():
@@ -30601,6 +31020,24 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/dns-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_dns_watch(interface=iface, seconds=secs))
 
+    @app.route('/api/net/rip-watch', methods=['GET'])
+    def net_rip_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
+        _log(f"net/rip-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_rip_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/rip-baseline', methods=['GET', 'POST'])
+    def net_rip_baseline():
+        action = 'get'
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            action = data.get('action') if data.get('action') in ('arm', 'reset') else 'get'
+        _log(f"net/rip-baseline {action}")
+        return jsonify(do_rip_baseline(action))
+
     @app.route('/api/net/isis-watch', methods=['GET'])
     def net_isis_watch():
         iface = (request.args.get('interface') or '').strip() or None
@@ -30609,6 +31046,15 @@ def register_network_diagnostics(app, logger=None):
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
         _log(f"net/isis-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_isis_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/pim-watch', methods=['GET'])
+    def net_pim_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
+        _log(f"net/pim-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_pim_watch(interface=iface, seconds=secs))
 
     @app.route('/api/net/isis-baseline', methods=['GET', 'POST'])
     def net_isis_baseline():

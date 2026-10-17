@@ -52,13 +52,19 @@ FILE_OWNERS = {
     'python/lldpwatch_scapy_xcheck.py': 'LLDP Watch',
     'python/cfmwatch.py': 'CFM Watch',
     'python/ripwatch.py': 'RIP Watch',
+    'python/radiuswatch.py': 'RADIUS Watch',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
                       'python/modbuswatch/': 'Modbus Watch',
                       'python/oamwatch/': 'OAM Watch',
                       'python/oamwatch_tests/': 'OAM Watch',
-                      'python/cfmwatch_tests/': 'CFM Watch'}
+                      'python/cfmwatch_tests/': 'CFM Watch',
+                      # standalone igmpwatch package (v5) + its selftest name the same 3
+                      # IGMP/MLD CVEs the in-app do_igmp_watch detects — attribute to the
+                      # same owner so they dedupe rather than double-count under a file path.
+                      'igmpwatch/': 'IGMP / MLD Watch',
+                      'selftest.py': 'IGMP / MLD Watch'}
 # Files that only mention CVEs already owned elsewhere (labels, help text).
 MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.js',
                 'web/index_modern.html'}
@@ -283,6 +289,18 @@ def sr_reference_span(lines):
     return -1, -1
 
 
+def deferred_span(lines):
+    """(start, end) line indexes of radiuswatch's DEFERRED_CVES dict literal. CVEs
+    named there are triaged-and-rejected (undetectable passively — DHCP decoder, EAP-pwd
+    side channels, logrotate priv-esc), so they are context, never detected."""
+    for i, l in enumerate(lines):
+        if l.startswith('DEFERRED_CVES'):
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith('}'):
+                    return i, j
+    return -1, -1
+
+
 def html_card(lines, i):
     for j in range(i, -1, -1):
         m = re.search(r'<h3[^>]*>([^<]+)', lines[j])
@@ -303,6 +321,7 @@ def collect():
         if not any(CVE_RE.search(l) for l in lines):
             continue
         sr_a, sr_b = sr_reference_span(lines) if path == 'sr_mplswatch.py' else (-1, -1)
+        df_a, df_b = deferred_span(lines) if path == 'python/radiuswatch.py' else (-1, -1)
         owner = None
         nxt = next_owners(lines) if path == 'network_diagnostics.py' else []
         doc_end = module_docstring_end(lines)
@@ -334,7 +353,7 @@ def collect():
                     status = 'active' if path.startswith('actions/') else 'detected'
                     # Module-docstring scope notes and reference tables name
                     # CVEs without detecting them.
-                    if sr_a <= i <= sr_b or i < doc_end:
+                    if sr_a <= i <= sr_b or df_a <= i <= df_b or i < doc_end:
                         status = 'context' if status == 'detected' else status
                 else:
                     det = next((d for p, d in FILE_PREFIX_OWNERS.items()

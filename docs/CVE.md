@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **365** distinct CVE IDs
-- **315** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **41** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **383** distinct CVE IDs
+- **323** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **51** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-102019**
@@ -32,12 +32,12 @@ detector works is in [nettools.md](nettools.md).
 | 2014 | 8 |
 | 2015 | 11 |
 | 2016 | 6 |
-| 2017 | 6 |
+| 2017 | 16 |
 | 2018 | 13 |
-| 2019 | 15 |
+| 2019 | 20 |
 | 2020 | 30 |
 | 2021 | 37 |
-| 2022 | 29 |
+| 2022 | 32 |
 | 2023 | 45 |
 | 2024 | 52 |
 | 2025 | 44 |
@@ -75,9 +75,11 @@ detector works is in [nettools.md](nettools.md).
 | LLDP Watch | 30 |
 | MikroTik Guard | 16 |
 | Modbus Watch | 4 |
+| network_diagnostics | 1 |
 | NTP Watch | 15 |
 | OSPF Watch | 15 |
 | PTP Watch | 4 |
+| RADIUS Watch | 19 |
 | Relay / Coercion Watch | 2 |
 | RIP Watch | 5 |
 | RPC / NetLogon Watch | 10 |
@@ -148,6 +150,16 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2017-0782](https://nvd.nist.gov/vuln/detail/CVE-2017-0782) | BlueBorne | active check | BLE Pentest (active) | — |
 | [CVE-2017-3731](https://nvd.nist.gov/vuln/detail/CVE-2017-3731) |  | detected | TLS Watch | — |
 | [CVE-2017-6736](https://nvd.nist.gov/vuln/detail/CVE-2017-6736) |  | detected | SNMP Watch | — |
+| [CVE-2017-10978](https://nvd.nist.gov/vuln/detail/CVE-2017-10978) |  | detected | RADIUS Watch | — |
+| [CVE-2017-10979](https://nvd.nist.gov/vuln/detail/CVE-2017-10979) |  | detected | RADIUS Watch | — |
+| [CVE-2017-10980](https://nvd.nist.gov/vuln/detail/CVE-2017-10980) |  | context only | RADIUS Watch | — |
+| [CVE-2017-10981](https://nvd.nist.gov/vuln/detail/CVE-2017-10981) |  | context only | RADIUS Watch | — |
+| [CVE-2017-10982](https://nvd.nist.gov/vuln/detail/CVE-2017-10982) |  | context only | RADIUS Watch | — |
+| [CVE-2017-10983](https://nvd.nist.gov/vuln/detail/CVE-2017-10983) |  | context only | RADIUS Watch | — |
+| [CVE-2017-10984](https://nvd.nist.gov/vuln/detail/CVE-2017-10984) |  | detected | RADIUS Watch | — |
+| [CVE-2017-10985](https://nvd.nist.gov/vuln/detail/CVE-2017-10985) |  | detected | RADIUS Watch | — |
+| [CVE-2017-10986](https://nvd.nist.gov/vuln/detail/CVE-2017-10986) |  | context only | RADIUS Watch | — |
+| [CVE-2017-10987](https://nvd.nist.gov/vuln/detail/CVE-2017-10987) |  | context only | RADIUS Watch | — |
 | [CVE-2017-20149](https://nvd.nist.gov/vuln/detail/CVE-2017-20149) | Chimay-Red | detected | MikroTik Guard | — |
 | [CVE-2018-0007](https://nvd.nist.gov/vuln/detail/CVE-2018-0007) |  | detected | LLDP Watch | — |
 | [CVE-2018-0063](https://nvd.nist.gov/vuln/detail/CVE-2018-0063) |  | context only | ARP Watch | — |
@@ -171,12 +183,17 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2019-6444](https://nvd.nist.gov/vuln/detail/CVE-2019-6444) |  | detected | NTP Watch | — |
 | [CVE-2019-7282](https://nvd.nist.gov/vuln/detail/CVE-2019-7282) | netkit rcp dot-name | detected | Telnet Watch | — |
 | [CVE-2019-7283](https://nvd.nist.gov/vuln/detail/CVE-2019-7283) | netkit rcp unrequested file | detected | Telnet Watch | — |
+| [CVE-2019-10143](https://nvd.nist.gov/vuln/detail/CVE-2019-10143) |  | context only | RADIUS Watch | — |
 | [CVE-2019-10149](https://nvd.nist.gov/vuln/detail/CVE-2019-10149) | Exim ${...} expansion RCE | detected | SMTP Watch | — |
+| [CVE-2019-11234](https://nvd.nist.gov/vuln/detail/CVE-2019-11234) |  | detected | RADIUS Watch | — |
+| [CVE-2019-11235](https://nvd.nist.gov/vuln/detail/CVE-2019-11235) |  | detected | RADIUS Watch | — |
 | [CVE-2019-12815](https://nvd.nist.gov/vuln/detail/CVE-2019-12815) | ProFTPD mod_copy Limit bypass | detected | FTP Watch | — |
+| [CVE-2019-13456](https://nvd.nist.gov/vuln/detail/CVE-2019-13456) |  | context only | RADIUS Watch | — |
 | [CVE-2019-14462](https://nvd.nist.gov/vuln/detail/CVE-2019-14462) | libmodbus FC15/16 count OOB read | detected | Modbus Watch | — |
 | [CVE-2019-14463](https://nvd.nist.gov/vuln/detail/CVE-2019-14463) | libmodbus FC15/16 count OOB read | detected | Modbus Watch | — |
 | [CVE-2019-15846](https://nvd.nist.gov/vuln/detail/CVE-2019-15846) | Exim SNI/cert-DN RCE | detected | SMTP Watch | — |
 | [CVE-2019-16928](https://nvd.nist.gov/vuln/detail/CVE-2019-16928) | Exim overlong EHLO overflow | detected | SMTP Watch | — |
+| [CVE-2019-17185](https://nvd.nist.gov/vuln/detail/CVE-2019-17185) |  | context only | RADIUS Watch | — |
 | [CVE-2020-0796](https://nvd.nist.gov/vuln/detail/CVE-2020-0796) | SMBGhost | detected | SMB / Kerberos Watch | — |
 | [CVE-2020-1472](https://nvd.nist.gov/vuln/detail/CVE-2020-1472) | Zerologon | detected | RPC / NetLogon Watch | — |
 | [CVE-2020-1639](https://nvd.nist.gov/vuln/detail/CVE-2020-1639) |  | detected | CFM Watch | — |
@@ -271,6 +288,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-39028](https://nvd.nist.gov/vuln/detail/CVE-2022-39028) | inetutils telnetd EC/EL crash | detected | Telnet Watch | — |
 | [CVE-2022-40302](https://nvd.nist.gov/vuln/detail/CVE-2022-40302) |  | context only | BGP Path Watch | — |
 | [CVE-2022-40735](https://nvd.nist.gov/vuln/detail/CVE-2022-40735) | D(HE)at | detected | IPsec / IKE Watch, SSH Watch, TLS Watch | — |
+| [CVE-2022-41859](https://nvd.nist.gov/vuln/detail/CVE-2022-41859) |  | context only | RADIUS Watch | — |
+| [CVE-2022-41860](https://nvd.nist.gov/vuln/detail/CVE-2022-41860) |  | detected | RADIUS Watch | — |
+| [CVE-2022-41861](https://nvd.nist.gov/vuln/detail/CVE-2022-41861) |  | detected | RADIUS Watch | — |
 | [CVE-2022-43681](https://nvd.nist.gov/vuln/detail/CVE-2022-43681) |  | context only | BGP Path Watch | — |
 | [CVE-2022-45313](https://nvd.nist.gov/vuln/detail/CVE-2022-45313) |  | detected | MikroTik Guard | — |
 | [CVE-2023-20024](https://nvd.nist.gov/vuln/detail/CVE-2023-20024) | Cisco SB switch web-UI DoS | detected | Cisco Guard | — |
@@ -318,7 +338,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2023-50387](https://nvd.nist.gov/vuln/detail/CVE-2023-50387) | KeyTrap | detected | DNS Doctor (active), DNS Watch | — |
 | [CVE-2023-50868](https://nvd.nist.gov/vuln/detail/CVE-2023-50868) | NSEC3 CPU exhaustion | detected | DNS Doctor (active), DNS Watch | — |
 | [CVE-2023-51713](https://nvd.nist.gov/vuln/detail/CVE-2023-51713) | ProFTPD make_ftp_cmd OOB read | detected | FTP Watch | — |
-| [CVE-2024-3596](https://nvd.nist.gov/vuln/detail/CVE-2024-3596) | BlastRADIUS | detected | Arista Guard | — |
+| [CVE-2024-3596](https://nvd.nist.gov/vuln/detail/CVE-2024-3596) | BlastRADIUS | detected | Arista Guard, RADIUS Watch, network_diagnostics | — |
 | [CVE-2024-3661](https://nvd.nist.gov/vuln/detail/CVE-2024-3661) | TunnelVision | detected | DHCP Guardian | — |
 | [CVE-2024-5872](https://nvd.nist.gov/vuln/detail/CVE-2024-5872) |  | detected | Arista Guard | — |
 | [CVE-2024-6387](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) | regreSSHion | detected | Arista Guard, SSH Watch | — |
