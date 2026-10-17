@@ -604,6 +604,14 @@ if [ -f /etc/systemd/system.conf ]; then
     echo -e "  ${GREEN}✓${NC} systemd watchdog set (RuntimeWatchdogSec=15)"
 fi
 
+echo -e "${BLUE}Step 6.62: Unblocking radios (rfkill)...${NC}"
+# A deployed box (or a freshly flashed image) can come up with Wi-Fi/Bluetooth
+# soft-blocked; ragnar.service now unblocks every boot, but heal it here too.
+if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock all >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} rfkill unblock all"
+fi
+
 echo -e "${BLUE}Step 6.65: Pi 5 USB current limit...${NC}"
 # Pi 5 firmware caps all USB ports together at 600 mA unless a 5 V/5 A PD
 # supply is detected; a Wi-Fi adapter + SDR/GPS exceeds it and drops off USB.
