@@ -11577,6 +11577,104 @@ async function eigrpTrustBaseline() {
     }
 }
 
+// ---- RIP / RIPng Watch (passive routing-plane security scanner) ------------
+const _RIP_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ RIP sources/prefixes match the baseline — no injection, hijack or malformation'],
+    learning:    ['bg-slate-800 border-slate-700 text-slate-300', '… Learning the RIP baseline (sources · prefixes · auth posture) — now armed, re-scan to detect'],
+    'weak-auth': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Weak / no RIP authentication — unauthenticated, cleartext simple-password, or dated keyed-MD5'],
+    anomaly:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RIP anomaly — malformed RTE, full-table recon, off-link RIPng, or protocol violation'],
+    storm:       ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RIP metric-16 mass-poison / withdrawal storm'],
+    rogue:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue RIP responder — a new speaker began advertising routes after arm'],
+    injection:   ['bg-red-950/60 border-red-800 text-red-300', '🛑 RIP route injection — a prefix or default-route not in the learned baseline'],
+    hijack:      ['bg-red-950/60 border-red-800 text-red-300', '🛑 RIP metric-undercut hijack — a new source undercut a known prefix to attract traffic'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RIP_SEV_COLOR = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-300', info: 'text-gray-500' };
+function _ripFillIfaces() {
+    const sel = document.getElementById('rip-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runRipWatch() {
+    const out = document.getElementById('rip-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rip-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rip-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing RIP / RIPng on the segment…</p>';
+    try {
+        _ripFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/rip-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRipWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RIP_VERDICT_STYLE[d.verdict] || _RIP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count || 0} RIP pkt(s) (${d.rip || 0} RIP / ${d.ripng || 0} RIPng) · ${d.source_count || 0} source(s), ${d.prefix_count || 0} prefix(es)${d.armed ? '' : ' · <span class="text-slate-400">not yet armed</span>'}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">Finding</th><th class="px-2 py-1">Source → Dest</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _RIP_SEV_COLOR[f.severity] || 'text-gray-400';
+                const cve = (f.cves || []).length ? ` <span class="text-slate-500">(${f.cves.map(escapeHtml).join(', ')})</span>` : '';
+                const roll = f.rolled_up ? ` <span class="text-slate-500">×${f.distinct_sources}+ sources</span>` : '';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(f.af || '')}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.title)}${cve}${roll}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '')} → ${escapeHtml(f.dst || '')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        if ((d.sources || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">RIP sources (' + d.sources.length + ')</p>' +
+                '<p class="text-xs font-mono text-gray-400">' + d.sources.map(escapeHtml).join(', ') + '</p>';
+        }
+        if ((d.prefixes || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Advertised prefixes (' + d.prefixes.length + ')</p>' +
+                '<p class="text-xs font-mono text-gray-400">' + d.prefixes.map(escapeHtml).join(', ') + '</p>';
+        }
+        if (!(d.findings || []).length && d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function ripTrustBaseline() {
+    try {
+        await postAPI('/api/net/rip-baseline', { action: 'reset' });
+        addConsoleMessage('RIP baseline reset — re-learning current sources & prefixes', 'info');
+        await runRipWatch();
+    } catch (e) {
+        addConsoleMessage('Failed to reset RIP baseline: ' + e.message, 'error');
+    }
+}
+
 // ---- PIM / MSDP Watch (passive multicast routing-control-plane scanner) -----
 const _PIM_VERDICT_STYLE = {
     clean:   ['bg-green-950/40 border-green-900 text-green-400', '✓ PIM/MSDP control plane healthy — no rogue RP/BSR, injection or malformation'],

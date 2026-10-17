@@ -84,6 +84,7 @@ matrix to zoom (`/web/images/osi/`).
 | [IGMP Watch](#igmp-watch) | Diagnostics · L3 | `GET /api/net/igmp-watch`, `POST /api/net/igmp-baseline` |
 | [OSPF Security Scanner](#ospf-security-scanner) | Diagnostics · L3 | `GET /api/net/ospf-watch`, `POST /api/net/ospf-baseline` |
 | [EIGRP Watch](#eigrp-watch) | Diagnostics · L3 | `GET /api/net/eigrp-watch`, `POST /api/net/eigrp-baseline` |
+| [RIP Watch](#rip-watch) | Diagnostics · L3 | `GET /api/net/rip-watch`, `POST /api/net/rip-baseline` |
 | [PIM / MSDP Watch](#pim--msdp-watch) | Diagnostics · L3 | `GET /api/net/pim-watch` |
 | [FHRP Watch](#fhrp-watch) | Diagnostics · L3 | `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline` |
 | [IPv6 First-Hop Watch](#ipv6-first-hop-watch) | Diagnostics · L3 | `GET /api/net/ipv6-watch`, `POST /api/net/ipv6-baseline` |
@@ -150,7 +151,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **PIM / MSDP** (multicast RP-hijack / Register & SA injection / DR hijack / flood), **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **RIP** (RIP/RIPng injection/hijack/malformation), **PIM / MSDP** (multicast RP-hijack / Register & SA injection / DR hijack / flood), **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -3522,6 +3523,61 @@ parser with the full 16-detector set (adds HMAC-MD5-vs-SHA, DIS-takeover, P2P
 three-way, hello-padding, narrow-metrics, malformed-PDU), per-code severity +
 dedup, baseline learning and a hardened daemon — see
 [isiswatch](isiswatch.md) (`isiswatch.py`).
+
+### RIP Watch
+A **passive** routing-security scanner for **RIP** (RFC 2453, UDP/520, IPv4) and
+**RIPng** (RFC 2080, UDP/521, IPv6) — the oldest distance-vector IGP and the **4th
+member of Ragnar's in-app IGP family** alongside OSPF, IS-IS and EIGRP. RIP is still
+found on small/legacy segments; it multicasts route updates in the clear (RIPv2
+`224.0.0.9`, RIPng `ff02::9`) and a **better metric always wins**, so any host that
+can reach the segment can steer traffic. **Detection-only** — it never transmits.
+
+The engine (vendored at `python/ripwatch.py`) **learns** a baseline — which sources
+speak RIP, which prefixes they advertise at what metric, and with what auth posture —
+then **arms**; abuse rules fire only once armed, while structural and posture findings
+fire in any phase (the `modbuswatch`/`stpwatch` learn-then-arm shape). 25 finding
+codes across three numeric bands (`001–099` posture, `100+` abuse/structural):
+
+- **injection** — `RIP-102` (a prefix not advertised during the learn phase, or a new
+  advertiser for a known one), `RIP-104` (a **default-route** injection — attracts all
+  unmatched traffic), `RIP-108` (an unsolicited **unicast** Response — targeted
+  injection), `RIP-109` (a **RIPv1 Response where authenticated RIPv2 is the segment
+  norm** — the auth-bypass of **CVE-2006-2224**).
+- **hijack** — `RIP-103`, a **metric-undercut** from a new source (a better metric for
+  a known prefix pulls the route).
+- **rogue** — `RIP-101`, a new RIP speaker that begins emitting Responses after arm.
+- **storm** — `RIP-105`, a metric-16 **mass-poison / withdrawal** (per-message count or
+  sustained rate).
+- **anomaly / structural** — `RIP-120` (an **RTE count/length that overruns the
+  datagram** — the malformed-RIP crash of **CVE-2026-102019** (Junos/Junos Evolved
+  rpd), **CVE-2013-3470** (Cisco IOS XR) and **CVE-2012-4091** (Cisco NX-OS), caught by
+  construction), `RIP-107` (a **full-table request** — table recon, **CVE-2006-2223**),
+  `RIP-106` (a **RIPng off-link** violation — source not link-local / hop-limit ≠ 255 /
+  source-port ≠ 521, RFC 2080), plus `RIP-121`–`RIP-126` (RIPv1 must-be-zero, invalid
+  command, out-of-range metric, >25-RTE ceiling, malformed auth field, version anomaly).
+- **weak-auth** — `RIP-001` (unauthenticated), `RIP-002` (cleartext **simple-password**),
+  `RIP-003` (dated keyed **MD5**, RFC 2082), `RIP-007` (auth **downgrade**), `RIP-008`
+  (auth **asymmetry** between peers), `RIP-009` (deprecated **RIPv1**). `RIP-004`
+  (keyed HMAC-SHA), `RIP-005` (RIPng native, no auth) and `RIP-006` (RIPng under IPsec
+  AH) are benign posture notes.
+
+**Dual-stack by protocol pairing** (prime directive): RIPv1/v2 have no IPv6 form and
+RIPng has no IPv4 form, so the v4 codes cover RIP and the v6 codes cover RIPng; every
+*abuse* rule exists on both planes. The auth-posture codes are RIPv2-only (RIPng has no
+in-band auth — it relies on IPsec AH/ESP) and the off-link code is RIPng-only. The
+capture filter is `(ip and udp port 520) or (udp port 521) or (ip6 and ip6[6] ∈
+{Hop-by-Hop, Routing, Fragment, AH, Dest-Opts})` — the Ragnar-optimized superset kept
+over upstream `ripwatch`'s bare `or ip6` (which would copy the whole v6 stream to
+userspace to drop in Python — needless load on a Pi Zero 2W), the same shape as TLS/
+Modbus Watch; the software UDP/521 gate decides RIPng after a bounded extension-header
+walk. Put the Pi on the **RIP segment/VLAN** — RIP is link-local multicast, a tap off
+the routed core won't see it. The first scan learns the baseline (`data/rip_watch.json`)
+and arms; after a legitimate topology change, click "Trust current". **API:**
+`GET /api/net/rip-watch`, `POST /api/net/rip-baseline`. (RADSec and Modbus/TCP Security
+— RIP's secure-transport cousins over TLS — are [TLS Watch](#tls-watch)'s job; this is
+the RIP protocol itself.) **CVE note:** `CVE-2017-12992` (tcpdump's own RIPng-parser
+over-read) is deliberately **not** detected — it is a flaw in a decoder, nothing on the
+wire a passive RIP vantage can observe; recorded here so the ground is not re-walked.
 
 ### PIM / MSDP Watch
 A **passive** scanner for the **multicast routing control plane** — PIM (Protocol

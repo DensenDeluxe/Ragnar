@@ -10,12 +10,12 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **378** distinct CVE IDs
-- **318** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **383** distinct CVE IDs
+- **323** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **51** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
-- Range **CVE-1999-0113** → **CVE-2026-86060**
+- Range **CVE-1999-0113** → **CVE-2026-102019**
 
 | Year | CVEs |
 |---|---|
@@ -23,11 +23,12 @@ detector works is in [nettools.md](nettools.md).
 | 2002 | 2 |
 | 2003 | 1 |
 | 2005 | 2 |
-| 2006 | 1 |
+| 2006 | 3 |
 | 2007 | 1 |
 | 2008 | 2 |
 | 2011 | 2 |
-| 2013 | 5 |
+| 2012 | 1 |
+| 2013 | 6 |
 | 2014 | 8 |
 | 2015 | 11 |
 | 2016 | 6 |
@@ -40,7 +41,7 @@ detector works is in [nettools.md](nettools.md).
 | 2023 | 45 |
 | 2024 | 52 |
 | 2025 | 44 |
-| 2026 | 46 |
+| 2026 | 47 |
 
 ## By detector
 
@@ -80,6 +81,7 @@ detector works is in [nettools.md](nettools.md).
 | PTP Watch | 4 |
 | RADIUS Watch | 19 |
 | Relay / Coercion Watch | 2 |
+| RIP Watch | 5 |
 | RPC / NetLogon Watch | 10 |
 | SMB / Kerberos Watch | 5 |
 | SMTP Watch | 4 |
@@ -103,14 +105,18 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2003-0001](https://nvd.nist.gov/vuln/detail/CVE-2003-0001) | Etherleak | detected | Trailing-data / Etherleak | — |
 | [CVE-2005-4436](https://nvd.nist.gov/vuln/detail/CVE-2005-4436) | EIGRP K-value / Goodbye reset | detected | EIGRP Watch | — |
 | [CVE-2005-4437](https://nvd.nist.gov/vuln/detail/CVE-2005-4437) | EIGRP missing authentication | detected | EIGRP Watch | — |
+| [CVE-2006-2223](https://nvd.nist.gov/vuln/detail/CVE-2006-2223) |  | detected | RIP Watch | — |
+| [CVE-2006-2224](https://nvd.nist.gov/vuln/detail/CVE-2006-2224) |  | detected | RIP Watch | — |
 | [CVE-2006-5051](https://nvd.nist.gov/vuln/detail/CVE-2006-5051) | OpenSSH signal-handler race | detected | SSH Watch | — |
 | [CVE-2007-0882](https://nvd.nist.gov/vuln/detail/CVE-2007-0882) | Solaris in.telnetd -f auth bypass | detected | Telnet Watch | — |
 | [CVE-2008-0960](https://nvd.nist.gov/vuln/detail/CVE-2008-0960) | SNMPv3 USM HMAC truncation | detected | SNMP Watch | — |
 | [CVE-2008-4109](https://nvd.nist.gov/vuln/detail/CVE-2008-4109) |  | detected | SSH Watch | — |
 | [CVE-2011-3323](https://nvd.nist.gov/vuln/detail/CVE-2011-3323) | Quagga ospf6d IPv6 prefix DoS | context only | OSPF Watch | — |
 | [CVE-2011-4862](https://nvd.nist.gov/vuln/detail/CVE-2011-4862) | telnetd encrypt_keyid overflow | detected | Telnet Watch | — |
+| [CVE-2012-4091](https://nvd.nist.gov/vuln/detail/CVE-2012-4091) |  | detected | RIP Watch | — |
 | [CVE-2013-0149](https://nvd.nist.gov/vuln/detail/CVE-2013-0149) | Cisco IOS OSPF LSA manipulation | context only | OSPF Watch | — |
 | [CVE-2013-2566](https://nvd.nist.gov/vuln/detail/CVE-2013-2566) | RC4 biases | detected | TLS Watch | — |
+| [CVE-2013-3470](https://nvd.nist.gov/vuln/detail/CVE-2013-3470) |  | detected | RIP Watch | — |
 | [CVE-2013-4796](https://nvd.nist.gov/vuln/detail/CVE-2013-4796) |  | context only | BFD Watch | — |
 | [CVE-2013-5211](https://nvd.nist.gov/vuln/detail/CVE-2013-5211) | NTP monlist amplification | detected | NTP Watch | — |
 | [CVE-2013-5565](https://nvd.nist.gov/vuln/detail/CVE-2013-5565) | Cisco OSPFv3 DoS | context only | OSPF Watch | — |
@@ -474,3 +480,4 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-81642](https://nvd.nist.gov/vuln/detail/CVE-2026-81642) | DNS compression-pointer loop | detected | DNS Watch | — |
 | [CVE-2026-81736](https://nvd.nist.gov/vuln/detail/CVE-2026-81736) |  | detected | DNS Watch | — |
 | [CVE-2026-86060](https://nvd.nist.gov/vuln/detail/CVE-2026-86060) | MikroTrick username escalation (RouterOS) | detected | MikroTik Guard | — |
+| [CVE-2026-102019](https://nvd.nist.gov/vuln/detail/CVE-2026-102019) |  | detected | RIP Watch | — |

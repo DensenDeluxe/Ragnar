@@ -14625,6 +14625,424 @@ def _isis_selftest():
 
 
 # --------------------------------------------------------------------------
+# RIP / RIPng Watch: passive routing-plane security scanner (detection-only)
+# --------------------------------------------------------------------------
+# RIP (RFC 2453, UDP/520, IPv4) and RIPng (RFC 2080, UDP/521, IPv6) are distance-
+# vector IGPs — the 4th in the in-app IGP family alongside OSPF, IS-IS and EIGRP —
+# still found on small/legacy segments. They multicast route updates in the clear
+# (RIPv2 224.0.0.9, RIPng ff02::9); RIPv2 carries optional in-band auth (simple
+# password / keyed MD5 RFC 2082 / keyed HMAC-SHA RFC 4822) while RIPng has none (it
+# relies on IPsec AH/ESP). An on-segment attacker can inject or hijack routes (a
+# better metric wins), poison the table (metric-16 storm), inject a default route,
+# recon the table (full-table request), or crash a parser with a malformed RTE. The
+# engine learns the baseline (which sources speak RIP, which prefixes at what metric,
+# with what auth posture), arms, then flags injection / hijack / rogue-responder /
+# storm / recon / malformation / weak-auth / clean. Dual-stack by protocol pairing:
+# the v4 codes cover RIP, the v6 codes cover RIPng; every abuse rule exists on both.
+#
+# Engine vendored verbatim at python/ripwatch.py (self-contained stdlib; scapy loads
+# only on its own live path, which we do NOT use — we capture via tcpdump→pcap like
+# the other in-app watchers and feed raw frames to Ripwatch.feed_frame). 25 codes:
+# RIP-001..009 posture, RIP-101..109 abuse, RIP-120..126 structural. The CVE layer is
+# thin and rides the structural/abuse engine (stpwatch/modbuswatch shape): RIP-120
+# (RTE count/length overruns the datagram) = CVE-2026-102019 / CVE-2013-3470 /
+# CVE-2012-4091; RIP-107 (full-table request table-leak) = CVE-2006-2223; RIP-109
+# (RIPv1 Response where authed RIPv2 is the norm) = CVE-2006-2224. (The RADSec/
+# Modbus-Security TLS transports are TLS Watch's job; this is the RIP protocol itself.)
+_RIP_WATCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'data', 'rip_watch.json')
+_RIP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_rip_watch_lock = threading.Lock()
+_RIP_EVENTS_CAP = 200
+
+
+def _rip_import():
+    """Import the vendored ripwatch engine (python/ on sys.path). Pure stdlib at
+    import time; scapy only loads on ripwatch's own live path, which we do not use."""
+    if _RIP_PY_DIR not in sys.path:
+        sys.path.insert(0, _RIP_PY_DIR)
+    import ripwatch
+    return ripwatch
+
+# RIP finding code -> verdict category. Reuses the IGP-sibling vocabulary
+# (injection/rogue/hijack are in the webapp _NI_CRITICAL / JS _NETINT_CRITICAL sets;
+# storm/anomaly/weak-auth fall to the mid 'suspicious' tier exactly as IS-IS's do), so
+# no new verdict token has to be registered. Posture RIP-004/005/006 are benign.
+_RIP_VERDICT_BY_CODE = {
+    'RIP-101': 'rogue',
+    'RIP-102': 'injection', 'RIP-104': 'injection', 'RIP-108': 'injection',
+    'RIP-109': 'injection',
+    'RIP-103': 'hijack',
+    'RIP-105': 'storm',
+    'RIP-106': 'anomaly', 'RIP-107': 'anomaly', 'RIP-120': 'anomaly',
+    'RIP-121': 'anomaly', 'RIP-122': 'anomaly', 'RIP-123': 'anomaly',
+    'RIP-124': 'anomaly', 'RIP-125': 'anomaly', 'RIP-126': 'anomaly',
+    'RIP-001': 'weak-auth', 'RIP-002': 'weak-auth', 'RIP-003': 'weak-auth',
+    'RIP-007': 'weak-auth', 'RIP-008': 'weak-auth', 'RIP-009': 'weak-auth',
+    'RIP-004': 'clean', 'RIP-005': 'clean', 'RIP-006': 'clean',
+}
+_RIP_VERDICT_ORDER = ('rogue', 'injection', 'hijack', 'storm', 'anomaly', 'weak-auth')
+
+# Capture filter: v4/520 precise; plain RIPng via `udp port 521`; EH-bearing RIPng via
+# the next-header extension-header clause (Hop-by-Hop/Routing/Fragment/AH/Dest-Opts).
+# This is the Ragnar-optimized superset kept over upstream ripwatch's bare `or ip6`
+# (which copies the whole v6 stream to userspace to drop in Python — needless load on
+# a Pi Zero 2W); same shape as TLS Watch v8 / Modbus Watch. The software UDP/521 gate
+# in decode_frame() makes the final RIPng decision after the bounded EH walk.
+_RIP_BPF = ('(ip and udp port 520) or (udp port 521) or (ip6 and (ip6[6] = 0 '
+            'or ip6[6] = 43 or ip6[6] = 44 or ip6[6] = 51 or ip6[6] = 60))')
+
+
+def _rip_watch_load():
+    try:
+        with open(_RIP_WATCH_PATH) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _rip_watch_save(d):
+    try:
+        os.makedirs(os.path.dirname(_RIP_WATCH_PATH), exist_ok=True)
+        tmp = _RIP_WATCH_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(d, f, indent=2)
+        os.replace(tmp, _RIP_WATCH_PATH)
+    except OSError:
+        pass
+
+
+def _rip_restore(eng, baseline):
+    """Rehydrate a vendored Ripwatch engine from a persisted baseline dict (the
+    learned sources, advertised prefixes, armed responder set, and armed flag)."""
+    ripwatch = _rip_import()
+    for row in baseline.get('sources') or []:
+        try:
+            ip, af, first_seen, er, at, su, sa = row
+        except (ValueError, TypeError):
+            continue
+        eng.sources[(ip, af)] = ripwatch.SourceState(
+            first_seen=first_seen, af=af, emits_response=er,
+            auth_type=at, saw_unauth=su, saw_auth=sa)
+    for row in baseline.get('prefixes') or []:
+        try:
+            prefix, af, table = row
+        except (ValueError, TypeError):
+            continue
+        eng.prefix_table[(prefix, af)] = {k: int(v) for k, v in table.items()}
+    eng._known_responders_at_arm = {tuple(r) for r in (baseline.get('responders') or [])}
+    if baseline.get('armed'):
+        eng._armed_latched = True
+
+
+def _rip_dump(eng):
+    """Serialize a Ripwatch engine's baseline tables to a JSON-safe dict."""
+    return {
+        'armed': bool(eng._armed_latched),
+        'sources': [[ip, af, round(st.first_seen, 3), st.emits_response,
+                     st.auth_type, st.saw_unauth, st.saw_auth]
+                    for (ip, af), st in eng.sources.items()],
+        'prefixes': [[prefix, af, tbl]
+                     for (prefix, af), tbl in eng.prefix_table.items()],
+        'responders': [[ip, af] for (ip, af) in eng._known_responders_at_arm],
+    }
+
+
+def _rip_verdict(findings):
+    cats = {_RIP_VERDICT_BY_CODE.get(f['code'], 'anomaly') for f in findings}
+    for v in _RIP_VERDICT_ORDER:
+        if v in cats:
+            return v
+    return 'clean'
+
+
+def _rip_analyze(frames, baseline, learn=True):
+    """Feed captured Ethernet frames through the vendored engine against the persisted
+    baseline. The engine never auto-arms mid-capture — arming is controlled across runs
+    by the persisted 'armed' flag (the Ragnar learn-then-arm convention): the first run
+    learns + arms, later runs detect. Returns (result_dict, new_baseline). Pure/testable."""
+    ripwatch = _rip_import()
+    cfg = ripwatch.Config(learn_seconds=float(1 << 40), learn_packets=(1 << 40))
+    eng = ripwatch.Ripwatch(cfg)
+    was_armed = bool(baseline.get('armed'))
+    _rip_restore(eng, baseline)
+    for frame, ts in frames:
+        try:
+            eng.feed_frame(frame, ts)
+        except Exception:
+            continue
+    findings = [f.to_dict() for f in eng.findings]
+    learned = False
+    if not was_armed and learn:
+        eng.arm_now()               # freeze the responders learned this run
+        eng._armed_latched = True   # arm for subsequent runs
+        learned = True
+    new_baseline = _rip_dump(eng)
+
+    srcs = sorted({(ip, af) for (ip, af) in eng.sources})
+    prefixes = sorted({p for (p, af) in eng.prefix_table})
+    verdict = 'learning' if (learned and not was_armed) else _rip_verdict(findings)
+    if findings:
+        reasons = ['%s %s [%s]: %s' % (f['severity'], f['code'], f.get('af'),
+                                       f['title']) for f in findings[:8]]
+    elif learned:
+        reasons = ['Baseline learned — %d RIP source(s), %d prefix(es); now armed'
+                   % (len(srcs), len(prefixes))]
+    elif not srcs:
+        reasons = ['No RIP/RIPng traffic seen — no RIP on this segment']
+    else:
+        reasons = ['All RIP sources and advertised prefixes match the baseline']
+    result = {
+        'success': True, 'verdict': verdict, 'reasons': reasons,
+        'learned': learned, 'armed': bool(new_baseline['armed']),
+        'source_count': len(srcs), 'prefix_count': len(prefixes),
+        'packet_count': eng.stats['rip'] + eng.stats['ripng'],
+        'rip': eng.stats['rip'], 'ripng': eng.stats['ripng'],
+        'findings': findings,
+        'sources': ['%s (%s)' % (ip, af) for (ip, af) in srcs[:50]],
+        'prefixes': prefixes[:50],
+    }
+    return result, new_baseline
+
+
+def _rip_capture(iface, seconds):
+    """One passive tcpdump window into a pcap -> list of (frame_bytes, ts). Passive:
+    -w only, never a probe. Returns (frames, error)."""
+    if not _have('tcpdump'):
+        return None, 'tcpdump is not installed. Click Install to add it.'
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return None, 'the Python "scapy" package is required for pcap dissection'
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap', prefix='ripwatch_')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-w', path,
+              '-s', '0', '-U', '-q', _RIP_BPF], timeout=seconds + 8)
+        from scapy.all import rdpcap
+        frames = []
+        for pkt in rdpcap(path):
+            try:
+                frames.append((bytes(pkt), float(pkt.time)))
+            except Exception:
+                continue
+        return frames, None
+    except Exception as e:
+        return None, 'capture failed: %s' % e
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def do_rip_watch(interface=None, seconds=20, learn=True, pcap=None):
+    """Passive RIP/RIPng routing-security scanner (detection-only). Captures RIP for a
+    few seconds and classifies injection / hijack / rogue-responder / storm / recon /
+    malformation / weak-auth / clean. Learns the trusted sources + prefixes on the first
+    run, then arms. Dual-stack: RIP on UDP/520 (IPv4), RIPng on UDP/521 (IPv6)."""
+    if pcap is None:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        if iface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': 'unknown interface: %s' % iface}
+        seconds = _clamp_int(seconds, 20, 5, 50)
+        frames, err = _rip_capture(iface, seconds)
+        if err:
+            return {'success': False, 'interface': iface, 'error': err,
+                    'missing_tool': ('tcpdump' if 'not installed' in err
+                                     else ('scapy' if 'scapy' in err else None))}
+        with _rip_watch_lock:
+            baseline = _rip_watch_load()
+            result, new_baseline = _rip_analyze(frames, baseline, learn=learn)
+            events = baseline.get('events') or []
+            if result['verdict'] not in ('clean', 'learning'):
+                events.append({'ts': int(time.time()), 'verdict': result['verdict'],
+                               'reasons': result['reasons'][:6]})
+            new_baseline['events'] = events[-_RIP_EVENTS_CAP:]
+            _rip_watch_save(new_baseline)
+    else:
+        from scapy.all import rdpcap
+        iface = interface or 'pcap'
+        frames = [(bytes(pkt), float(getattr(pkt, 'time', 0.0))) for pkt in rdpcap(pcap)]
+        result, _ = _rip_analyze(frames, {}, learn=learn)
+
+    result['interface'] = iface
+    result['seconds'] = seconds
+    return result
+
+
+def do_rip_baseline(action='get'):
+    """Manage the learned RIP baseline (trusted sources + advertised prefixes)."""
+    with _rip_watch_lock:
+        if action == 'reset':
+            _rip_watch_save({})
+            return {'success': True, 'reset': True, 'baseline': {}}
+        if action == 'arm':
+            b = _rip_watch_load()
+            b['armed'] = True
+            _rip_watch_save(b)
+            return {'success': True, 'armed': True}
+        b = _rip_watch_load()
+        return {'success': True, 'baseline': {
+            'armed': bool(b.get('armed')),
+            'sources': ['%s (%s)' % (r[0], r[1]) for r in (b.get('sources') or [])
+                        if isinstance(r, list) and len(r) >= 2],
+            'prefixes': sorted({r[0] for r in (b.get('prefixes') or [])
+                                if isinstance(r, list) and r})}}
+
+
+def _rip_selftest():
+    """Self-test the RIP/RIPng detectors against the vendored engine with hand-built
+    L2/L3/L4 frames (no scapy), dual-stack parity, plus a Scapy pcap end-to-end leg."""
+    import socket as _sock
+    import struct as _st
+    _rw = _rip_import()
+    RE = _rw.RouteEntry
+    AFI = _rw.AFI_IP
+    scenarios = []
+
+    def ck(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    def _udp(sp, dp, pl):
+        return _st.pack('!HHHH', sp, dp, 8 + len(pl), 0) + pl
+
+    def v4f(src, pl, sport=520, dport=520, dst='224.0.0.9'):
+        udp = _udp(sport, dport, pl)
+        ip = _st.pack('!BBHHHBBH', 0x45, 0, 20 + len(udp), 0, 0, 1,
+                      _rw.IPPROTO_UDP, 0) + _sock.inet_aton(src) + _sock.inet_aton(dst)
+        return (b'\x01\x00\x5e\x00\x00\x09\x02\x00\x00\x00\x00\x01'
+                + _st.pack('!H', _rw.ETH_P_IP) + ip + udp)
+
+    def v6f(src, pl, sport=521, dport=521, dst='ff02::9', hop=255):
+        udp = _udp(sport, dport, pl)
+        ip6 = _st.pack('!IHBB', (6 << 28), len(udp), _rw.IPPROTO_UDP, hop) \
+            + _sock.inet_pton(_sock.AF_INET6, src) + _sock.inet_pton(_sock.AF_INET6, dst)
+        return (b'\x33\x33\x00\x00\x00\x09\x02\x00\x00\x00\x00\x02'
+                + _st.pack('!H', _rw.ETH_P_IPV6) + ip6 + udp)
+
+    def r4(entries, version=2, **kw):
+        return _rw.build_rip(_rw.CMD_RESPONSE, version, entries, **kw)
+
+    def r6(entries):
+        return _rw.build_ripng(_rw.CMD_RESPONSE, entries)
+
+    def route4(net, metric, mask='255.255.0.0'):
+        return RE(AFI, 0, net, mask, '0.0.0.0', None, metric)
+
+    def route6(net, metric, plen=64):
+        return RE(AFI, 0, net, None, None, plen, metric)
+
+    def run(learn_frames, armed_frames):
+        cfg = _rw.Config(learn_packets=len(learn_frames), learn_seconds=1e9)
+        eng = _rw.Ripwatch(cfg)
+        t = [0.0]
+        for fr in learn_frames + armed_frames:
+            eng.feed_frame(fr, ts=t[0])
+            t[0] += 0.01
+        return {f.code for f in eng.findings}
+
+    # parser <-> serializer round-trip
+    msg = _rw.parse_rip(r4([route4('10.1.0.0', 3)]))
+    ck('parse_roundtrip', msg.command == _rw.CMD_RESPONSE and len(msg.entries) == 1
+       and msg.entries[0].addr == '10.1.0.0' and msg.entries[0].metric == 3)
+
+    # posture: unauthenticated RIPv2 Response -> RIP-001 (fires in any phase)
+    ck('rip001_unauth', 'RIP-001' in run([v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))], []))
+    # RIPv1 in use -> RIP-009
+    ck('rip009_v1', 'RIP-009' in run(
+        [v4f('10.0.0.1', r4([RE(AFI, 0, '10.1.0.0', None, None, None, 1)], version=1))], []))
+    # simple-password auth -> RIP-002
+    sp = _rw.AuthInfo(present=True, auth_type=_rw.AUTH_SIMPLE)
+    ck('rip002_simplepw', 'RIP-002' in run(
+        [v4f('10.0.0.1', r4([route4('10.1.0.0', 1)], auth=sp, simple_pw=b'secret'))], []))
+
+    # injection: new prefix from a new source after arm -> RIP-102
+    ck('rip102_injection', 'RIP-102' in run(
+        [v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))],
+        [v4f('10.0.0.2', r4([route4('10.9.0.0', 1)]))]))
+    # metric-undercut hijack -> RIP-103
+    ck('rip103_undercut', 'RIP-103' in run(
+        [v4f('10.0.0.1', r4([route4('10.1.0.0', 5)]))],
+        [v4f('10.0.0.2', r4([route4('10.1.0.0', 1)]))]))
+    # default-route injection -> RIP-104
+    ck('rip104_default', 'RIP-104' in run(
+        [v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))],
+        [v4f('10.0.0.2', r4([RE(AFI, 0, '0.0.0.0', '0.0.0.0', '0.0.0.0', None, 1)]))]))
+    # mass metric-16 poison storm -> RIP-105
+    storm = r4([route4('10.%d.0.0' % i, 16) for i in range(12)])
+    ck('rip105_storm', 'RIP-105' in run(
+        [v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))], [v4f('10.0.0.1', storm)]))
+    # full-table request recon from a non-responder -> RIP-107 (CVE-2006-2223)
+    req = _rw.build_rip(_rw.CMD_REQUEST, 2,
+                        [RE(_rw.AFI_UNSPEC, 0, '0.0.0.0', '0.0.0.0', '0.0.0.0', None, 16)])
+    ck('rip107_recon', 'RIP-107' in run(
+        [v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))], [v4f('10.9.9.9', req)]))
+
+    # structural: RTE grid not a multiple of 20 -> RIP-120 (CVE-2026-102019/2013-3470/2012-4091)
+    bad = _st.pack('!BBH', _rw.CMD_RESPONSE, 2, 0) + b'\x00' * 10
+    c120 = run([v4f('10.0.0.1', bad)], [])
+    ck('rip120_malformed', 'RIP-120' in c120)
+    ck('rip120_cve', set(_rw.SPECS['RIP-120'].cves) ==
+       {'CVE-2026-102019', 'CVE-2013-3470', 'CVE-2012-4091'})
+
+    # RIPng posture (native, no auth) -> RIP-005, and off-link (hop!=255) -> RIP-106
+    ck('ripng005_native', 'RIP-005' in run([v6f('fe80::1', r6([route6('2001:db8::', 1)]))], []))
+    ck('ripng106_offlink', 'RIP-106' in run(
+        [v6f('fe80::1', r6([route6('2001:db8::', 1)]), hop=64)], []))
+    # dual-stack parity: injection also detected on RIPng -> RIP-102
+    ck('ripng102_parity', 'RIP-102' in run(
+        [v6f('fe80::1', r6([route6('2001:db8:1::', 1)]))],
+        [v6f('fe80::2', r6([route6('2001:db8:9::', 1)]))]))
+
+    # negative: a learned source re-advertising its own prefix -> no abuse-band code
+    cneg = run([v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))],
+               [v4f('10.0.0.1', r4([route4('10.1.0.0', 1)]))])
+    ck('clean_no_abuse', not any(int(x.split('-')[1]) >= 100 for x in cneg))
+
+    # adapter: learn-then-arm across two runs, injection fires only once armed. Both
+    # 10.0.0.1/.2 are learned responders, so .2 advertising a NEW prefix after arm is
+    # RIP-102 injection in isolation (not RIP-101 rogue-responder — it is a known peer).
+    r1, b1 = _rip_analyze([
+        (v4f('10.0.0.1', r4([route4('10.1.0.0', 1)])), 1.0),
+        (v4f('10.0.0.2', r4([route4('10.2.0.0', 1)])), 1.1)], {})
+    r2, b2 = _rip_analyze([(v4f('10.0.0.2', r4([route4('10.9.0.0', 1)])), 2.0)], b1)
+    ck('adapter_learn_arms', r1['verdict'] == 'learning' and r1['armed'] is True
+       and not any(int(f['code'].split('-')[1]) >= 100 for f in r1['findings']))
+    ck('adapter_injection_armed', r2['verdict'] == 'injection'
+       and any(f['code'] == 'RIP-102' for f in r2['findings'])
+       and not any(f['code'] == 'RIP-101' for f in r2['findings']))
+    ck('adapter_baseline_json_safe', b1 == json.loads(json.dumps(b1)))
+
+    # Scapy pcap end-to-end: a malformed RIP in a real pcap through do_rip_watch
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import Ether, wrpcap
+        pth = _os.path.join(_tf.gettempdir(), 'ripwatch_selftest.pcap')
+        wrpcap(pth, [Ether(v4f('10.0.0.1', bad)),
+                     Ether(v4f('10.0.0.1', r4([route4('10.1.0.0', 1)])))])
+        rr = do_rip_watch(pcap=pth)
+        _os.unlink(pth)
+        ck('pcap_malformed_rip120', any(f['code'] == 'RIP-120' for f in rr['findings']))
+        ck('pcap_decoded', rr['packet_count'] >= 2 and rr['rip'] >= 2)
+        scapy_result = {'ran': True, 'rip120': any(
+            f['code'] == 'RIP-120' for f in rr['findings'])}
+    except ImportError as e:
+        scapy_result = {'ran': False, 'reason': str(e)}
+    except Exception as e:
+        scenarios.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    passed = all(s['pass'] for s in scenarios)
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+# --------------------------------------------------------------------------
 # RADIUS Watch: vendor-neutral passive RADIUS / EAP security scanner
 # --------------------------------------------------------------------------
 # RADIUS (RFC 2865, UDP 1812/1645 auth, 1813/1646 acct, 3799 CoA) carries network
@@ -28553,6 +28971,7 @@ def do_routing_selftest():
               'stp': _stp_selftest(), 'mrp': _mrp_selftest(), 'isis': _isis_selftest(),
               'pim': _pim_selftest(),
               'radius': _radiuswatch_selftest(),
+              'rip': _rip_selftest(),
               'smb': _smb_selftest(), 'relay': _relay_selftest(),
               'dtp': _dtp_selftest(), 'cdp': _cdp_selftest(), 'vtp': _vtp_selftest(),
               'eigrp': _eigrp_selftest(),
@@ -30600,6 +31019,24 @@ def register_network_diagnostics(app, logger=None):
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 60)
         _log(f"net/dns-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_dns_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/rip-watch', methods=['GET'])
+    def net_rip_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
+        _log(f"net/rip-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_rip_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/rip-baseline', methods=['GET', 'POST'])
+    def net_rip_baseline():
+        action = 'get'
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            action = data.get('action') if data.get('action') in ('arm', 'reset') else 'get'
+        _log(f"net/rip-baseline {action}")
+        return jsonify(do_rip_baseline(action))
 
     @app.route('/api/net/isis-watch', methods=['GET'])
     def net_isis_watch():
