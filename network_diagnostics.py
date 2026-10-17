@@ -22522,368 +22522,92 @@ def _juniper_analyze(records):
 _ARISTA_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   'data', 'arista_guard.json')
 _arista_guard_lock = threading.Lock()
-_ARISTA_RADIUS_AUTH_PORTS = (1812, 1645)
-_ARISTA_RADIUS_ACCT_PORTS = (1813, 1646)
-_ARISTA_GNMI_PORTS = (6030, 9339, 50051)
-_ARISTA_CVX_PORTS = (9979,)
-_ARISTA_VXLAN_PORTS = (4789, 8472)
-_ARISTA_MAX_VLAN_TAGS = 2
-# --- BlastRADIUS (CVE-2024-3596) structural anomaly bounds (aristaguard v3) ---
-# All are STRUCTURAL anomaly bounds measured against real vendor AV-pairs, not
-# published exploit constants. AG-201 keys on the Proxy-State SUM so splitting a
-# collision block across several attributes cannot evade it; EAP-Message
-# fragments (255-byte, ordinary in EAP-TLS) are deliberately never counted.
-_ARISTA_RADIUS_PROXY_STATE_TOTAL_MAX = 128
-_ARISTA_RADIUS_OPAQUE_MIN_LEN = 64
-_ARISTA_RADIUS_OPAQUE_ENTROPY_MIN = 0.88
-_ARISTA_RADIUS_OPAQUE_RUN_MAX = 16
-_ARISTA_RADIUS_CLEARTEXT_RUN_MIN = 24
-# RADIUS attribute types / code sets used by the parser and the detectors.
-_RADIUS_ATTR_REPLY_MESSAGE = 18
-_RADIUS_ATTR_VENDOR_SPECIFIC = 26
-_RADIUS_ATTR_PROXY_STATE = 33
-_RADIUS_ATTR_MSG_AUTH = 80
-_RADIUS_RESPONSE_CODES = frozenset((2, 3, 11))   # Access-Accept / Reject / Challenge
-_RADIUS_MA_FIRST_CODES = frozenset((2, 3))       # M-A must be FIRST in these
-_RADIUS_MAX_ATTRS = (4096 - 20) // 2             # RFC 2865 upper bound (D6)
-# Non-EOS Arista products actively screened out (AG-009).
-_ARISTA_OOS_RE = re.compile(
-    r'VeloCloud|CloudVision|NG Firewall|Edge Threat|DANZ|Converged Cloud'
-    r'|Awake NDR', re.I)
-_ARISTA_EOS_VER_RE = re.compile(r'\bEOS[- ](?:version\s+)?(\d+\.\d+\.\d+[A-Z0-9.]*)', re.I)
-_ARISTA_SSH_BANNER_RE = re.compile(rb'SSH-2\.0-OpenSSH_(\d+)\.(\d+)(?:p(\d+))?')
+_ARISTA_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
 
 
-def _arista_ssh_vulnerable(major, minor, patch):
-    """regreSSHion (CVE-2024-6387/6409) window: OpenSSH < 4.4p1, or 8.5p1 up to
-    (not including) 9.8p1."""
-    v = (major, minor, patch or 0)
-    if v < (4, 4, 1):
-        return True
-    return (8, 5, 1) <= v < (9, 8, 1)
+def _arista_module():
+    """Import the vendored aristaguard engine (python/ on sys.path). Pure stdlib at
+    import time; scapy loads only on its own run_capture live path, which the adapter
+    does NOT use — it captures via tcpdump->pcap and feeds raw Ethernet frames to
+    AristaEngine.handle_frame, the same shape as APC / Liebert / RADIUS / RIP / PIM."""
+    if _ARISTA_PY_DIR not in sys.path:
+        sys.path.insert(0, _ARISTA_PY_DIR)
+    import aristaguard
+    return aristaguard
 
 
-def _radius_norm_entropy(b):
-    """Shannon entropy normalised to the maximum achievable for this length, so
-    the number is comparable across short and long buffers (arubaguard's lesson:
-    64 random bytes can only reach 6.0 bits, so a fixed bit threshold never
-    fires on anything short)."""
-    if not b:
-        return 0.0
-    import math as _math
-    counts = {}
-    for x in b:
-        counts[x] = counts.get(x, 0) + 1
-    n = len(b)
-    h = -sum((c / n) * _math.log2(c / n) for c in counts.values())
-    hmax = _math.log2(min(256, n))
-    return h / hmax if hmax else 0.0
+def _arista_map_finding(f):
+    """Vendored aristaguard Finding -> the shared guard result-dict the webapp card
+    and _guard_finish consume. klass is upper-cased (the engine emits lowercase
+    posture/exposure/attack; _guard_verdict keys on POSTURE/EXPOSURE/ATTACK); severity
+    is already one of INFO/LOW/MEDIUM/HIGH/CRITICAL (the _GUARD_SEVERITY_RANK set)."""
+    detail = dict(getattr(f, 'detail', None) or {})
+    if getattr(f, 'pivot', None):
+        detail.setdefault('pivot', list(f.pivot))
+    return {'code': f.code, 'name': f.name, 'severity': f.severity,
+            'klass': f.klass.upper(), 'cves': list(f.cves),
+            'src': detail.get('src') or detail.get('addr'), 'detail': detail}
 
 
-def _radius_longest_printable_run(b):
-    best = cur = 0
-    for x in b:
-        if 32 <= x <= 126 or x in (9, 10, 13):
-            cur += 1
-            if cur > best:
-                best = cur
-        else:
-            cur = 0
-    return best
-
-
-def _radius_classify_opacity(b):
-    """Classify a RADIUS attribute value as 'opaque' / 'cleartext' / 'unknown'.
-    The printable-run length is the discriminator (entropy alone does not
-    separate real AV-pairs from collision data — their entropy ranges overlap);
-    the middle band deliberately abstains rather than guess."""
-    if len(b) < _ARISTA_RADIUS_OPAQUE_MIN_LEN:
-        return 'unknown'
-    run = _radius_longest_printable_run(b)
-    if run >= _ARISTA_RADIUS_CLEARTEXT_RUN_MIN:
-        return 'cleartext'
-    if run <= _ARISTA_RADIUS_OPAQUE_RUN_MAX and \
-            _radius_norm_entropy(b) >= _ARISTA_RADIUS_OPAQUE_ENTROPY_MIN:
-        return 'opaque'
-    return 'unknown'
-
-
-def _radius_parse(payload):
-    """RADIUS parser for the Arista Guard BlastRADIUS detectors. Returns a dict
-    of STRUCTURAL facts only — attribute values are digested or discarded, never
-    retained (this module never logs credential material) — or None.
-    RADIUS: code(1) id(1) length(2) authenticator(16) then TLV attributes."""
-    try:
-        if len(payload) < 20:
-            return None
-        code = payload[0]
-        if code not in (1, 2, 3, 4, 5, 11):   # plausible RADIUS codes
-            return None
-        length = int.from_bytes(payload[2:4], 'big')
-        if not (20 <= length <= 4096):
-            return None
-        import hashlib as _hl
-        # Walk the declared body; a legal packet can carry ~2038 attributes, so
-        # a small cap would stop the walk early and miss a trailing M-A (D6).
-        body = payload[20:length] if length <= len(payload) else payload[20:]
-        out = {'code': code, 'identifier': payload[1], 'has_msg_auth': False,
-               'ma_is_first': False, 'max_attr_len': 0, 'attrs': [],
-               'proxy_state_total': 0, 'proxy_state_count': 0,
-               'proxy_state_digests': [], 'reply_message_count': 0,
-               'reply_message_invalid_utf8': 0, 'opaque_vendor_attrs': [],
-               'cleartext_vendor_attrs': 0, 'unknown_vendor_attrs': 0}
-        i = count = 0
-        while i + 2 <= len(body) and count < _RADIUS_MAX_ATTRS:
-            atype = body[i]
-            alen = body[i + 1]
-            if alen < 2 or i + alen > len(body):
-                break
-            value = body[i + 2:i + alen]
-            out['attrs'].append(atype)
-            out['max_attr_len'] = max(out['max_attr_len'], alen)
-            if atype == _RADIUS_ATTR_MSG_AUTH:               # Message-Authenticator
-                out['has_msg_auth'] = True
-            elif atype == _RADIUS_ATTR_PROXY_STATE:
-                # Proxy-State must be echoed back byte-for-byte by a conforming
-                # server; a digest lets AG-212 detect injection without ever
-                # retaining the value. Summed for AG-201 (D1/D2).
-                out['proxy_state_total'] += alen
-                out['proxy_state_count'] += 1
-                out['proxy_state_digests'].append(
-                    _hl.blake2b(value, digest_size=8).hexdigest())
-            elif atype == _RADIUS_ATTR_REPLY_MESSAGE:
-                out['reply_message_count'] += 1
-                try:                                          # RFC 2865: displayable text
-                    value.decode('utf-8')
-                except UnicodeDecodeError:
-                    out['reply_message_invalid_utf8'] += 1
-            elif atype == _RADIUS_ATTR_VENDOR_SPECIFIC:
-                # Classify the vendor PAYLOAD, past the 6-byte vendor-id +
-                # vendor-type/length sub-header (those are protocol fields, not
-                # attacker content, and dilute the entropy of short payloads).
-                vendor_payload = value[6:] if len(value) >= 8 else value
-                verdict = _radius_classify_opacity(vendor_payload)
-                if verdict == 'opaque':
-                    out['opaque_vendor_attrs'].append(alen)
-                elif verdict == 'cleartext':
-                    out['cleartext_vendor_attrs'] += 1
-                else:
-                    out['unknown_vendor_attrs'] += 1
-            count += 1
-            i += alen
-        out['ma_is_first'] = (bool(out['attrs'])
-                              and out['attrs'][0] == _RADIUS_ATTR_MSG_AUTH)
-        return out
-    except Exception:
-        return None
+def _arista_analyze_frames(frames):
+    """Replay [(ts, frame)] through the vendored AristaEngine and map its findings.
+    No persisted baseline — each capture is self-contained. The RADIUS / BlastRADIUS
+    rules (AG-101/102/110/201/212/213/214, CVE-2024-3596) self-scope to Arista hardware
+    whose addresses are learned passively from LLDP management-address TLVs within the
+    same window; with no Arista device seen they stay silent (the vendor-neutral RADIUS
+    posture now lives in RADIUS Watch). Returns (findings, stats)."""
+    ag = _arista_module()
+    eng = ag.AristaEngine(ag.Config())
+    for ts, fr in frames:
+        try:
+            eng.handle_frame(fr, ts)
+        except Exception:
+            continue
+    return [_arista_map_finding(f) for f in eng.findings], {
+        'arista_ips': sorted(eng.arista_ips)[:50]}
 
 
 def do_arista_guard(interface=None, seconds=20, learn=True, quick=False):
-    """Passive Arista EOS switch/router CVE guard (detection-only). Reads LLDP
-    version/platform, RADIUS (BlastRADIUS CVE-2024-3596), SSH banners (regreSSHion),
-    and management listeners (gNMI/CVX/VXLAN), reporting POSTURE / EXPOSURE / ATTACK
-    findings. Ported from the standalone aristaguard. Never transmits."""
+    """Passive Arista EOS switch/router CVE guard (detection-only). Captures LLDP,
+    RADIUS/EAPOL, SSH banners and gNMI/gNOI/CVX/VXLAN/IPsec dataplane for a few seconds
+    and replays them through the vendored aristaguard engine (17 tracked EOS CVEs across
+    POSTURE / EXPOSURE / ATTACK: BlastRADIUS CVE-2024-3596, regreSSHion, gNOI authz,
+    tunnel-decap CVE-2026-7473, VLAN/OSPFv3/CVX/IPsec shapes). Non-EOS Arista products
+    are screened out (AG-009). BlastRADIUS rules self-scope to Arista LLDP. Never
+    transmits — the engine has no socket, subprocess or injector; scapy is lazy."""
     iface, iface_error = _lan_guard_iface(interface, 'Arista Guard')
     if iface_error:
         return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
-    bpf = ('udp port 1812 or udp port 1813 or udp port 1645 or udp port 1646 or '
-           'tcp port 22 or tcp port 6030 or tcp port 9339 or tcp port 50051 or '
-           'tcp port 9979 or udp port 4789 or udp port 8472 or '
-           'ether proto 0x88cc')     # LLDP
     if not _have('tcpdump'):
         return {'success': False, 'interface': iface,
                 'error': 'tcpdump is not installed. Click Install to add it.',
                 'missing_tool': 'tcpdump'}
-    res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-tt',
-                '-v', '-x', '-s', '1600', '-c', '20000', bpf],
-               timeout=seconds + 8)
-    out = res['out']
-    if not out and res['err'] and any(k in res['err'].lower() for k in (
-            'permission', "couldn't", 'no such device', 'syntax error')):
-        return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
-    records = _guard_packets(out)
-    result = _arista_analyze(records)
-    result['interface'] = iface
-    result['seconds'] = seconds
+    try:
+        ag = _arista_module()
+    except Exception as e:
+        return {'success': False, 'interface': iface, 'error': 'aristaguard module: %s' % e}
+    tmpdir = tempfile.mkdtemp(prefix='aristaguard-')
+    pcap = os.path.join(tmpdir, 'cap.pcap')
+    try:
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-s', '0',
+                    '-c', '20000', '-w', pcap, ag.BPF_FILTER], timeout=seconds + 8)
+        if not os.path.exists(pcap):
+            err = (res.get('err') or 'capture failed').strip()
+            return {'success': False, 'interface': iface, 'error': err[:200]}
+        try:
+            frames = _apc_pcap_frames(pcap)
+        except ValueError as e:
+            return {'success': False, 'interface': iface, 'error': str(e)}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    findings, stats = _arista_analyze_frames(frames)
+    result = _guard_finish('arista_guard', iface, seconds, findings, frames)
+    result['stats'] = stats
     if not quick:
         _guard_record_event(_ARISTA_GUARD_PATH, _arista_guard_lock, result)
     _guard_emit_jsonl('arista_guard', result)
     return result
-
-
-def _arista_analyze(records):
-    """Pure classifier over parsed guard packets → Arista findings + verdict."""
-    findings = []
-    seen = set()
-    eos_ver = None
-    # AG-212 request→response Proxy-State correlation table (bounded). Keyed by
-    # the socket 4-tuple + RADIUS Identifier; stores digests only, never values.
-    radius_pending = {}
-
-    def add(code, name, sev, klass, src, cves, detail):
-        key = (code, src)
-        if key in seen:
-            return
-        seen.add(key)
-        findings.append({'code': code, 'name': name, 'severity': sev,
-                         'klass': klass, 'src': src, 'cves': cves, 'detail': detail})
-
-    for r in records:
-        pl, text, src, dst = r['payload'], r['dissect'], r['src'], r['dst']
-
-        # --- POSTURE: LLDP EOS version / platform, out-of-scope screen ---
-        if _ARISTA_OOS_RE.search(text):
-            add('AG-009', 'OUT_OF_SCOPE_PLATFORM', 'INFO', 'POSTURE', src, [],
-                {'note': 'non-EOS Arista product — needs its own coverage'})
-        else:
-            m = _ARISTA_EOS_VER_RE.search(text)
-            if m:
-                eos_ver = m.group(1)
-                add('AG-001', 'EOS_VERSION_OBSERVED', 'INFO', 'POSTURE', src, [],
-                    {'version': eos_ver})
-            elif re.search(r'\bArista\b', text, re.I):
-                add('AG-005', 'EOS_PLATFORM_OBSERVED', 'INFO', 'POSTURE', src, [], {})
-
-        # --- RADIUS / BlastRADIUS (CVE-2024-3596), aristaguard v3 engine ---
-        _auth = _ARISTA_RADIUS_AUTH_PORTS
-        _acct = _ARISTA_RADIUS_ACCT_PORTS
-        is_radius_acct = r['proto'] == 'UDP' and (r['dport'] in _acct
-                                                  or r['sport'] in _acct)
-        is_radius = r['proto'] == 'UDP' and (
-            r['dport'] in _auth + _acct or r['sport'] in _auth + _acct)
-        if is_radius:
-            add('AG-101', 'RADIUS_CLEARTEXT_OBSERVED', 'MEDIUM', 'EXPOSURE', src,
-                ['CVE-2024-3596'], {'dst': dst})
-            # AG-211: a gNOI File TransferToRemote marker in a cleartext
-            # accounting record (CVE-2025-0936 / SA-0117) may carry the
-            # remote-server credentials. Marker + lengths only — credential
-            # material is deliberately never captured.
-            if is_radius_acct and pl and b'transfertoremote' in bytes(pl[:512]).lower():
-                add('AG-211', 'GNOI_CREDENTIAL_IN_ACCOUNTING', 'CRITICAL', 'ATTACK',
-                    src, ['CVE-2025-0936'],
-                    {'dst': dst, 'record_len': len(pl),
-                     'note': 'accounting record references gNOI TransferToRemote; '
-                             'rotate the remote-server credentials and check '
-                             'accounting log retention'})
-            rad = _radius_parse(pl) if pl else None
-            if rad:
-                is_request = r['dport'] in _auth + _acct
-                if rad['code'] == 1 and not rad['has_msg_auth']:    # Access-Request
-                    add('AG-102', 'RADIUS_NO_MESSAGE_AUTHENTICATOR', 'HIGH',
-                        'EXPOSURE', src, ['CVE-2024-3596'],
-                        {'note': 'Access-Request without attribute 80 (Message-'
-                                 'Authenticator) — the CVE-2024-3596 mitigation is '
-                                 'to require it on every request and response'})
-                if rad['code'] in _RADIUS_RESPONSE_CODES:           # responses
-                    case = None
-                    if not rad['has_msg_auth']:
-                        case = 'absent'
-                    elif (rad['code'] in _RADIUS_MA_FIRST_CODES
-                          and not rad['ma_is_first']):
-                        case = 'not_first'
-                    if case:
-                        # EXPOSURE, not attack: this is the standing posture of an
-                        # unhardened server. 'not_first' matters because the
-                        # mitigation requires M-A FIRST in Access-Accept/Reject.
-                        add('AG-110', 'RADIUS_RESPONSE_UNAUTHENTICATED', 'HIGH',
-                            'EXPOSURE', src, ['CVE-2024-3596'],
-                            {'radius_code': rad['code'], 'case': case,
-                             'note': ('response carries no Message-Authenticator; '
-                                      'protected only by the MD5 authenticator that '
-                                      'CVE-2024-3596 defeats') if case == 'absent'
-                                     else ('Message-Authenticator present but NOT '
-                                           'first — the response is not actually '
-                                           'hardened against CVE-2024-3596')})
-                # AG-201: Proxy-State bytes SUMMED over the packet exceed a
-                # legitimate proxy chain — the chosen-prefix collision-block shape.
-                if rad['proxy_state_total'] > _ARISTA_RADIUS_PROXY_STATE_TOTAL_MAX:
-                    add('AG-201', 'RADIUS_FORGERY_ATTEMPT', 'CRITICAL', 'ATTACK', src,
-                        ['CVE-2024-3596'],
-                        {'proxy_state_total': rad['proxy_state_total'],
-                         'proxy_state_count': rad['proxy_state_count'],
-                         'threshold': _ARISTA_RADIUS_PROXY_STATE_TOTAL_MAX,
-                         'note': 'Proxy-State bytes exceed a legitimate proxy chain '
-                                 '— BlastRADIUS collision-block shape (summed so '
-                                 'splitting it across attributes cannot evade it)'})
-                # AG-212: Proxy-State injected on the NAS-side leg. A conforming
-                # server echoes Proxy-State back byte-for-byte, so a response whose
-                # Proxy-State set differs from its correlated request's is
-                # injection — the forged-Access-Accept shape. Digests only.
-                rkey = (src, dst, r['sport'], r['dport'], rad['identifier'])
-                if is_request:
-                    if len(radius_pending) < 4096:
-                        radius_pending[rkey] = tuple(rad['proxy_state_digests'])
-                elif rad['code'] in _RADIUS_RESPONSE_CODES:
-                    fkey = (dst, src, r['dport'], r['sport'], rad['identifier'])
-                    req_digests = radius_pending.pop(fkey, None)
-                    if req_digests is not None and (
-                            set(rad['proxy_state_digests']) != set(req_digests)):
-                        injected = [d for d in rad['proxy_state_digests']
-                                    if d not in req_digests]
-                        add('AG-212', 'RADIUS_PROXY_STATE_INJECTED', 'CRITICAL',
-                            'ATTACK', src, ['CVE-2024-3596'],
-                            {'radius_code': rad['code'], 'identifier': rad['identifier'],
-                             'injected_attr_count': len(injected),
-                             'request_proxy_state_count': len(req_digests),
-                             'response_proxy_state_count': rad['proxy_state_count'],
-                             'note': 'request and its response disagree about '
-                                     'Proxy-State — forged Access-Accept on the '
-                                     'NAS-side leg of CVE-2024-3596 (digests '
-                                     'compared, values never retained)'})
-                # AG-213 / AG-214: collision data smuggled OUTSIDE Proxy-State, in
-                # a Reply-Message (invalid UTF-8) or an opaque Vendor-Specific
-                # attribute. Access-Accept / Access-Challenge only.
-                if rad['code'] in (2, 11):
-                    if rad['reply_message_invalid_utf8']:
-                        add('AG-213', 'RADIUS_REPLY_MESSAGE_MALFORMED', 'HIGH',
-                            'ATTACK', src, ['CVE-2024-3596'],
-                            {'invalid_reply_messages': rad['reply_message_invalid_utf8'],
-                             'reply_message_count': rad['reply_message_count'],
-                             'note': 'Reply-Message is not valid UTF-8 (RFC 2865 '
-                                     'requires displayable text) — a collision block '
-                                     'smuggled on the NAS-side leg of CVE-2024-3596'})
-                    if rad['opaque_vendor_attrs']:
-                        add('AG-214', 'RADIUS_OPAQUE_VENDOR_ATTRIBUTE', 'HIGH',
-                            'ATTACK', src, ['CVE-2024-3596'],
-                            {'opaque_attr_count': len(rad['opaque_vendor_attrs']),
-                             'largest_attr_len': max(rad['opaque_vendor_attrs']),
-                             'note': 'a Vendor-Specific attribute is long, high-'
-                                     'entropy and essentially non-printable, unlike '
-                                     'real AV-pair strings — collision data outside '
-                                     'Proxy-State'})
-
-        # --- SSH banner (regreSSHion CVE-2024-6387/6409) ---
-        if r['proto'] == 'TCP' and (r['dport'] == 22 or r['sport'] == 22):
-            m = _ARISTA_SSH_BANNER_RE.search(pl)
-            if m:
-                mj, mn = int(m.group(1)), int(m.group(2))
-                pt = int(m.group(3)) if m.group(3) else 0
-                if _arista_ssh_vulnerable(mj, mn, pt):
-                    add('AG-104', 'SSH_VULNERABLE_BANNER', 'HIGH', 'EXPOSURE', src,
-                        ['CVE-2024-6387', 'CVE-2024-6409'],
-                        {'banner': f'OpenSSH_{mj}.{mn}' + (f'p{pt}' if pt else '')})
-
-        # --- Management-plane listeners (exposure preconditions) ---
-        if r['proto'] == 'TCP' and r['dport'] in _ARISTA_GNMI_PORTS:
-            add('AG-103', 'GNMI_GNOI_LISTENER_OBSERVED', 'MEDIUM', 'EXPOSURE', src,
-                ['CVE-2025-1259', 'CVE-2025-1260', 'CVE-2025-0936'],
-                {'dst': dst, 'port': r['dport']})
-        if r['proto'] == 'TCP' and r['dport'] in _ARISTA_CVX_PORTS:
-            add('AG-108', 'CVX_SESSION_OBSERVED', 'MEDIUM', 'EXPOSURE', src,
-                ['CVE-2025-5089'], {'dst': dst})
-        if r['proto'] == 'UDP' and (r['dport'] in _ARISTA_VXLAN_PORTS
-                                    or r['sport'] in _ARISTA_VXLAN_PORTS):
-            add('AG-106', 'VXLAN_DECAP_ENDPOINT_OBSERVED', 'LOW', 'EXPOSURE',
-                dst or src, ['CVE-2026-7473'], {'endpoint': dst})
-
-        # --- VLAN tag anomaly (CVE-2024-5872 CPU punt shape) ---
-        if r['vlan_tags'] > _ARISTA_MAX_VLAN_TAGS:
-            add('AG-205', 'VLAN_TAG_ANOMALY_CPU_PUNT', 'MEDIUM', 'ATTACK', src or dst,
-                ['CVE-2024-5872'], {'vlan_tags': r['vlan_tags'],
-                                    'threshold': _ARISTA_MAX_VLAN_TAGS})
-
-    return _guard_finish('arista_guard', None, None, findings, records)
 
 
 # ==========================================================================
@@ -25738,108 +25462,74 @@ def _juniper_selftest():
     return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
 
 
-def _radius_packet(code=1, attrs=None):
-    """Craft a RADIUS packet for the self-test. attrs: list of (type, value)."""
-    body = b''
-    for atype, val in (attrs or []):
-        body += bytes([atype, len(val) + 2]) + val
-    length = 20 + len(body)
-    return bytes([code, 1]) + length.to_bytes(2, 'big') + bytes(16) + body
-
-
 def _arista_selftest():
-    """Self-test the Arista guard detectors with synthetic records + a scapy
-    end-to-end leg (crafted RADIUS + SSH banner -> pcap -> tcpdump -X -> parse)."""
+    """Arista Guard: run the vendored aristaguard engine's own offline suite (the
+    test_* functions — catalog, version screening, parsers, posture/RADIUS/tunnel/VLAN/
+    dot1x/OSPFv3 rules, BlastRADIUS fixes, IPv6 extension headers, the passive-invariant
+    AST guard — pure-python, no scapy), plus the in-app adapter: Finding mapping, catalog
+    exposure, empty-capture cleanliness, and a Scapy pcap end-to-end leg mirroring the
+    engine's own posture fixture (Arista LLDP -> AG-001 EOS version observed)."""
+    import io as _io
+    import contextlib as _ctx
     scenarios = []
 
-    def check(name, recs, expect_verdict, expect_codes=()):
-        res = _arista_analyze(recs)
-        codes = {f['code'] for f in res['findings']}
-        ok = res['verdict'] == expect_verdict and all(c in codes for c in expect_codes)
-        scenarios.append({'name': name, 'expect': f'{expect_verdict}/{list(expect_codes)}',
-                          'got': f"{res['verdict']}/{sorted(codes)}", 'pass': ok})
-        return res
+    def sc(name, ok, expect='', got=''):
+        scenarios.append({'name': name, 'pass': bool(ok), 'expect': expect, 'got': str(got)})
 
-    check('arista-clean', [], 'clean')
-    check('arista-observed', [_guard_rec(dissect='Arista Networks EOS-4.29.2F running')],
-          'observed', ['AG-001'])
-    check('arista-oos', [_guard_rec(dissect='Arista CloudVision Portal 2024.1.0')],
-          'observed', ['AG-009'])
-    # RADIUS Access-Request without Message-Authenticator -> AG-101 + AG-102.
-    check('arista-radius-noauth', [_guard_rec(proto='UDP', dport=1812,
-        payload=_radius_packet(1, [(1, b'admin')]))], 'exposure', ['AG-101', 'AG-102'])
-    # BlastRADIUS collision-block shape: Proxy-State (33) bytes SUMMED > 128 -> AG-201.
-    check('arista-radius-forgery', [_guard_rec(proto='UDP', dport=1812,
-        payload=_radius_packet(1, [(33, b'X' * 200)]))], 'attack', ['AG-201'])
-    # Response with no Message-Authenticator -> AG-110 (exposure, renumbered v3).
-    check('arista-radius-resp', [_guard_rec(proto='UDP', sport=1812, dport=41000,
-        payload=_radius_packet(2, [(1, b'ok')]))], 'exposure', ['AG-110'])
-    # Access-Accept with M-A present but NOT first -> AG-110 case not_first.
-    check('arista-radius-ma-not-first', [_guard_rec(proto='UDP', sport=1812,
-        dport=41000, payload=_radius_packet(2, [(1, b'ok'), (80, bytes(16))]))],
-        'exposure', ['AG-110'])
-    # Proxy-State injected on the NAS-side leg: request 'AAAA', response 'BBBB' ->
-    # AG-212. The two records correlate on 4-tuple + Identifier.
-    check('arista-radius-proxy-injected', [
-        _guard_rec(proto='UDP', src='10.0.0.9', dst='10.0.0.1', sport=40000,
-                   dport=1812, payload=_radius_packet(1, [(33, b'AAAA')])),
-        _guard_rec(proto='UDP', src='10.0.0.1', dst='10.0.0.9', sport=1812,
-                   dport=40000, payload=_radius_packet(2, [(33, b'BBBB')]))],
-        'attack', ['AG-212'])
-    # Collision block smuggled in a Reply-Message (invalid UTF-8) -> AG-213.
-    check('arista-radius-reply-malformed', [_guard_rec(proto='UDP', sport=1812,
-        dport=41000, payload=_radius_packet(2, [(18, b'\xff\xfebad')]))],
-        'attack', ['AG-213'])
-    # Opaque Vendor-Specific attribute (long, high-entropy, non-printable) -> AG-214.
-    _vsa = bytes([0, 0, 0, 9, 1, 82]) + bytes([200 + (i % 55) for i in range(80)])
-    check('arista-radius-opaque', [_guard_rec(proto='UDP', sport=1812, dport=41000,
-        payload=_radius_packet(2, [(26, _vsa)]))], 'attack', ['AG-214'])
-    # gNOI TransferToRemote credential marker in a RADIUS accounting record -> AG-211.
-    check('arista-radius-accounting-cred', [_guard_rec(proto='UDP', dport=1813,
-        payload=b'\x04\x01' + (41).to_bytes(2, 'big') + bytes(16)
-                + b'gNOI TransferToRemote')], 'attack', ['AG-211'])
-    # Vulnerable SSH banner (regreSSHion window) -> AG-104.
-    check('arista-ssh-vuln', [_guard_rec(proto='TCP', sport=22, dport=40000,
-        payload=b'SSH-2.0-OpenSSH_9.6p1 Debian\r\n')], 'exposure', ['AG-104'])
-    # Patched SSH banner -> no AG-104.
-    r = _arista_analyze([_guard_rec(proto='TCP', sport=22, dport=40000,
-        payload=b'SSH-2.0-OpenSSH_9.8p1\r\n')])
-    scenarios.append({'name': 'arista-ssh-patched', 'expect': 'clean/no-AG-104',
-                      'got': r['verdict'],
-                      'pass': all(f['code'] != 'AG-104' for f in r['findings'])})
-    # gNMI listener -> AG-103 exposure.
-    check('arista-gnmi', [_guard_rec(proto='TCP', dport=6030, payload=b'')],
-          'exposure', ['AG-103'])
-    # VLAN tag anomaly -> AG-205 attack.
-    check('arista-vlan', [_guard_rec(proto='UDP', dport=1812, vlan_tags=3,
-        payload=_radius_packet(1, [(80, bytes(16))]))], 'attack', ['AG-205'])
-
-    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
-        import tempfile
-        from scapy.all import Ether, IP, UDP, TCP, Raw, wrpcap
-        if _have('tcpdump'):
-            pkts = [
-                (Ether() / IP(src='10.0.0.8', dst='10.0.0.1')
-                 / UDP(sport=41000, dport=1812)
-                 / Raw(_radius_packet(1, [(1, b'admin'), (33, b'Y' * 200)]))),
-                (Ether() / IP(src='10.0.0.9', dst='10.0.0.2')
-                 / TCP(sport=22, dport=43000, flags='PA')
-                 / Raw(b'SSH-2.0-OpenSSH_9.6p1\r\n')),
-            ]
-            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
-                pcap_path = tf.name
-            wrpcap(pcap_path, pkts)
-            res = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-r', pcap_path], timeout=10)
-            out = _arista_analyze(_guard_packets(res['out']))
-            codes = {f['code'] for f in out['findings']}
-            ok = ('AG-201' in codes and 'AG-104' in codes and out['verdict'] == 'attack')
-            scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
-                            'codes': sorted(codes)}
-            try:
-                os.remove(pcap_path)
-            except OSError:
-                pass
+        ag = _arista_module()
+    except Exception as e:
+        return {'success': False,
+                'scenarios': [{'name': 'import aristaguard', 'pass': False,
+                               'expect': 'import ok', 'got': str(e)}],
+                'scapy': {'ran': False, 'reason': 'module import failed'}}
+
+    # 1. Vendored offline suite — prints "N/N checks passed", returns 0 on pass.
+    buf = _io.StringIO()
+    try:
+        with _ctx.redirect_stdout(buf):
+            rc = ag.selftest()
+    except Exception as e:
+        rc = 1
+        buf.write('%s: %s' % (type(e).__name__, e))
+    tail = (buf.getvalue().strip().splitlines() or [''])[-1]
+    sc('vendored aristaguard self-test', rc == 0, '0 fails', tail)
+
+    # 2. Finding mapping: lowercase klass -> UPPER, severity preserved in the rank set.
+    spec = ag.FINDINGS['AG-201']
+    mapped = _arista_map_finding(ag.Finding(
+        code=spec.code, name=spec.name, severity=spec.severity, klass=spec.klass,
+        ts=0.0, detail={'src': '10.0.0.1'}, cves=spec.cves))
+    sc('finding klass -> ATTACK', mapped['klass'] == 'ATTACK', 'ATTACK', mapped['klass'])
+    sc('finding severity in rank set', mapped['severity'] in _GUARD_SEVERITY_RANK,
+       'in _GUARD_SEVERITY_RANK', mapped['severity'])
+
+    # 3. Catalog exposure: BlastRADIUS + the exploited tunnel-decap CVE are tracked.
+    cat = {e.cve for e in ag.CVE_CATALOG}
+    sc('catalog carries CVE-2024-3596', 'CVE-2024-3596' in cat, 'present', 'CVE-2024-3596' in cat)
+    sc('catalog carries CVE-2026-7473', 'CVE-2026-7473' in cat, 'present', 'CVE-2026-7473' in cat)
+
+    # 4. Empty capture -> clean, no crash.
+    f0, _ = _arista_analyze_frames([])
+    sc('empty capture -> no findings', f0 == [], '[]', f0)
+
+    # 5. Scapy pcap end-to-end: an Arista LLDP frame (the engine's own ARISTA_DESC
+    #    fixture) -> pcap -> _apc_pcap_frames -> engine -> AG-001 off the wire.
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        from scapy.all import Ether, wrpcap
+        frame = ag._mk_eth(b'\x01\x80\xc2\x00\x00\x0e', b'\x02' * 6, ag.ETH_P_LLDP,
+                           ag._mk_lldp('sw1', ag.ARISTA_DESC))
+        d = tempfile.mkdtemp(prefix='aristaselftest-')
+        p = os.path.join(d, 'c.pcap')
+        try:
+            wrpcap(p, [Ether(frame)])
+            codes = sorted({x['code'] for x in _arista_analyze_frames(_apc_pcap_frames(p))[0]})
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        ok = 'AG-001' in codes
+        scapy_result = {'ran': True, 'pass': ok, 'codes': codes}
+        sc('scapy e2e: Arista LLDP -> AG-001', ok, 'AG-001 present', codes)
     except Exception as e:
         scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
 

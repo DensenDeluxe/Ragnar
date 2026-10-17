@@ -46,6 +46,9 @@ FILE_OWNERS = {
     'python/test_liebert_guard.py': 'Liebert Guard',
     'python/liebert_guard_conformance.py': 'Liebert Guard',
     'python/liebert_guard_scapy_selftest.py': 'Liebert Guard',
+    'python/aristaguard.py': 'Arista Guard',
+    'python/aristaguard_conformance.py': 'Arista Guard',
+    'python/aristaguard_scapy_xcheck.py': 'Arista Guard',
     'python/lldpwatch.py': 'LLDP Watch',
     'python/lldpwatch_frames.py': 'LLDP Watch',
     'python/lldpwatch_conformance.py': 'LLDP Watch',
@@ -133,7 +136,12 @@ IGNORED_CVES = {'CVE-2024-99999',
                 'CVE-9999-0001',   # lldpwatch conformance: operator extra_families fixture
                 # lldpwatch_conformance: the four SB220 4.3 siblings, asserted NOT screened
                 'CVE-2021-34775', 'CVE-2021-34776', 'CVE-2021-34777', 'CVE-2021-34778',
-                'CVE-2019-14810'}  # oamwatch xcheck comment: Arista LDP, named only as a not-this-protocol example
+                'CVE-2019-14810',  # oamwatch xcheck comment: Arista LDP, named only as a not-this-protocol example
+                # aristaguard QUARANTINED_CVES: named in-module ONLY so they can never be
+                # silently promoted into the catalog — no advisory/CVSS confirmed, no
+                # detection rule exists, they never fire. Not part of coverage.
+                'CVE-2024-27890', 'CVE-2020-15897', 'CVE-2024-12378',
+                'CVE-2026-11704', 'CVE-2025-6188', 'CVE-2023-24548'}
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
 # Owners (or owner+CVE) whose mention is context/reference, not a detection.

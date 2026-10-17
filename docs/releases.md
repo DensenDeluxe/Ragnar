@@ -4,6 +4,17 @@
 
 ### 2026-10-17
 
+#### [#971](https://github.com/PierreGode/Ragnar/pull/971) — feat(net): Arista Switch & Router Guard v4 — vendored EOS CVE engine (17 CVEs, 29 codes)
+*branch `feature/arista-guard-v4`*
+
+- **Arista Guard v4** moves the in-app EOS switch/router guard onto a **vendored engine** (`python/aristaguard.py`, self-contained stdlib; scapy only on its own live path) driven by the existing `do_arista_guard` adapter — it captures LLDP / RADIUS-EAPOL / SSH / gNMI-gNOI / CVX / VXLAN / IPsec via `tcpdump`→pcap and replays raw Ethernet frames through `AristaEngine.handle_frame`, the same vendored-engine shape as APC / Liebert / RADIUS / RIP / PIM. Replaces the hand-written v3 classifier; the route (`GET /api/net/arista-guard`), the L7 card and the shared guard rendering are unchanged.
+- **17 tracked EOS CVEs across 29 finding codes** in three classes — `AG-0xx` POSTURE (version/platform screen, "verify this device"), `AG-1xx` EXPOSURE (enabling condition visible), `AG-2xx` ATTACK (exploitation primitive on the wire). New over v3: CloudEOS SFE (CVE-2023-24545 / CVE-2023-24513), supervisor-redundancy privesc exposure (CVE-2023-24509, `detect=none`), the **actively-exploited** tunnel-decapsulation type-confusion (CVE-2026-7473, carried below the 6.5 CVSS floor by the exploited override), untagged-traffic-policy bypass (CVE-2024-9448), cross-VLAN L2 leak (CVE-2024-11185), OSPFv3 CPU exhaustion (CVE-2025-8872), 802.1X multi-auth bypass (CVE-2024-6858), IPsec dataplane halt (CVE-2025-8873) and OpenSSH CVE-2024-6409.
+- **BlastRADIUS (CVE-2024-3596) now scoped to Arista hardware.** The `AG-101/102/110/201/212/213/214` RADIUS engine is retained but fires only when a RADIUS endpoint is an Arista device learned passively from an LLDP management-address TLV — completing the migration flagged when [RADIUS Watch](nettools.md#radius-watch) took over the vendor-neutral coverage, so the two detectors no longer double-fire on non-Arista RADIUS traffic.
+- **Passive by construction:** no socket, subprocess or injector in the engine, enforced by an AST guard in its own self-test (and, for standalone use, systemd `RestrictAddressFamilies` / `IPAddressDeny` sandboxing). Six further CVEs are **quarantined** in-module (unconfirmed advisory / no sourceable CVSS) so they can never be silently promoted, and are excluded from the CVE index via `IGNORED_CVES`.
+- **CVE index +12 named / +13 detected → 395 named, 336 detected** (CVE-1999-0113 → CVE-2026-102019); `gen_cve_list` gains the three `python/aristaguard*.py` owners; CREDITS.md / README.md counts synced.
+- **Self-test:** `arista_guard` now runs the vendored engine's own **682-check** offline suite (catalog / version screening / parsers / posture / RADIUS / tunnel / VLAN / dot1x / OSPFv3 / BlastRADIUS fixes / IPv6 extension headers / passive-invariant AST guard) plus the in-app adapter (finding mapping, catalog, empty-capture, a Scapy LLDP→`AG-001` pcap end-to-end leg). Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Docs:** [nettools.md › Arista Guard](nettools.md#arista-guard).
+
 #### [#970](https://github.com/PierreGode/Ragnar/pull/970) — feat(net): RIP Watch — passive RIP/RIPng routing-security scanner (4th IGP)
 *branch `feature/rip-watch`*
 
