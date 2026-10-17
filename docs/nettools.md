@@ -1073,7 +1073,10 @@ enter a finding** — findings carry digests, lengths and booleans only.
 
 It **takes over the Blast-RADIUS (`CVE-2024-3596`) engine** that previously lived,
 un-gated and suite-wide, in [Arista Guard](#arista-guard)'s `rule_radius` (the seven
-migrated codes keep their digits: `AG-101 → RDW-101` … `AG-214 → RDW-214`), and adds
+migrated codes keep their digits: `AG-101 → RDW-101` … `AG-214 → RDW-214`; as of Arista
+Guard **v4** those `AG-1xx`/`AG-2xx` RADIUS codes are retained but **scoped to Arista
+hardware** learned from LLDP, so the two detectors no longer double-fire on non-Arista
+RADIUS traffic), and adds
 RADIUS/EAP authentication posture plus the FreeRADIUS CVEs that have a deterministic
 wire shape. **Direction is decided by the RADIUS *code*, never the port** — fixing an
 `aristaguard` blind spot where `1812 → 1812` proxy traffic read every response as a
@@ -4036,29 +4039,51 @@ across the vendor guards (Cisco and Juniper carry it today).
 - CLI: `python3 network_diagnostics.py juniper-guard [--iface I] [--seconds N] [--json]`
 
 #### Arista Guard
-Arista **EOS** switches, routers and edge/core devices. Non-EOS Arista products
-(CloudVision / VeloCloud / DANZ / Awake) are **screened out of scope** (`AG-009`).
-Reads the EOS version/platform from **LLDP** (`AG-001`/`AG-005`), and runs a full
-**BlastRADIUS** (**CVE-2024-3596**) engine over **RADIUS** (1812/1813/1645/1646):
-**`AG-101`** cleartext exposure, **`AG-102`** an Access-Request with no
-Message-Authenticator, **`AG-110`** an unauthenticated response — either missing the
-Message-Authenticator *or* carrying it after the first attribute (the mitigation
-requires it **first** in Access-Accept/Reject), **`AG-201`** a Proxy-State
-collision-block (bytes **summed** across the packet so splitting the block can't evade
-the bound; EAP-Message fragments are deliberately never counted), **`AG-212`**
-Proxy-State **injected on the NAS-side leg** (request↔response correlated on the socket
-4-tuple + RADIUS Identifier — a conforming server echoes Proxy-State back byte-for-byte,
-so a response whose set differs is the forged-Access-Accept shape; compared by digest,
-values never retained), and collision data smuggled *outside* Proxy-State in a malformed
-**Reply-Message** (**`AG-213`**, invalid UTF-8 where RFC 2865 requires displayable text)
-or an opaque **Vendor-Specific** attribute (**`AG-214`**, long/high-entropy/non-printable
-vs. real AV-pair strings). It also flags **`AG-211`** a gNOI **TransferToRemote**
-credential marker in a cleartext accounting record (**CVE-2025-0936**). Thresholds are
-structural anomaly bounds measured against real vendor AV-pairs, **not** published
-exploit constants. It further screens **SSH banners** (22) for the **regreSSHion** window
-(**`AG-104`**, CVE-2024-6387/6409), and flags management listeners **`AG-103`** gNMI/gNOI
-(6030/9339/50051), **`AG-108`** CVX (9979), **`AG-106`** VXLAN decap (4789/8472), plus
-**`AG-205`** a VLAN tag-stack CPU-punt anomaly (**CVE-2024-5872**).
+Arista **EOS** switches, routers and edge/core devices. **v4** moves Arista Guard onto
+a **vendored engine** (`python/aristaguard.py`, self-contained stdlib; scapy only on its
+own live path) driven by the in-app `do_arista_guard` adapter, which captures LLDP /
+RADIUS-EAPOL / SSH / management traffic via `tcpdump`→pcap and replays raw frames through
+`AristaEngine.handle_frame` — the same shape as APC / Liebert / RADIUS / RIP / PIM. It is
+**passive by construction**: no socket, subprocess or injector exists in the engine, and
+an AST guard in its self-test rejects any transmit-shaped call. **17 tracked EOS CVEs**
+across **29 finding codes** in three classes — `AG-0xx` **POSTURE** (version/platform
+fingerprint, "verify this device"), `AG-1xx` **EXPOSURE** (the enabling condition for a
+CVE is visibly present), `AG-2xx` **ATTACK** (an exploitation primitive observed on the
+wire). Non-EOS Arista products (CloudVision / VeloCloud / DANZ / Awake) are **screened out
+of scope** (`AG-009`); CloudEOS routes to `AG-003`, never the hardware-EOS screen.
+
+- **Version / platform (LLDP).** `AG-001` EOS version observed, `AG-005` platform
+  observed, `AG-002` a vulnerable EOS version, `AG-003` a vulnerable CloudEOS SFE version
+  (CVE-2023-24545 / CVE-2023-24513), `AG-004` supervisor-redundancy privilege-escalation
+  exposure on a modular chassis (CVE-2023-24509 — `detect=none`, a local escalation that
+  never crosses the wire, reported for manual verification only), `AG-006` a
+  tunnel-decapsulation-affected platform.
+- **BlastRADIUS (CVE-2024-3596), now scoped to Arista hardware.** The full RADIUS engine
+  (`AG-101` cleartext, `AG-102` no Message-Authenticator, `AG-110` an M-A that is absent
+  *or* not first, `AG-201` a Proxy-State collision block summed across the packet,
+  `AG-212` NAS-side Proxy-State injection correlated on the 4-tuple + Identifier and
+  compared by digest, `AG-213` a malformed Reply-Message, `AG-214` an opaque
+  Vendor-Specific attribute) runs **only when a RADIUS endpoint is an Arista device** whose
+  address was learned passively from an LLDP management-address TLV (or named in config).
+  With no Arista device seen the RADIUS rules stay **silent** — the vendor-neutral RADIUS
+  posture now lives in [RADIUS Watch](#radius-watch).
+- **Management / control plane.** `AG-103` gNMI/gNOI listener exposure
+  (CVE-2025-1259/1260), `AG-211` a gNOI **TransferToRemote** credential marker in cleartext
+  accounting (CVE-2025-0936), `AG-108` a CVX session driving the EOS Sysdb crash
+  (CVE-2025-5089), `AG-105` an IPsec dataplane present for the crafted-packet halt
+  (CVE-2025-8873), `AG-109`/`AG-209` an OSPFv3 CPU-exhaustion shape (CVE-2025-8872).
+- **SSH / tunnels / VLAN / 802.1X.** `AG-104`/`AG-210` **regreSSHion** SSH banners
+  (CVE-2024-6387/6409); `AG-106`/`AG-203` the actively-exploited **tunnel-decapsulation**
+  type-confusion (CVE-2026-7473 — carried below the 6.5 CVSS floor by the exploited
+  override); `AG-205`/`AG-206`/`AG-207` VLAN tag CPU-punt and cross-VLAN leaks
+  (CVE-2024-5872 / CVE-2024-9448 / CVE-2024-11185); `AG-107`/`AG-208` an 802.1X multi-auth
+  bypass (CVE-2024-6858).
+
+Six further CVEs are **quarantined** (raised in discussion but not confirmed against an
+Arista advisory, or with no sourceable CVSS); they are recorded in the module so they can
+never be silently promoted into the catalog and are **not** counted as coverage. Thresholds
+are structural anomaly bounds measured against real vendor AV-pairs, **not** published
+exploit constants; attribute values are never retained.
 - Endpoint: `GET /api/net/arista-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py arista-guard [--iface I] [--seconds N] [--json]`
 
