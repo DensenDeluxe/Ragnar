@@ -912,14 +912,18 @@ class EspCapture:
         return {"ok": False, "error": "no clean 2.4 GHz Wi-Fi channel to lock onto — "
                 "needs ch 1/6/11 traffic; try again near an access point"}
 
-    def calibrate_vs_tone(self, rf_hz, settle=4.0, search_khz=400.0):
+    def calibrate_vs_tone(self, rf_hz, tx_on=None, tx_off=None, settle=3.0, search_khz=400.0):
         """Trim the crystal against a HackRF CW pilot tone known to be at ``rf_hz``.
 
-        The caller (the web route) has the HackRF transmitting a single carrier
-        at ``rf_hz``. We tune the ESP to a narrow window around it, max-hold a
-        few seconds, locate that one strong known bin (immune to the ESP's own
-        spurs, which the band-shape correlation could not get past) and set FOFS
-        so the tone reads true. Restores the previous view. Blocks ~``settle`` s.
+        Tunes the ESP to a narrow window around ``rf_hz`` and, when ``tx_on`` /
+        ``tx_off`` callbacks are given (the web route's HackRF TX control),
+        **difference-measures** it: a max-hold with the tone OFF (``tx_on`` not
+        yet called) and one with it ON, then locks onto the bin the tone *adds*.
+        Differencing cancels ambient Wi-Fi and the ESP's own fixed spurs, so the
+        pilot is found even when it sits on a busy channel (2437 MHz = Wi-Fi ch6)
+        — the single-pass version could otherwise grab an ambient peak and apply
+        a wrong trim. Without the callbacks it falls back to a single max-hold
+        (assumes the tone is already transmitting). Restores the previous view.
         """
         with self._lock:
             supported = self._fofs_ok
@@ -935,36 +939,84 @@ class EspCapture:
         r = self.start(band=None, lo_mhz=center - half, hi_mhz=center + half, fft_bins=2048)
         if not r.get("ok"):
             return {"ok": False, "error": r.get("error", "could not start measurement sweep")}
-        time.sleep(max(2.0, settle))
-        with self._lock:
-            mh = list(self._maxhold) if self._maxhold else None
-            lo, hi = self._lo_mhz, self._hi_mhz
-        meas = _tone_offset(mh, lo, hi, rf_hz, search_khz=search_khz) if (mh and lo is not None) else None
-        result = None
-        if meas and abs(meas["offset_khz"]) <= search_khz:
-            # On this firmware +FOFS raises the LO, so a fixed carrier reads LOWER:
-            # measured_offset = crystal_error - fofs. The trim that nulls it is
-            # therefore fofs + offset (converges in one step; verified on hardware
-            # it diverges with the opposite sign).
-            new_fofs = max(-_FOFS_LIMIT, min(_FOFS_LIMIT, int(round(fofs + meas["offset_khz"]))))
+
+        def _grab(sec):                                  # AVERAGE the frames over the dwell
+            # Average (not max-hold): the CW pilot is in every frame so it stays
+            # up, while bursty Wi-Fi / BLE is present in only some frames and
+            # averages down — so the tone-on minus tone-off difference isolates
+            # the continuous pilot even on a busy channel.
             with self._lock:
-                self._fofs = new_fofs
-            _save_fofs(new_fofs)
-            result = {"ok": True, "offset_khz": round(meas["offset_khz"], 1), "snr_db": meas["snr_db"],
-                      "measured_hz": round(meas["measured_hz"], 0), "rf_hz": int(rf_hz),
-                      "old_fofs": fofs, "fofs_khz": new_fofs, "fofs_ppm": self._fofs_ppm(new_fofs),
-                      "ref": "HackRF tone", "ts": time.time()}
+                start_seq = self._seq
+            time.sleep(max(1.5, sec))
             with self._lock:
-                self._trim = result
-        self.start(saved[0], lo_mhz=saved[1], hi_mhz=saved[2], fft_bins=saved[3])
-        if result:
-            return result
+                rows = [f["power"] for f in self._frames if f["seq"] > start_seq]
+                glo, ghi = self._lo_mhz, self._hi_mhz
+            if not rows:
+                return None, glo, ghi
+            width = len(rows[0])
+            acc = [0.0] * width
+            cnt = 0
+            for r in rows:
+                if len(r) == width:
+                    for i in range(width):
+                        acc[i] += r[i]
+                    cnt += 1
+            if not cnt:
+                return None, glo, ghi
+            return ([v / cnt for v in acc], glo, ghi)
+
+        baseline = tone = None
+        lo = hi = None
+        txr = {"ok": True}
+        try:
+            if tx_on is not None:
+                baseline, lo, hi = _grab(settle)         # ambient, tone OFF
+                txr = tx_on() or {"ok": True}
+                if txr.get("ok", True):
+                    tone, lo, hi = _grab(settle)         # ambient + tone, tone ON
+            else:
+                tone, lo, hi = _grab(settle)             # legacy single pass (tone already on)
+        finally:
+            if tx_off is not None:
+                try:
+                    tx_off()
+                except Exception:                        # pragma: no cover - defensive
+                    pass
+        self.start(saved[0], lo_mhz=saved[1], hi_mhz=saved[2], fft_bins=saved[3])  # restore view
+
+        if not txr.get("ok", True):
+            return {"ok": False, "error": txr.get("error", "HackRF transmit failed")}
+        if not (tone and lo is not None):
+            return {"ok": False, "error": "no spectrum from the ESP during calibration"}
+        if baseline is not None and len(baseline) == len(tone):
+            spec = [tone[i] - baseline[i] for i in range(len(tone))]   # tone rise over ambient
+            min_snr, kind = 6.0, "rose"
+        else:
+            spec = tone                                  # single-pass fallback
+            min_snr, kind = 10.0, "peaked"
+        meas = _tone_offset(spec, lo, hi, rf_hz, search_khz=search_khz, min_snr=min_snr)
         if meas is None:
-            return {"ok": False, "error": "couldn't see the HackRF pilot tone — check the HackRF is "
-                    "transmitting on %.3f MHz and sitting next to the ESP" % (rf_hz / 1e6)}
-        return {"ok": False, "offset_khz": round(meas["offset_khz"], 1), "snr_db": meas["snr_db"],
-                "error": "the tone read %+d kHz off — beyond the search window; is the HackRF on "
-                         "%.3f MHz?" % (int(meas["offset_khz"]), rf_hz / 1e6)}
+            return {"ok": False, "error": "couldn't see the HackRF pilot %s above the ambient on "
+                    "%.3f MHz — move the HackRF next to the ESP or raise the TX gain" % (kind, rf_hz / 1e6)}
+        if abs(meas["offset_khz"]) > search_khz:
+            return {"ok": False, "offset_khz": round(meas["offset_khz"], 1),
+                    "error": "the tone read %+d kHz off — beyond the search window; is the HackRF on "
+                             "%.3f MHz?" % (int(meas["offset_khz"]), rf_hz / 1e6)}
+        # On this firmware +FOFS raises the LO, so a fixed carrier reads LOWER:
+        # measured_offset = crystal_error - fofs. The trim that nulls it is
+        # fofs + offset (converges in one step; the opposite sign diverges).
+        new_fofs = max(-_FOFS_LIMIT, min(_FOFS_LIMIT, int(round(fofs + meas["offset_khz"]))))
+        with self._lock:
+            self._fofs = new_fofs
+        _save_fofs(new_fofs)
+        result = {"ok": True, "offset_khz": round(meas["offset_khz"], 1), "rise_db": meas["snr_db"],
+                  "snr_db": meas["snr_db"], "measured_hz": round(meas["measured_hz"], 0),
+                  "rf_hz": int(rf_hz), "baseline": baseline is not None,
+                  "old_fofs": fofs, "fofs_khz": new_fofs, "fofs_ppm": self._fofs_ppm(new_fofs),
+                  "ref": "HackRF tone", "ts": time.time()}
+        with self._lock:
+            self._trim = result
+        return result
 
     def calibrate_vs_reference(self, ref_power, ref_lo, ref_hi, label="HackRF", settle=5.0):
         """Calibrate FOFS against a TCXO reference spectrum of the same band.
@@ -1110,8 +1162,9 @@ def auto_trim(settle=6.0):
     return _capture.auto_trim(settle=settle)
 
 
-def calibrate_vs_tone(rf_hz, settle=4.0, search_khz=400.0):
-    return _capture.calibrate_vs_tone(rf_hz, settle=settle, search_khz=search_khz)
+def calibrate_vs_tone(rf_hz, tx_on=None, tx_off=None, settle=3.0, search_khz=400.0):
+    return _capture.calibrate_vs_tone(rf_hz, tx_on=tx_on, tx_off=tx_off,
+                                      settle=settle, search_khz=search_khz)
 
 
 def calibrate_vs_reference(ref_power, ref_lo, ref_hi, label="HackRF", settle=5.0):
@@ -1244,6 +1297,23 @@ def selftest():
     check("tone offset reports SNR", to and to["snr_db"] > 30, "%.0f" % (to["snr_db"] if to else 0))
     check("tone offset None on flat noise",
           _tone_offset([-85.0] * tn, tlo, thi, 2_437_000_000) is None)
+    # Baseline subtraction: a broad ambient Wi-Fi hump peaks at +120 kHz (off the
+    # pilot) in BOTH passes; the tone adds a spike at +40 kHz only in the second.
+    # Raw max-hold would lock the ambient hump; the difference isolates the tone.
+    base = [-85.0] * tn
+    for i in range(tn):                                    # ambient hump centred +120 kHz
+        base[i] = max(base[i], -40.0 - abs(tfreq(i) - 2437.120) * 120.0)
+    raw = _tone_offset(base, tlo, thi, 2_437_000_000)      # no tone yet
+    check("tone offset would mis-lock on a raw ambient hump",
+          raw and abs(raw["offset_khz"] - 120) < 25, "%.0f" % (raw["offset_khz"] if raw else 0))
+    toned = list(base)
+    for i in range(tn):                                    # add the real pilot at +40 kHz
+        if abs(tfreq(i) - 2437.040) <= 0.004:
+            toned[i] = max(toned[i], -20.0)
+    diff = [toned[i] - base[i] for i in range(tn)]
+    dto = _tone_offset(diff, tlo, thi, 2_437_000_000, min_snr=6.0)
+    check("tone offset (differenced) isolates the pilot from the ambient hump",
+          dto and abs(dto["offset_khz"] - 40) < 12, "%.1f" % (dto["offset_khz"] if dto else 0))
 
     ok_all = all(x["ok"] for x in results)
     return {"ok": ok_all, "checks": results,

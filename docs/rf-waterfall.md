@@ -42,15 +42,18 @@ the Pi's USB, and the panel flips live.
     oscillators (averaged across channels).
   - **vs HackRF** (the most accurate, and the recommended option) has the connected
     **HackRF** briefly **transmit a low-power CW pilot tone** at a known frequency
-    (2437.0 MHz by default); the ESP tunes a narrow window around it and locks its
-    crystal onto that one strong, known carrier. Because it keys on a single known
-    tone it is **immune to the ESP's own internal spurs** — which defeat a passive
-    band-shape correlation — and it converges to a sub-ppm residual (a few kHz) in
-    one step. The UI asks before transmitting; keep the HackRF and ESP close (a few
-    cm) and only on your own bench. SNR of the detected tone is reported. Needs a
-    HackRF (a TX-capable SDR). *(A passive, receive-only `{hackrf:1}` cross-correlation
-    also exists but is unreliable on spur-heavy ESP boards — the pilot tone replaced
-    it as the default.)*
+    (**2480 MHz by default** — above Wi-Fi ch1/6/11 and clear of the ESP's internal
+    spurs); the ESP locks its crystal onto that one strong, known carrier. To find
+    the tone reliably even on a busy band it measures **twice — tone off, then on —
+    and differences the two** (cancelling the ESP's fixed spurs and any static
+    ambient), and each measurement is a **frame average** (the continuous pilot
+    stays up while bursty Wi-Fi / BLE averages down). It then takes the one bin the
+    tone adds, so it can't lock onto an ambient carrier, and converges in one step.
+    The UI asks before transmitting; keep the HackRF and ESP close (a few cm) and
+    only on your own bench. The tone's rise over the floor is reported. Needs a
+    HackRF (a TX-capable SDR); pick a different `rf_mhz` if 2480 is noisy for you.
+    *(A passive, receive-only `{hackrf:1}` cross-correlation also exists but is
+    unreliable on spur-heavy ESP boards — the pilot tone replaced it as the default.)*
 
   The trim is applied at the LO (`FOFS`) and persists across restarts
   (`data/esp_sdr_fofs.json`, git-ignored, device-specific). On this firmware
