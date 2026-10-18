@@ -12,7 +12,18 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:  # noqa: BLE001 — SDK optional
+    # The openai SDK may be absent on a lean/airgapped image. Importing this
+    # module must still succeed so the non-LLM helpers (normalize_base_url, the
+    # endpoint discovery/listing routes) keep working; real AI calls raise a
+    # clear, actionable error instead of a 500. Heal with the Ragnar updater or
+    # `pip install "openai>=2.0.0"`.
+    OpenAI = None
+
+_OPENAI_MISSING_MSG = ("The 'openai' package is not installed — run the Ragnar "
+                       "updater, or: pip install 'openai>=2.0.0'.")
 
 from logger import Logger
 from env_manager import EnvManager, load_env
@@ -124,6 +135,12 @@ class AIService:
         # fall back to a harmless placeholder when the operator left it blank.
         if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
+            self.logger.warning(self.initialization_error)
+            return
+
+        if OpenAI is None:
+            self.client = None
+            self.initialization_error = _OPENAI_MISSING_MSG
             self.logger.warning(self.initialization_error)
             return
 
@@ -421,6 +438,8 @@ class AIService:
             return None  # already on the cloud — no separate fallback needed
         if self._fallback_client is not None:
             return self._fallback_client
+        if OpenAI is None:
+            return None  # SDK absent — no cloud fallback possible
         token = self.api_token or self.env_manager.get_token()
         if not token:
             return None

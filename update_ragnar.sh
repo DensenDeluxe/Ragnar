@@ -260,6 +260,17 @@ if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.v
         || echo -e "  ${YELLOW}!${NC} Could not ensure flask-socketio >= 5.6.1 (web terminal may not work)"
 fi
 
+# openai SDK: the AI Insights / self-hosted-endpoint features need it, but the
+# installer only WARNS if its install fails, so some images shipped without it
+# (symptom: /api/ai/models + /api/ai/discover return HTTP 500). The pull above
+# only reinstalls requirements.txt when that file changed, so heal it here on
+# every update if it is missing. Cheap no-op when already present.
+if ! python3 -c 'import openai' 2>/dev/null; then
+    echo -e "  Ensuring the openai SDK (AI Insights / self-hosted endpoints)..."
+    pip3 install --break-system-packages --ignore-installed "openai>=2.0.0" >/dev/null 2>&1 \
+        || echo -e "  ${YELLOW}!${NC} Could not install openai (AI features will show a clear message until it is)"
+fi
+
 echo -e "${BLUE}Step 5.1: Checking package system health...${NC}"
 # apt refuses every operation while a previous dpkg run is unfinished
 # ("E: dpkg was interrupted, you must manually run 'dpkg --configure -a'").

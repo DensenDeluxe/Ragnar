@@ -111,6 +111,18 @@ if [ "$DO_DEPS" = "1" ] && [ -f "$REPO/requirements.txt" ]; then
     fi
 fi
 
+# --- openai SDK self-heal ---------------------------------------------------
+# AI Insights + the self-hosted-endpoint panel need the openai SDK, but the
+# installer only warns if it fails, so some images shipped without it (symptom:
+# /api/ai/* -> HTTP 500). The deps block above only runs when requirements.txt
+# changed, so ensure it here on every web update too. Cheap no-op when present.
+if ! python3 -c 'import openai' 2>/dev/null; then
+    step "openai SDK (AI features)"
+    PIP_ARGS="--break-system-packages"
+    pip3 install --help 2>/dev/null | grep -q -- '--break-system-packages' || PIP_ARGS=""
+    pip3 install $PIP_ARGS --ignore-installed "openai>=2.0.0" || fail "could not install openai (AI features show a clear message until it is)"
+fi
+
 # --- data files -------------------------------------------------------------
 if [ -f "$REPO/init_data_files.sh" ]; then
     step "data file templates"
