@@ -28938,6 +28938,14 @@ function ulfLoadPlaybooks() {
     }).catch(() => {});
 }
 
+function ulfToggleLibrary() {
+    const body = document.getElementById('ulf-library-body');
+    const chev = document.getElementById('ulf-lib-chevron');
+    if (!body) return;
+    const collapsed = body.classList.toggle('hidden');   // true => now hidden
+    if (chev) chev.style.transform = collapsed ? '' : 'rotate(90deg)';
+}
+
 function ulfRenderLibrary() {
     const lib = document.getElementById('ulf-library');
     const cnt = document.getElementById('ulf-lib-count');
@@ -28985,7 +28993,7 @@ function ulfPlaybookDesc() {
     if (!p) { desc.textContent = ''; return; }
     const steps = (p.steps || []).map(s => s.phase + '/' + s.action + (s.active ? '*' : '')).join('  →  ');
     desc.innerHTML = _esc(p.description || '') + '<br><span class="text-gray-600">' + _esc(steps) +
-        (p.active_steps ? '   ·   * = active step (needs attacks enabled)' : '') + '</span>';
+        (p.active_steps ? '   ·   * = active step (runs when active assessment is on)' : '') + '</span>';
 }
 
 function ulfUploadPlaybook(input) {
@@ -29036,7 +29044,7 @@ function ulfShowHelp() {
     let t = 'PLAYBOOK FORMAT (.json)\n\n' + JSON.stringify(example, null, 2) + '\n\n';
     t += 'ACTIONS: ' + (cat.actions || []).map(a => a.action).join(', ') + '\n\n';
     t += 'ALLOWLISTED TOOLS (command action): ' + (cat.tools || []).join(', ') + '\n\n';
-    t += 'ACTIVE TOOLS (need attacks enabled): ' + (cat.active_tools || []).join(', ') + '\n\n';
+    t += 'ACTIVE TOOLS (run only with active assessment on): ' + (cat.active_tools || []).join(', ') + '\n\n';
     t += 'PLACEHOLDERS: ' + (cat.placeholders || []).join(', ') + '\n\n';
     t += 'Steps marked "active": true (and assessment actions) run only with active testing enabled.\n';
     t += 'command args are validated: allowlisted tool only, no shell metacharacters, argv (never a shell).';
