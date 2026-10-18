@@ -25544,6 +25544,7 @@ def list_files_api():
                 {'name': 'backups', 'is_directory': True, 'path': '/backups'},
                 {'name': 'uploads', 'is_directory': True, 'path': '/uploads'},
                 {'name': 'console_scripts', 'is_directory': True, 'path': '/console_scripts'},
+                {'name': 'engagement_playbooks', 'is_directory': True, 'path': '/engagement_playbooks'},
                 {'name': 'rubber-ducky', 'is_directory': True, 'path': '/rubber-ducky'}
             ])
         
@@ -25584,6 +25585,12 @@ def list_files_api():
             try:
                 actual_path = _resolve_legacy_path('/console_scripts',
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), path)
+            except ValueError:
+                return jsonify({'error': 'Invalid path'}), 400
+        elif path == '/engagement_playbooks' or path.startswith('/engagement_playbooks/'):
+            try:
+                actual_path = _resolve_legacy_path('/engagement_playbooks',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'engagement_playbooks'), path)
             except ValueError:
                 return jsonify({'error': 'Invalid path'}), 400
         elif path == '/rubber-ducky' or path.startswith('/rubber-ducky/'):
@@ -25694,6 +25701,12 @@ def preview_file_api():
             try:
                 actual_path = _resolve_legacy_path('/console_scripts',
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid path'}), 400
+        elif file_path == '/engagement_playbooks' or file_path.startswith('/engagement_playbooks/'):
+            try:
+                actual_path = _resolve_legacy_path('/engagement_playbooks',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'engagement_playbooks'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid path'}), 400
         elif file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
@@ -25853,6 +25866,12 @@ def download_file_api():
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid file path'}), 400
+        elif file_path == '/engagement_playbooks' or file_path.startswith('/engagement_playbooks/'):
+            try:
+                actual_path = _resolve_legacy_path('/engagement_playbooks',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'engagement_playbooks'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid file path'}), 400
         elif file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
             try:
                 actual_path = _resolve_legacy_path('/rubber-ducky',
@@ -25940,6 +25959,12 @@ def delete_file_api():
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid file path'}), 400
+        elif file_path == '/engagement_playbooks' or file_path.startswith('/engagement_playbooks/'):
+            try:
+                actual_path = _resolve_legacy_path('/engagement_playbooks',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'engagement_playbooks'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid file path'}), 400
         elif file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
             try:
                 actual_path = _resolve_legacy_path('/rubber-ducky',
@@ -25986,6 +26011,9 @@ def _resolve_upload_target(target_path):
     if target_path == '/console_scripts' or target_path.startswith('/console_scripts/'):
         return _resolve_legacy_path('/console_scripts',
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), target_path)
+    if target_path == '/engagement_playbooks' or target_path.startswith('/engagement_playbooks/'):
+        return _resolve_legacy_path('/engagement_playbooks',
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'engagement_playbooks'), target_path)
     raise ValueError('Invalid upload path')
 
 
@@ -26017,6 +26045,9 @@ def _resolve_readable_path(file_path):
     if file_path == '/console_scripts' or file_path.startswith('/console_scripts/'):
         return _resolve_legacy_path('/console_scripts',
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
+    if file_path == '/engagement_playbooks' or file_path.startswith('/engagement_playbooks/'):
+        return _resolve_legacy_path('/engagement_playbooks',
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'engagement_playbooks'), file_path)
     if file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
         return _resolve_legacy_path('/rubber-ducky',
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), file_path)
@@ -27204,17 +27235,43 @@ def get_edition_api():
 # ULFBERHT ENGAGEMENT ENGINE  (official Ulfberht image only -- marker-gated)
 # ============================================================================
 
-@app.route('/api/ulfberht/playbooks')
+@app.route('/api/ulfberht/playbooks', methods=['GET', 'POST'])
 def ulfberht_playbooks_api():
-    """List engagement playbooks. Empty + enabled=false off the Ulfberht image."""
+    """GET: list engagement playbooks (built-in + uploaded, with validity).
+    POST: create/overwrite a user playbook (JSON body: {name, playbook|content}).
+    Empty + enabled=false off the Ulfberht image."""
     try:
         import ulfberht_engine
         if not ulfberht_engine.is_enabled():
             return jsonify({"enabled": False, "playbooks": []})
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            name = data.get('name') or (data.get('playbook') or {}).get('name') \
+                or (data.get('playbook') or {}).get('id')
+            content = data.get('playbook', data.get('content'))
+            if content is None:
+                return jsonify({"success": False, "error": "Missing 'playbook' body."}), 400
+            res = ulfberht_engine.save_playbook(name, content)
+            return jsonify(res), (200 if res.get('success') else 400)
+        ulfberht_engine.ensure_examples()
         return jsonify({"enabled": True, "playbooks": ulfberht_engine.list_playbooks(),
-                        "runs": ulfberht_engine.list_runs()})
+                        "runs": ulfberht_engine.list_runs(),
+                        "catalog": ulfberht_engine.list_action_catalog()})
     except Exception as e:
         return jsonify({"enabled": False, "playbooks": [], "error": str(e)})
+
+
+@app.route('/api/ulfberht/playbooks/<playbook_id>', methods=['DELETE'])
+def ulfberht_playbook_delete_api(playbook_id):
+    """Delete an uploaded (user) playbook. Built-ins cannot be deleted."""
+    try:
+        import ulfberht_engine
+        if not ulfberht_engine.is_enabled():
+            return jsonify({"error": "not available"}), 403
+        res = ulfberht_engine.delete_playbook(playbook_id)
+        return jsonify(res), (200 if res.get('success') else 400)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/ulfberht/run', methods=['POST'])
