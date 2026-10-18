@@ -260,8 +260,12 @@ ensure_dpkg_healthy() {
 
     echo "[WARN] dpkg is in an interrupted state — repairing before installing"
     write_status "installing" "Repairing interrupted package state" "apt_repair"
-    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+    # --force-confdef/--force-confold: keep the shipped conffiles so a package
+    # deferred during a chroot image build (systemd/dbus on Kali) configures
+    # non-interactively instead of stopping at a conffile prompt.
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold >/dev/null 2>&1 || true
 
     if [[ -n "$(dpkg --audit 2>/dev/null)" ]]; then
         echo "[WARN] dpkg still reports problems — package installs may fail"
@@ -414,8 +418,21 @@ python3 -m pip install \
     --extra-index-url https://www.piwheels.org/simple \
     PyYAML dbus-python file-read-backwards flask flask-cors flask-wtf \
     gast gpiozero inky numpy pycryptodome python-dateutil requests \
-    rpi-lgpio rpi_hardware_pwm scapy setuptools shimmy smbus2 spidev \
+    rpi_hardware_pwm scapy setuptools shimmy smbus2 spidev \
     tomlkit toml tweepy websockets pisugar python-prctl 2>&1 || true
+
+# rpi-lgpio (the RPi.GPIO shim pwnagotchi needs) is pure-Python, but it depends
+# on lgpio, whose only PyPI release (0.2.2.0) uses removed Python-2 C API and
+# will NOT compile on Kali's Python 3.14. Left in the shared batch above, that
+# one build failure aborts the ENTIRE pip call, so even python-prctl never
+# lands — which is the "No module named 'prctl'" crash loop. Install it in its
+# OWN best-effort call with --no-deps so the un-buildable lgpio is skipped; a
+# headless pwnagotchi never touches GPIO at runtime, so the shim alone suffices.
+python3 -m pip install \
+    --break-system-packages \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://www.piwheels.org/simple \
+    --no-deps rpi-lgpio 2>&1 || true
 
 # pydrive2 is a hard dependency (pwnagotchi crashes without it).
 # Force PyPI only - piwheels drops connections on large packages like google-api-python-client.

@@ -4,6 +4,13 @@
 
 ### 2026-10-18
 
+#### [#983](https://github.com/PierreGode/Ragnar/pull/983) — fix(ulfberht): kiosk + pwnagotchi install on the Kali base
+*branch `fix/kiosk-pwn-apt-confold`*
+
+- Both the on-screen **kiosk** and **pwnagotchi** failed to install on the Kali-based Ulfberht image, for two Kali-specific reasons (verified live on the device).
+- **First apt stalled on a conffile prompt.** A chroot-built image ships `systemd`/`dbus` unpacked-but-not-configured (no running init in the chroot), so the first real apt on the device — the kiosk or pwnagotchi installer — stopped at `system.conf (Y/I/N/O/D/Z)?` and aborted. `ragnar-firstboot.sh` now configures the chroot-deferred packages on first boot with `--force-confdef --force-confold` (the root fix); `install_kiosk.sh` gained the same repair before its apt (it had none); `install_pwnagotchi.sh`'s `ensure_dpkg_healthy` now forces the conffiles too.
+- **pwnagotchi: `lgpio` won't build on Python 3.14.** Kali rolling is on py3.14; `rpi-lgpio` pulls `lgpio`, whose only PyPI release uses removed Python-2 C API and fails to compile, and in the shared pip batch that aborted the whole call so `python-prctl` never installed (→ the `No module named 'prctl'` crash loop). Fix: install `rpi-lgpio` in its own best-effort `--no-deps` call, skipping the un-buildable `lgpio` — a headless pwnagotchi never uses GPIO at runtime. Result on the device: kiosk installs; `pwnagotchi.service` active, web UI `:8080` → 200, no crash.
+
 #### [#982](https://github.com/PierreGode/Ragnar/pull/982) — feat(ulfberht): Engagements UX — active phase authorized by the edition, collapsible playbook library
 *branch `feature/ulfberht-engagements-ux`*
 

@@ -50,6 +50,21 @@ fi
 log "First boot — finalising this device"
 log "Board: $(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 
+# ── 0a. Configure chroot-deferred packages ─────────────────────────────────
+# A Kali/Debian image built in a chroot leaves systemd/dbus (and friends)
+# unpacked-but-NOT-configured — there is no running init inside the chroot to
+# configure them, so dpkg defers it. On this first real boot systemd IS up, so
+# finish their configuration now, force-keeping the shipped conffiles so it can
+# never stop at an interactive prompt. Without this the FIRST apt on the device
+# (e.g. the web UI installing the on-screen kiosk or Pwnagotchi) stalls on a
+# "system.conf (Y/I/N/O/D/Z)?" question and the install aborts.
+if [ -n "$(dpkg --audit 2>/dev/null)" ] || [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ]; then
+    log "Configuring chroot-deferred packages (dpkg --configure -a, keeping shipped conffiles)"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold >/dev/null 2>&1 || true
+fi
+
 # ── 0. Unblock radios ──────────────────────────────────────────────────────
 # A freshly flashed image can come up with Wi-Fi/Bluetooth soft-blocked by
 # rfkill; unblock so the radios work out of the box. (ragnar.service also runs

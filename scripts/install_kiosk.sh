@@ -201,6 +201,18 @@ if [[ -z "${KIOSK_USER:-}" ]]; then
     exit 1
 fi
 
+# Clear any half-configured packages before apt runs. A Kali/Debian image built
+# in a chroot ships systemd/dbus unpacked-but-not-configured (no running init in
+# the chroot to configure them), so the FIRST real apt on the device otherwise
+# stops at a "system.conf (Y/I/N/O/D/Z)?" conffile prompt and this install
+# aborts. Force-keep the shipped conffiles so the configure completes silently.
+if [[ -n "$(dpkg --audit 2>/dev/null)" ]] || [[ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ]]; then
+    echo "[kiosk-install] repairing half-configured packages before apt"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold >/dev/null 2>&1 || true
+fi
+
 # Package installation depends on mode.
 PKGS_TO_INSTALL=()
 if [[ "$HAS_BROWSER" -eq 0 ]]; then
