@@ -13,7 +13,8 @@
 - **Two further v3 CVEs are routed, not duplicated here:** the **xt_tls SNI `host_name` over-read** (CVE-2026-52346 → **TLS Watch**) and the **labelled-VPN MP_REACH NLRI** under-flow (CVE-2026-93345 → **BGP Path Watch**), each handled where the decoder already lives. `MTK-C02` / `MTK-C03` remain deferred (cross-flow / cross-time correlations; `MTK-C02` also needs the unported `MTK-018`).
 - **CVE index +3 named / +3 detected → 399 named / 339 detected.** CVE-2026-56719, CVE-2026-89028 and CVE-2026-84411 all attribute to **MikroTik Guard** (all 2026, so the 2026 tally is 52 → 55); context (51) unchanged. CREDITS.md / README.md counts synced.
 - **Self-test:** the `mikrotik_guard` suite grows **27 → 46** scenarios — MTK-022 well-formed / minimal-crafted / under-flow-only / not-`uniPwdLen`→`MTK-002` / WordCount-12 gate / snaplen-truncation-no-FP, and MTK-023 six malformation cases + a well-formed FP guard + the MNDP version posture + a patched-version negative + registry wiring. Aggregate `do_routing_selftest` **59 suites**, all green.
-- **Docs:** [nettools.md › MikroTik Guard](nettools.md#mikrotik-switch-and-router-guard).
+- **Visibility matrix refresh.** The *Module visibility matrix* reference graphic (OSI layer × vantage tier) is updated to the current module set — the full image (`web/images/osi/matrix_full.jpg`), all seven per-layer bands (`matrix_l1…l7.jpg`) re-sliced from it, and the docs copy (`docs/ragnar_osi_visibility_matrix.jpg`); image cache-bust bumped to `?v=20261018-mikrotik-v3`.
+- **Docs:** [nettools.md › MikroTik Guard](nettools.md#mikrotik-switch-and-router-guard), [nettools.md › Module visibility matrix](nettools.md#module-visibility-matrix).
 - *Note: PR number is a prediction. This branch and `feature/tls-watch-v9` both branch off `main`; whichever merges second will need a trivial reconcile on `docs/releases.md` and the CVE-count lines in `README.md` / `docs/CREDITS.md`.*
 
 ### 2026-10-17
