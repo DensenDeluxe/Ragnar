@@ -4,6 +4,12 @@
 
 ### 2026-10-18
 
+#### [#986](https://github.com/PierreGode/Ragnar/pull/986) — feat(ulfberht): Engagements scope accepts a targets file
+*branch `feature/ulfberht-scope-file`*
+
+- The Engagements run form took a single IP/CIDR/host; you can now also **load a targets file** (one IP/CIDR/host per line; blank lines and `#` comments ignored) and the engagement runs against all of them.
+- Engine: `start_run` takes a `targets` list; scope is a validated target **list** internally (`run['targets']`) with a per-target regex (no spaces/shell metacharacters) + a 4096 cap. nmap discovery scans all targets, `{scope}` expands to all of them, the report lists them when >1. `POST /api/ulfberht/run` accepts `{targets:[…]}`. UI: a "load a targets file" picker that parses the file in the browser. Single-scope behavior unchanged.
+
 #### [#985](https://github.com/PierreGode/Ragnar/pull/985) — feat(ulfberht): Arsenal "Build playbook" opens an editor before saving
 *branch `feature/ulfberht-arsenal-editor`*
 

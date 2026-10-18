@@ -27302,8 +27302,11 @@ def ulfberht_run_api():
             return jsonify({"error": "Ulfberht engine is available only on the Ragnar OS Ulfberht image."}), 403
         data = request.get_json(silent=True) or {}
         active = bool(data.get('enable_active'))
+        # scope is a single IP/CIDR/host; targets is an optional list (e.g. from
+        # an uploaded targets file, one per line) and takes precedence.
         run_id, err = ulfberht_engine.start_run(
-            data.get('playbook', ''), data.get('scope', ''), enable_active=active)
+            data.get('playbook', ''), data.get('scope', ''),
+            enable_active=active, targets=data.get('targets'))
         if err:
             return jsonify({"error": err}), 400
         return jsonify({"run_id": run_id, "active": active, "active_blocked": False})
