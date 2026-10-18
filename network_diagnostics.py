@@ -32074,13 +32074,44 @@ def register_network_diagnostics(app, logger=None):
             if not mh or not bm:
                 return jsonify({"ok": False, "error": "HackRF produced no spectrum — check the device"})
             return jsonify(esp_sdr.calibrate_vs_reference(mh, bm[0], bm[1], label='HackRF'))
+        if data.get('tone'):
+            # Robust HackRF cross-calibration: the HackRF TRANSMITS a single CW
+            # pilot tone at a known frequency and the ESP locks onto that one
+            # strong carrier (immune to the ESP's own spurs that defeat the
+            # passive band-shape correlation above). Very low power — the ESP is
+            # centimetres away. Transmit only for the measurement, then stop.
+            _log("net/esp/trim tone")
+            hk = sdr_spectrum.status()
+            if not (hk.get('detect') or {}).get('available'):
+                return jsonify({"ok": False, "error": "no HackRF detected — connect a HackRF "
+                                "to transmit the pilot tone"})
+            try:
+                rf_mhz = float(data.get('rf_mhz') or 2437.0)
+            except (TypeError, ValueError):
+                return _bad('Invalid rf_mhz')
+            try:
+                tx_vga = int(data.get('tx_vga')) if data.get('tx_vga') is not None else 30
+            except (TypeError, ValueError):
+                return _bad('Invalid tx_vga')
+            rf_hz = rf_mhz * 1e6
+            tx = sdr_spectrum.transmit_tone(rf_hz, tx_vga=tx_vga)
+            if not tx.get('ok'):
+                return jsonify(tx)
+            try:
+                res = esp_sdr.calibrate_vs_tone(rf_hz)
+            finally:
+                sdr_spectrum.tx_tone_stop()
+            if isinstance(res, dict):
+                res.setdefault('rf_mhz', rf_mhz)
+                res['tx'] = {"rf_hz": tx.get('rf_hz'), "tx_vga": tx.get('tx_vga'), "amp": tx.get('amp')}
+            return jsonify(res)
         if data.get('auto'):
             _log("net/esp/trim auto")
             return jsonify(esp_sdr.auto_trim())
         if 'khz' in data:
             _log(f"net/esp/trim khz={data.get('khz')}")
             return jsonify(esp_sdr.set_fofs(data.get('khz')))
-        return _bad('Pass {"hackrf":true}, {"auto":true}, or {"khz":N}')
+        return _bad('Pass {"tone":true}, {"hackrf":true}, {"auto":true}, or {"khz":N}')
 
     # ------------------------------------------------------------------
     # Sub-GHz true-RF power sweep / waterfall via an RTL-SDR (rtl_sdr.py).

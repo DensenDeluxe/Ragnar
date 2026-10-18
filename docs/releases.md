@@ -4,6 +4,11 @@
 
 ### 2026-10-18
 
+#### feat(sdr): ESP-SDR crystal trim via a HackRF pilot tone
+*branch `feature/esp-hackrf-pilot-tone-cal`*
+
+- The ESP-SDR's **vs HackRF** frequency trim now works by having the HackRF **briefly transmit a low-power CW pilot tone** (2437.0 MHz by default) that the TCXO-less ESP locks its crystal onto. Keying on one strong, known carrier makes it **immune to the ESP's internal spurs** — which defeated the old passive band-shape cross-correlation (it measured ≈0 correlation on real hardware and never produced a trim). On the bench it converges to a **sub-ppm residual (a few kHz) in one step** at ~34 dB tone SNR. The UI confirms before transmitting and shows the detected SNR; keep the two radios a few cm apart. New `sdr_spectrum.transmit_tone` / `tx_tone_stop` (loops a seamless cs8 IQ buffer through `hackrf_transfer -t … -R`, PA off, modest TX-VGA) and `esp_sdr.calibrate_vs_tone`; route `POST /api/net/esp/trim {"tone":1[,"rf_mhz":M,"tx_vga":G]}` (legacy passive `{"hackrf":1}` kept as a fallback). Fixed the FOFS correction **sign** for this firmware (`+FOFS` raises the LO → trim is `fofs + offset`; the old sign diverged). `sdr_spectrum --selftest` 33/33, `esp_sdr --selftest` green (new pure tone-IQ + tone-offset checks). Validated end-to-end on a HackRF One + ESP32-S3. Docs: [RF Waterfall → Frequency trim](rf-waterfall.md).
+
 #### [#978](https://github.com/PierreGode/Ragnar/pull/978) — feat(net): MikroTik Switch & Router Guard v3 — SMB1 SessionSetupAndX + web-mgmt body-length (Oct 2026 audit)
 *branch `feature/mikrotik-guard-v3`*
 

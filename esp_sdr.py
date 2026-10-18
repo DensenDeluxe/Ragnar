@@ -308,6 +308,41 @@ def _wifi_offset(power, lo_mhz, hi_mhz):
             "n": len(found), "confident": confident}
 
 
+def _tone_offset(power, lo_mhz, hi_mhz, rf_hz, search_khz=400.0, min_snr=10.0):
+    """Frequency offset (kHz) of a HackRF CW pilot tone known to be at ``rf_hz``.
+
+    Looks only within +-``search_khz`` of ``rf_hz`` for the strongest bin — a
+    narrow window the ESP's crystal error can never exceed, which excludes the
+    chip's fixed internal spurs elsewhere in the band. Interpolates the sub-bin
+    peak. Returns {offset_khz, snr_db, measured_hz, bin} or None when no tone
+    stands clearly above the floor. ``offset = measured - true`` (same sign
+    convention as _wifi_offset). Pure.
+    """
+    n = len(power) if power else 0
+    if n < 16 or not (hi_mhz > lo_mhz):
+        return None
+    span = hi_mhz - lo_mhz
+    freq = lambda i: lo_mhz + (i + 0.5) * span / n          # MHz
+    rf_mhz = rf_hz / 1e6
+    win = [i for i in range(n) if abs(freq(i) - rf_mhz) <= search_khz / 1000.0]
+    if len(win) < 5:
+        return None
+    floor = sorted(power)[n // 5]                           # global 20th-pct noise floor
+    pk = max(win, key=lambda i: power[i])
+    snr = power[pk] - floor
+    if snr < min_snr:
+        return None
+    if 0 < pk < n - 1:                                      # parabolic sub-bin peak
+        y0, y1, y2 = power[pk - 1], power[pk], power[pk + 1]
+        denom = y0 - 2 * y1 + y2
+        d = max(-1.0, min(1.0, 0.5 * (y0 - y2) / denom)) if denom else 0.0
+    else:
+        d = 0.0
+    meas_mhz = lo_mhz + (pk + 0.5 + d) * span / n
+    return {"offset_khz": (meas_mhz - rf_mhz) * 1000.0, "snr_db": round(snr, 1),
+            "measured_hz": meas_mhz * 1e6, "bin": pk}
+
+
 # --------------------------------------------------------------------------
 # Low-level serial helpers
 # --------------------------------------------------------------------------
@@ -877,6 +912,60 @@ class EspCapture:
         return {"ok": False, "error": "no clean 2.4 GHz Wi-Fi channel to lock onto — "
                 "needs ch 1/6/11 traffic; try again near an access point"}
 
+    def calibrate_vs_tone(self, rf_hz, settle=4.0, search_khz=400.0):
+        """Trim the crystal against a HackRF CW pilot tone known to be at ``rf_hz``.
+
+        The caller (the web route) has the HackRF transmitting a single carrier
+        at ``rf_hz``. We tune the ESP to a narrow window around it, max-hold a
+        few seconds, locate that one strong known bin (immune to the ESP's own
+        spurs, which the band-shape correlation could not get past) and set FOFS
+        so the tone reads true. Restores the previous view. Blocks ~``settle`` s.
+        """
+        with self._lock:
+            supported = self._fofs_ok
+            saved = self._last_start
+            fofs = self._fofs
+            have_device = bool(self._identity) or bool(self._thread and self._thread.is_alive())
+        if serial is None or not have_device:
+            return {"ok": False, "error": "no ESP-SDR node detected"}
+        if not supported:
+            return {"ok": False, "error": "this ESP chip has no FOFS trim (S3/S31 only)"}
+        center = rf_hz / 1e6
+        half = 5.0                                       # +-5 MHz window, 2048 bins (~5 kHz/bin)
+        r = self.start(band=None, lo_mhz=center - half, hi_mhz=center + half, fft_bins=2048)
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error", "could not start measurement sweep")}
+        time.sleep(max(2.0, settle))
+        with self._lock:
+            mh = list(self._maxhold) if self._maxhold else None
+            lo, hi = self._lo_mhz, self._hi_mhz
+        meas = _tone_offset(mh, lo, hi, rf_hz, search_khz=search_khz) if (mh and lo is not None) else None
+        result = None
+        if meas and abs(meas["offset_khz"]) <= search_khz:
+            # On this firmware +FOFS raises the LO, so a fixed carrier reads LOWER:
+            # measured_offset = crystal_error - fofs. The trim that nulls it is
+            # therefore fofs + offset (converges in one step; verified on hardware
+            # it diverges with the opposite sign).
+            new_fofs = max(-_FOFS_LIMIT, min(_FOFS_LIMIT, int(round(fofs + meas["offset_khz"]))))
+            with self._lock:
+                self._fofs = new_fofs
+            _save_fofs(new_fofs)
+            result = {"ok": True, "offset_khz": round(meas["offset_khz"], 1), "snr_db": meas["snr_db"],
+                      "measured_hz": round(meas["measured_hz"], 0), "rf_hz": int(rf_hz),
+                      "old_fofs": fofs, "fofs_khz": new_fofs, "fofs_ppm": self._fofs_ppm(new_fofs),
+                      "ref": "HackRF tone", "ts": time.time()}
+            with self._lock:
+                self._trim = result
+        self.start(saved[0], lo_mhz=saved[1], hi_mhz=saved[2], fft_bins=saved[3])
+        if result:
+            return result
+        if meas is None:
+            return {"ok": False, "error": "couldn't see the HackRF pilot tone — check the HackRF is "
+                    "transmitting on %.3f MHz and sitting next to the ESP" % (rf_hz / 1e6)}
+        return {"ok": False, "offset_khz": round(meas["offset_khz"], 1), "snr_db": meas["snr_db"],
+                "error": "the tone read %+d kHz off — beyond the search window; is the HackRF on "
+                         "%.3f MHz?" % (int(meas["offset_khz"]), rf_hz / 1e6)}
+
     def calibrate_vs_reference(self, ref_power, ref_lo, ref_hi, label="HackRF", settle=5.0):
         """Calibrate FOFS against a TCXO reference spectrum of the same band.
 
@@ -1021,6 +1110,10 @@ def auto_trim(settle=6.0):
     return _capture.auto_trim(settle=settle)
 
 
+def calibrate_vs_tone(rf_hz, settle=4.0, search_khz=400.0):
+    return _capture.calibrate_vs_tone(rf_hz, settle=settle, search_khz=search_khz)
+
+
 def calibrate_vs_reference(ref_power, ref_lo, ref_hi, label="HackRF", settle=5.0):
     return _capture.calibrate_vs_reference(ref_power, ref_lo, ref_hi, label=label, settle=settle)
 
@@ -1132,6 +1225,25 @@ def selftest():
           "%.0f kHz" % (xc["offset_khz"] if xc else 0))
     check("xcorr high correlation", xc and xc["corr"] > 0.9, "corr %.2f" % (xc["corr"] if xc else 0))
     check("xcorr None on noise", _xcorr_offset([-90.0] * nb, rlo, rhi, [-90.0] * 512, rlo, rhi) is None)
+
+    # Pilot-tone offset: a strong bin ~+40 kHz off a 2437 MHz tone is located,
+    # a fixed spur well outside the search window is ignored, flat noise -> None.
+    tn = 2048
+    tlo, thi = 2432.0, 2442.0                               # +-5 MHz window around 2437
+    tfreq = lambda i: tlo + (i + 0.5) * (thi - tlo) / tn
+    tr3 = [-85.0] * tn
+    for i in range(tn):                                     # the real pilot: 2437.040 MHz
+        if abs(tfreq(i) - 2437.040) <= 0.004:
+            tr3[i] = -25.0
+    for i in range(tn):                                     # a decoy spur 2.0 MHz away (outside ±400 kHz)
+        if abs(tfreq(i) - 2439.0) <= 0.004:
+            tr3[i] = -22.0
+    to = _tone_offset(tr3, tlo, thi, 2_437_000_000, search_khz=400.0)
+    check("tone offset finds the +40 kHz pilot (ignores far spur)",
+          to and abs(to["offset_khz"] - 40) < 12, "%.1f kHz" % (to["offset_khz"] if to else 0))
+    check("tone offset reports SNR", to and to["snr_db"] > 30, "%.0f" % (to["snr_db"] if to else 0))
+    check("tone offset None on flat noise",
+          _tone_offset([-85.0] * tn, tlo, thi, 2_437_000_000) is None)
 
     ok_all = all(x["ok"] for x in results)
     return {"ok": ok_all, "checks": results,
