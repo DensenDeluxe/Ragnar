@@ -66,6 +66,13 @@ in the **Files tab** (exactly like Device Console scripts and Rubber Ducky
 payloads), where you can edit or delete them. Uploaded playbooks are validated
 on load — an invalid one is shown with the reason and cannot be run.
 
+**Or build one from the Arsenal.** On the **Pentest** tab, the **Ulfberht
+Arsenal** lists every offensive tool detected on the image. Click the tools you
+want, give it a name, and **Build playbook** — a valid, methodology-ordered
+playbook is generated from your selection (an nmap discovery sweep + a posture
+pass are added automatically, then your tools as assessment steps, then a
+report) and saved to `engagement_playbooks`, ready to run or refine in Files.
+
 ```json
 {
   "id": "my-playbook",

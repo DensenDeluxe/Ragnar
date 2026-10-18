@@ -831,6 +831,84 @@ def save_playbook(name, content):
     return res
 
 
+# ── Arsenal → playbook builder ──────────────────────────────────────────────
+# Sensible starting steps per tool, so selecting tools in the Pentest-tab
+# Arsenal generates a runnable, methodology-ordered playbook. Everything is a
+# starting point the operator refines in the Files tab. Keyed by tool binary;
+# (phase, action, params). Tools without a template get a generic command step
+# targeting {scope} that the operator must edit (Wi-Fi / cracking / interactive
+# tools especially — they need a capture, a wordlist, or non-interactive args).
+_TOOL_STEP_TEMPLATES = {
+    "nmap":          ("discovery",  "nmap",    {"ports": "top-100", "service_version": True}),
+    "masscan":       ("discovery",  "command", {"tool": "masscan", "args": ["-p1-1000", "--rate", "1000", "{scope}"]}),
+    "arp-scan":      ("discovery",  "command", {"tool": "arp-scan", "args": ["{scope}"]}),
+    "fping":         ("discovery",  "command", {"tool": "fping", "args": ["-a", "-g", "{scope}"]}),
+    "nbtscan":       ("discovery",  "command", {"tool": "nbtscan", "args": ["{scope}"]}),
+    "dig":           ("discovery",  "command", {"tool": "dig", "args": ["{scope}"]}),
+    "whois":         ("discovery",  "command", {"tool": "whois", "args": ["{scope}"]}),
+    "whatweb":       ("diagnostics", "command", {"tool": "whatweb", "args": ["--no-errors", "{web_urls}"], "per_target": True}),
+    "nuclei":        ("assessment", "nuclei",  {"severity": ["medium", "high", "critical"]}),
+    "nikto":         ("assessment", "command", {"tool": "nikto", "args": ["-ask", "no", "-nointeractive", "-host", "{web_urls}"], "per_target": True}),
+    "sqlmap":        ("assessment", "command", {"tool": "sqlmap", "args": ["-u", "{web_urls}", "--batch", "--crawl=1"], "per_target": True}),
+    "wpscan":        ("assessment", "command", {"tool": "wpscan", "args": ["--url", "{web_urls}", "--no-banner"], "per_target": True}),
+    "gobuster":      ("assessment", "command", {"tool": "gobuster", "args": ["dir", "-u", "{web_urls}", "-w", "/usr/share/wordlists/dirb/common.txt"], "per_target": True}),
+    "ffuf":          ("assessment", "command", {"tool": "ffuf", "args": ["-u", "{web_urls}/FUZZ", "-w", "/usr/share/wordlists/dirb/common.txt"], "per_target": True}),
+    "feroxbuster":   ("assessment", "command", {"tool": "feroxbuster", "args": ["-u", "{web_urls}"], "per_target": True}),
+    "sslscan":       ("assessment", "command", {"tool": "sslscan", "args": ["{web_urls}"], "per_target": True}),
+    "testssl.sh":    ("assessment", "command", {"tool": "testssl.sh", "args": ["{web_urls}"], "per_target": True}),
+    "enum4linux-ng": ("assessment", "command", {"tool": "enum4linux-ng", "args": ["-A", "{host}"], "per_host": True}),
+    "enum4linux":    ("assessment", "command", {"tool": "enum4linux", "args": ["-a", "{host}"], "per_host": True}),
+    "smbclient":     ("assessment", "command", {"tool": "smbclient", "args": ["-L", "{host}", "-N"], "per_host": True}),
+    "netexec":       ("assessment", "command", {"tool": "netexec", "args": ["smb", "{host}"], "per_host": True}),
+    "snmpwalk":      ("assessment", "command", {"tool": "snmpwalk", "args": ["-v2c", "-c", "public", "{host}"], "per_host": True}),
+    "onesixtyone":   ("assessment", "command", {"tool": "onesixtyone", "args": ["{host}"], "per_host": True}),
+}
+
+
+def suggest_step(tool):
+    """Return a starting playbook step for a tool binary."""
+    tmpl = _TOOL_STEP_TEMPLATES.get(tool)
+    if tmpl:
+        phase, action, params = tmpl
+        step = {"phase": phase, "action": action, "params": dict(params)}
+    else:
+        # No template (Wi-Fi/cracking/interactive/unknown) — a safe editable
+        # placeholder confined to {scope}; the operator fills in real args.
+        step = {"phase": "assessment", "action": "command",
+                "params": {"tool": tool, "args": ["{scope}"]}}
+    if _ALLOWED_TOOLS.get(tool, {}).get("active"):
+        step["active"] = True
+    return step
+
+
+def build_playbook_from_tools(name, tools, description=None):
+    """Assemble a methodology-ordered playbook from a list of tool binaries
+    (as picked in the Arsenal) and save it. Always includes an nmap discovery
+    sweep (so {host}/{web_urls}/{ports} resolve), a posture pass, and a report."""
+    tools = [t for t in (tools or []) if t in _ALLOWED_TOOLS]
+    if not name:
+        return {"success": False, "error": "Playbook needs a name."}
+    if not tools:
+        return {"success": False, "error": "Select at least one tool."}
+    steps = []
+    if "nmap" not in tools:   # ensure discovery populates the target placeholders
+        steps.append({"phase": "discovery", "action": "nmap",
+                      "params": {"ports": "top-100", "service_version": True}})
+    for t in tools:
+        steps.append(suggest_step(t))
+    steps.append({"phase": "diagnostics", "action": "posture"})
+    steps.append({"phase": "reporting", "action": "report"})
+    order = {p: i for i, p in enumerate(PHASES)}
+    steps.sort(key=lambda s: order.get(s["phase"], 2))   # stable → methodology order
+    spec = {
+        "id": _slugify(name), "name": name,
+        "description": description or ("Built from the Arsenal (" + ", ".join(tools)
+                       + "). Review/edit tool args before running."),
+        "steps": steps,
+    }
+    return save_playbook(name, spec)
+
+
 def delete_playbook(playbook_id):
     for pub in _load_user_playbooks():
         if pub["id"] == playbook_id or pub.get("file") == playbook_id:

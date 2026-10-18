@@ -4,6 +4,13 @@
 
 ### 2026-10-18
 
+#### [#984](https://github.com/PierreGode/Ragnar/pull/984) — feat(ulfberht): Arsenal builds Engagements playbooks from selected tools
+*branch `feature/ulfberht-arsenal-builder`*
+
+- The Pentest-tab **Arsenal** was a static list of the detected offensive tools; it's now a **playbook builder**. Click tools to select them, name it, hit **Build playbook**, and a valid, methodology-ordered Engagements playbook is generated from the selection and saved to the `engagement_playbooks` folder (appears in the Engagements tab; editable in Files).
+- Server-side generation in `ulfberht_engine`: each tool maps to a sensible starting step (curated templates for the common ones — nmap/nuclei/nikto/sqlmap/wpscan/enum4linux-ng/netexec/… — or a safe `{scope}` placeholder otherwise); always prepends an **nmap discovery** sweep so `{host}`/`{web_urls}`/`{ports}` resolve, adds a **posture** pass and a **report**, orders steps into NIST phases, and flags active tools `active`. `POST /api/ulfberht/playbooks` now accepts `{name, tools:[…]}`.
+- UI: selectable chips (red when picked) + a build bar (name / Build / Clear / status); the System-tab tool list stays passive.
+
 #### [#983](https://github.com/PierreGode/Ragnar/pull/983) — fix(ulfberht): kiosk + pwnagotchi install on the Kali base
 *branch `fix/kiosk-pwn-apt-confold`*
 
