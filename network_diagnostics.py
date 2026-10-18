@@ -23067,20 +23067,27 @@ def _comware_in_prefix(family, addr_int, prefix):
 # ==========================================================================
 # MikroTik Switch and Router Guard — passive RouterOS (CCR/CRS) CVE monitor
 # ==========================================================================
-# Ported from the standalone mikrotikwatch. Detection-only, driven by the shared
-# _guard_packets tcpdump-record model, so it is the per-packet SIGNATURE subset a
-# stateless capture can observe. Deliberately NOT ported (each needs state or
-# frames outside this model, documented so nothing is a silent gap):
+# Ported from the standalone mikrotikwatch (v3, Oct 2026 audit). Detection-only,
+# driven by the shared _guard_packets tcpdump-record model, so it is the per-packet
+# SIGNATURE subset a stateless capture can observe. v3 adds MTK-022 (SMB1
+# SessionSetupAndX crafted uniPwdLen) and MTK-023 (web-mgmt HTTP body-length
+# underflow, structural class + MNDP version posture). Deliberately NOT ported (each
+# needs state or frames outside this model, documented so nothing is a silent gap):
 #   - MTK-011 www-crash / MTK-012 jsproxy-crash: the signal is a SERVER connection
 #     teardown with no HTTP response — flow-close behaviour, not a packet signature.
 #     (The MTK-011 Chimay-Red VERSION posture, which needs no interaction, IS ported.)
 #   - MTK-018 + MTK-C02 / MTK-C03: the Winbox->DNS->downgrade chain and the
-#     reboot-after-SCEP sequence are cross-flow / cross-time correlations.
+#     reboot-after-SCEP sequence are cross-flow / cross-time correlations. MTK-C02
+#     additionally needs MTK-018, which this guard does not port.
 #   - MTK-009 VXLAN source bypass: silent without an operator-declared VTEP peer
 #     list, which this guard has no config for (the standalone is silent too).
 #   - MTK-004 btest: needs the tcp/2000 control-channel flow state.
 #   - MTK-016 bridge2: arbitrary native-L2 frames, unreachable behind a port-scoped
 #     BPF (the standalone flags it so). tcpdump -x carries only IP-onward bytes.
+# Two v3 CVEs are deliberately ROUTED to the modules that already own the decoder,
+# not named here: the labelled-VPN NLRI underflow lives in BGP Path Watch and the
+# xt_tls SNI host_name over-read lives in TLS Watch. Naming them here would be a
+# second decoder under another name and would double-count them in the CVE index.
 _MIKROTIK_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'data', 'mikrotik_guard.json')
 _mikrotik_guard_lock = threading.Lock()
@@ -23147,8 +23154,15 @@ _MIKROTIK_REGISTRY = {
     'MTK-020': ('AUTOUPGRADE_ORIGIN_BYPASS', 'CVE-2019-3977'),
     # One code for both halves of MikroTrick: they share one encrypted exchange.
     'MTK-021': ('MIKROTRICK_SSH_EXPOSURE', 'CVE-2026-67276'),
+    # v3 (Oct 2026 audit). MTK-022 is one code for two CVEs on the MTK-021 precedent:
+    # both are the same crafted uniPwdLen in the same SessionSetupAndX handler, differing
+    # only in the outcome the tap never sees. MTK-023 is a structural class, not a
+    # CVE-exact signature (the malformation was withheld by vendor + CISA).
+    'MTK-022': ('SMB1_SESSIONSETUP_UNIPWDLEN_MALFORMED', 'CVE-2026-56719'),
+    'MTK-023': ('WEB_MGMT_HTTP_BODY_LENGTH_UNDERFLOW', 'CVE-2026-84411'),
 }
 _MIKROTIK_MTK021_CVES = ['CVE-2026-67276', 'CVE-2026-86060']
+_MIKROTIK_MTK022_CVES = ['CVE-2026-56719', 'CVE-2026-89028']
 _MIKROTIK_SSH_PORT = 22
 _MIKROTIK_ROSSSH_RE = re.compile(rb'^SSH-\d+\.\d+-[^\r\n]*?ROSSSH[-_]?([0-9][0-9.]*(?:beta\d+|rc\d+)?)',
                                  re.IGNORECASE)
@@ -23398,6 +23412,221 @@ def _mikrotik_http_request(payload):
         return None
 
 
+# --- MTK-022: SMB1 SessionSetupAndX crafted uniPwdLen (CVE-2026-56719 + CVE-2026-89028) ---
+# Shared parser "smb1-sessionsetupandx", alongside the NBSS pre-auth check (MTK-002). ONE
+# code for both CVEs on the MTK-021 precedent: both are the SAME crafted uniPwdLen in the
+# SAME SessionSetupAndX handler in the SAME frame; 56719 reads past the request buffer
+# (CWE-125), 89028 underflows the length arithmetic and corrupts adjacent heap (CWE-122 +
+# CWE-191). The tap sees the frame, never which path the daemon took, so the structural
+# relations are reported as flags and the frame is filed once against both CVEs. The handler
+# runs before credential validation, hence PR:N.
+_MIKROTIK_SMB1_MAGIC = b'\xffSMB'
+_MIKROTIK_SMB1_HEADER_LEN = 32
+_MIKROTIK_SMB_COM_SESSION_SETUP_ANDX = 0x73
+_MIKROTIK_SESSIONSETUP_WC_NTLM = 13      # the variant carrying oem/uni password lengths
+_MIKROTIK_SESSIONSETUP_WC_EXTSEC = 12    # extended security: SecurityBlobLength, no uniPwdLen
+
+
+def _mikrotik_sessionsetup(buf):
+    """Declared shape of an SMB1 SessionSetupAndX, or None if this is not one we can read
+    (the absence of a finding, never a finding). Only a frame whose own declared lengths
+    contradict the bytes it carries yields a defect.
+
+    Per-packet model: the NBSS wrapper says how long the whole frame is. If we captured
+    FEWER bytes than it declares, the segment is snaplen-truncated, so bytes_present is not
+    trustworthy and the bytes-present-dependent relations (the CWE-125 over-read and the
+    byteCount-vs-present check) are suppressed to avoid a false positive on a legitimate
+    frame the capture merely cut short. The CWE-191 under-flow relation is declared-vs-
+    declared (oemPwdLen + uniPwdLen vs ByteCount) and does not depend on bytes_present, so
+    it is always evaluated — and it is the relation the canonical crafted frame trips."""
+    if len(buf) < 4:
+        return None
+    ext = buf[1] & 0x01
+    nbss_len = (ext << 16) | int.from_bytes(buf[2:4], 'big')
+    body = buf[4:]
+    if len(body) < _MIKROTIK_SMB1_HEADER_LEN + 1:
+        return None
+    if body[:4] != _MIKROTIK_SMB1_MAGIC or body[4] != _MIKROTIK_SMB_COM_SESSION_SETUP_ANDX:
+        return None
+    full_frame = (nbss_len == len(body))
+    sh = {'word_count': body[_MIKROTIK_SMB1_HEADER_LEN], 'oem_pwd_len': -1,
+          'uni_pwd_len': -1, 'byte_count': -1, 'bytes_present': -1,
+          'defects': [], 'underflow': False, 'overread': False, 'truncated': not full_frame}
+    wc = sh['word_count']
+    words = body[_MIKROTIK_SMB1_HEADER_LEN + 1:_MIKROTIK_SMB1_HEADER_LEN + 1 + wc * 2]
+    if len(words) < wc * 2:
+        sh['defects'].append('wordcount-%d-overruns-frame' % wc)
+        return sh
+    after = _MIKROTIK_SMB1_HEADER_LEN + 1 + wc * 2
+    if len(body) >= after + 2:
+        sh['byte_count'] = int.from_bytes(body[after:after + 2], 'little')
+        sh['bytes_present'] = len(body) - (after + 2)
+    else:
+        sh['defects'].append('bytecount-field-missing')
+        return sh
+    # A frame carrying MORE bytes than its NBSS wrapper declares is genuinely malformed; a
+    # frame carrying FEWER is this capture's snaplen, not the sender's doing.
+    if nbss_len < len(body):
+        sh['defects'].append('nbss-length-%d-shorter-than-smb-frame-%d' % (nbss_len, len(body)))
+    if wc == _MIKROTIK_SESSIONSETUP_WC_NTLM:
+        sh['oem_pwd_len'] = int.from_bytes(words[14:16], 'little')
+        sh['uni_pwd_len'] = int.from_bytes(words[16:18], 'little')
+        declared_total = sh['oem_pwd_len'] + sh['uni_pwd_len']
+        # CWE-191 (CVE-2026-89028 class): the two password lengths together claim more than
+        # ByteCount says the block holds, so remaining = byteCount - oem - uni goes negative,
+        # wraps unsigned, and the copy sized from it corrupts adjacent heap. Truncation-safe.
+        if declared_total > sh['byte_count']:
+            sh['underflow'] = True
+            sh['defects'].append('oemPwdLen(%d)+uniPwdLen(%d)=%d-exceeds-byteCount(%d)'
+                                 % (sh['oem_pwd_len'], sh['uni_pwd_len'],
+                                    declared_total, sh['byte_count']))
+        # CWE-125 (CVE-2026-56719 class): uniPwdLen reaches past the bytes the frame actually
+        # carries, so the handler's read leaves the request buffer. Depends on bytes present.
+        if full_frame:
+            after_oem = max(0, sh['bytes_present'] - max(0, sh['oem_pwd_len']))
+            if sh['uni_pwd_len'] > after_oem:
+                sh['overread'] = True
+                sh['defects'].append('uniPwdLen(%d)-reads-past-frame(bytes_present=%d,after_oem=%d)'
+                                     % (sh['uni_pwd_len'], sh['bytes_present'], after_oem))
+    elif wc == _MIKROTIK_SESSIONSETUP_WC_EXTSEC:
+        # No uniPwdLen here (reading +16 would be half of Capabilities). The analogous bound
+        # is the security blob; an overrun is still malformed, but it is NOT attributed to
+        # either CVE, because neither names this field.
+        blob_len = int.from_bytes(words[14:16], 'little')
+        if blob_len > sh['byte_count']:
+            sh['defects'].append('securityBlobLength(%d)-exceeds-byteCount(%d)'
+                                 % (blob_len, sh['byte_count']))
+    if full_frame and sh['byte_count'] > sh['bytes_present']:
+        sh['defects'].append('byteCount(%d)-exceeds-bytes-present(%d)'
+                             % (sh['byte_count'], sh['bytes_present']))
+    return sh
+
+
+def _mikrotik_smb1_oob_affected(version):
+    """CVE-2026-56719 / CVE-2026-89028: both fixed in RouterOS 7.24. Vendor-style wide bound
+    (every 6.x, and 7.x below 7.24); the error is taken in the safe direction because a too-
+    narrow screen silently drops a vulnerable device while a slightly wide one costs only a
+    flag. Detection does NOT depend on this predicate — the malformation is read off the wire."""
+    t = _mikrotik_version_tuple(version)
+    if t is None:
+        return None
+    if t[0] == 6:
+        return True
+    if t[0] == 7:
+        return t < (7, 24, 0)
+    return None
+
+
+# --- MTK-023: web-mgmt HTTP request body-length underflow (CVE-2026-84411) ---------------
+# STRUCTURAL CLASS, not a CVE-exact signature: MikroTik and CISA (ICSA-26-272-06) both
+# withheld the function, path and corruption primitive, and there is no public PoC, so a
+# field-exact signature does not exist to be written. CWE-191 in body handling means a length
+# subtraction underflowed, and HTTP grammar bounds the small, closed set of ways a request can
+# lie about its body length. Confidence is medium BY CONSTRUCTION — a real malformation, but
+# not proof THIS CVE was the target. The delivered-vs-declared case (Content-Length declaring
+# far more than it sends) needs a flow-close "client done" signal the bounded single-segment
+# capture does not carry, so it is NOT evaluated here; the header-local cases are.
+_MIKROTIK_CL_RE = re.compile(rb'^[0-9]+$')
+_MIKROTIK_CL_MAX_DIGITS = 4096
+_MIKROTIK_MAX_SANE_BODY = 1 << 30        # 1 GiB: past any real WebFig request
+_MIKROTIK_CHUNK_MAX = 1 << 30
+_MIKROTIK_HEXDIG_RE = re.compile(rb'^[0-9A-Fa-f]+$')
+
+
+def _mikrotik_body_length_defects(head):
+    """Structural defects in a request's declared body length (the CVE-2026-84411 shape).
+    `head` is the raw header block (no trailing CRLFCRLF). Read RAW, not from a framed
+    request, because a negative Content-Length is otherwise clamped away by max(0, int(cl))."""
+    defects = []
+    lines = head.split(b'\r\n')
+    cls = []
+    te_chunked = False
+    for raw in lines[1:]:
+        for line in raw.split(b'\n'):
+            if b':' not in line:
+                continue
+            k, _, v = line.partition(b':')
+            key = k.strip().lower()
+            val = v.strip()
+            if key == b'content-length':
+                cls.append(val)
+            elif key == b'transfer-encoding' and b'chunked' in val.lower():
+                te_chunked = True
+    # conflicting / duplicate declarations
+    distinct = set(cls)
+    if len(cls) > 1:
+        if len(distinct) > 1:
+            defects.append('multiple-conflicting-content-length:'
+                           + ','.join(sorted(c.decode('latin-1', 'replace') for c in distinct)))
+        else:
+            defects.append('duplicate-content-length')
+    for c in cls:
+        # not a non-negative integer at all (a leading sign, an embedded space, any non-digit)
+        if len(c) > _MIKROTIK_CL_MAX_DIGITS:
+            defects.append('content-length-absurdly-long-field:%d-bytes' % len(c))
+            continue
+        if not _MIKROTIK_CL_RE.match(c):
+            defects.append('content-length-not-a-non-negative-integer:%s'
+                           % c[:32].decode('latin-1', 'replace'))
+            continue
+        n = int(c)
+        # a valid non-negative integer, but too large to be a body length
+        if n >= (1 << 64):
+            defects.append('content-length-exceeds-64-bit:%d' % n)
+        elif n > _MIKROTIK_MAX_SANE_BODY:
+            defects.append('content-length-absurd:%d' % n)
+    # both framing mechanisms at once
+    if cls and te_chunked:
+        defects.append('content-length-with-transfer-encoding-chunked')
+    return defects
+
+
+def _mikrotik_chunk_size_defects(body):
+    """Defects in the chunk-size lines of a chunked body (RFC 9112 7.1 = 1*HEXDIG). int(x,16)
+    is NOT that test — it accepts a '0x' prefix, a sign and whitespace — so the regex is the
+    gate and int() runs only behind it."""
+    defects = []
+    off = 0
+    guard = 0
+    while off < len(body) and guard < 256:
+        guard += 1
+        nl = body.find(b'\r\n', off)
+        if nl < 0:
+            break
+        token = body[off:nl].split(b';')[0].strip()
+        if not token:
+            defects.append('chunk-size-empty')        # blank where a size belongs; terminator is '0'
+            break
+        if not _MIKROTIK_HEXDIG_RE.match(token):
+            defects.append('chunk-size-not-hex:%s' % token[:32].decode('latin-1', 'replace'))
+            break
+        size = int(token, 16)
+        if size > _MIKROTIK_CHUNK_MAX:
+            defects.append('chunk-size-absurd:%d' % size)
+            break
+        if size == 0:
+            break
+        off = nl + 2 + size + 2
+    if guard >= 256:
+        defects.append('chunk-count-runaway')
+    return defects
+
+
+def _mikrotik_web_mgmt_underflow_affected(version):
+    """CVE-2026-84411: RouterOS before 7.24, INCLUDING RouterOS v6 (CISA ICSA-26-272-06 and
+    MikroTik both say "before 7.24 (including RouterOS v6)"). As of the 2026-10-06 advisory the
+    v6/v7 long-term fixes were still release-pending, so every 6.x and every 7.x below 7.24 is
+    inside the range."""
+    t = _mikrotik_version_tuple(version)
+    if t is None:
+        return None
+    if t[0] == 6:
+        return True
+    if t[0] == 7:
+        return t < (7, 24, 0)
+    return None
+
+
 def _mikrotik_analyze(records):
     """Pure classifier over parsed guard packets -> MikroTik findings + verdict.
     Separated from capture so the self-test can drive it with synthetic packets."""
@@ -23407,6 +23636,7 @@ def _mikrotik_analyze(records):
     gated_hits = []             # (server, code) for the MTK-C01 correlation
     dev_version = {}            # device addr -> (version, source)   (MTK-021)
     ssh_seen = set()            # device addrs with SSH on the wire   (MTK-021)
+    web_mgmt_affected = set()   # device addrs inside CVE-2026-84411 range (MTK-023 posture)
 
     def add(code, name, sev, klass, src, cves, detail):
         key = (code, src)
@@ -23445,6 +23675,11 @@ def _mikrotik_analyze(records):
                 # family attributes to the same box.
                 for a in {src, mndp.get('ipv4'), mndp.get('ipv6')} - {None, ''}:
                     dev_version[a] = (ver, 'mndp')
+                # MTK-023 posture substrate: a device whose MNDP version is inside the
+                # CVE-2026-84411 range is exposed with no crafted interaction required.
+                if _mikrotik_web_mgmt_underflow_affected(ver) is True:
+                    for a in {src, mndp.get('ipv4'), mndp.get('ipv6')} - {None, ''}:
+                        web_mgmt_affected.add(a)
             if ver and _mikrotik_chimay_red_affected(ver) is True:
                 name, cve = _MIKROTIK_REGISTRY['MTK-011']
                 add('MTK-011', name, 'HIGH', 'POSTURE', src, [cve],
@@ -23534,9 +23769,59 @@ def _mikrotik_analyze(records):
                               'reported regardless of the target patch level.')})
             continue
 
-        # --- SMB (TCP/139,445): MTK-002 malformed pre-auth NBSS
+        # --- SMB (TCP/139,445): MTK-022 SessionSetupAndX + MTK-002 malformed pre-auth NBSS
         if sport in _MIKROTIK_SMB_PORTS or dport in _MIKROTIK_SMB_PORTS:
             if pl and dport in _MIKROTIK_SMB_PORTS:               # client -> server
+                # MTK-022 (shared parser smb1-sessionsetupandx) is evaluated FIRST and on its
+                # own anchor (\xffSMB + command 0x73), because a SessionSetupAndX normally has
+                # a perfectly well-formed NBSS wrapper — the malformation is one field deeper —
+                # so gating it behind an NBSS defect would blind it on exactly the traffic it
+                # exists to catch. The (code, src) dedup is the per-flow latch.
+                sh = _mikrotik_sessionsetup(pl)
+                if sh and sh['defects']:
+                    relations = []
+                    if sh['overread']:
+                        relations.append('read-past-frame')
+                    if sh['underflow']:
+                        relations.append('length-arithmetic-underflow')
+                    base = {'port': dport, 'word_count': sh['word_count'],
+                            'byte_count': sh['byte_count'], 'bytes_present': sh['bytes_present'],
+                            'defects': sh['defects']}
+                    if sh.get('truncated'):
+                        base['snaplen_truncated'] = True
+                    if relations:
+                        ver = (dev_version.get(dst) or (None, None))[0]
+                        base.update({'relations': relations, 'oem_pwd_len': sh['oem_pwd_len'],
+                                     'uni_pwd_len': sh['uni_pwd_len'], 'confidence': 'high'})
+                        if ver:
+                            base['version'] = ver
+                            base['version_screen'] = ('patched-7.24-or-later'
+                                                      if _mikrotik_smb1_oob_affected(ver) is False
+                                                      else 'inside-affected-range')
+                        base['note'] = (
+                            'SMB1 SessionSetupAndX on tcp/%d carries a crafted uniPwdLen=%d '
+                            '(oemPwdLen=%d, byteCount=%d, %d bytes present): %s. The handler '
+                            'runs BEFORE credential validation (PR:N). CVE-2026-56719 reads '
+                            'past the request buffer and CVE-2026-89028 corrupts adjacent heap '
+                            'from the same field; the frame crosses the tap, the outcome does '
+                            'not, so it is reported once against both rather than guessed into '
+                            'one.' % (dport, sh['uni_pwd_len'], sh['oem_pwd_len'],
+                                      sh['byte_count'], sh['bytes_present'], '; '.join(sh['defects'])))
+                        name, _cve = _MIKROTIK_REGISTRY['MTK-022']
+                        add('MTK-022', name, 'HIGH', 'ATTACK', dst,
+                            list(_MIKROTIK_MTK022_CVES), base)
+                    else:
+                        # Malformed, but not the uniPwdLen shape either CVE names — reported
+                        # under the generic RouterOS SMB code (MTK-002), not invented into the
+                        # new one (the mutation that files a non-uniPwdLen frame under MTK-022).
+                        base['shape'] = 'not-unipwdlen'
+                        base['note'] = (
+                            'malformed SMB1 SessionSetupAndX on tcp/%d: %s. Does not match the '
+                            'uniPwdLen shape of CVE-2026-56719 / CVE-2026-89028, so reported as '
+                            'a generic RouterOS SMB implementation defect rather than attributed '
+                            'to either.' % (dport, '; '.join(sh['defects'])))
+                        name, cve = _MIKROTIK_REGISTRY['MTK-002']
+                        add('MTK-002', name, 'HIGH', 'ATTACK', dst, [cve], base)
                 mtype, defects = _mikrotik_nbss_defects(pl)
                 if defects and mtype == 0x81:
                     name, cve = _MIKROTIK_REGISTRY['MTK-002']
@@ -23659,6 +23944,29 @@ def _mikrotik_analyze(records):
                                   'MikroTik origin — the autoupgrade origin bypass '
                                   '(CVE-2019-3977) that installs an attacker-supplied '
                                   'firmware image.' % host)})
+            # MTK-023 — web-mgmt HTTP body-length underflow (CVE-2026-84411), structural class.
+            # Read the RAW header block out of this segment (not the parsed request), because a
+            # negative Content-Length is otherwise clamped before any consumer sees it.
+            raw_head, _sep, raw_body = pl.partition(b'\r\n\r\n')
+            bl_defects = _mikrotik_body_length_defects(raw_head)
+            if 'chunked' in headers.get('transfer-encoding', '').lower():
+                bl_defects = bl_defects + _mikrotik_chunk_size_defects(raw_body)
+            if bl_defects:
+                name, cve = _MIKROTIK_REGISTRY['MTK-023']
+                add('MTK-023', name, 'HIGH', 'ATTACK', dst, [cve],
+                    {'target': target, 'defects': bl_defects, 'confidence': 'medium',
+                     'detect': 'structural-class', 'ceiling': 'vendor-withheld-malformation',
+                     'note': ('request to the RouterOS web management service on tcp/%s declares '
+                              'its body length inconsistently: %s. CVE-2026-84411 is an integer '
+                              'underflow (CWE-191) in body handling, unauthenticated, root on '
+                              'success. STRUCTURAL CLASS, NOT A CVE-EXACT MATCH: MikroTik and '
+                              'CISA withheld the function, path and corruption primitive, so no '
+                              'field-exact signature exists — this says a request lied about its '
+                              'body length in a way that underflows a length computation, which '
+                              'is the SHAPE of the CVE, not proof of it. Confidence medium by '
+                              'construction; verify the device build and patch state.'
+                              % (dport, '; '.join(bl_defects)))})
+                gated_hits.append((dst, 'MTK-023'))
             continue
 
     # --- MTK-021: MikroTrick EXPOSURE — affected RouterOS version AND SSH on the wire.
@@ -23684,6 +23992,28 @@ def _mikrotik_analyze(records):
                       'finding is NOT evidence of safety. Check the device: logs for '
                       '"user -2", an unexpected "ops" account, and the Flagged marker in '
                       '/system/device-mode/print.' % ver)})
+
+    # --- MTK-023 posture leg: version-screen exposure (CVE-2026-84411). Like MTK-011, no
+    # crafted interaction has to cross the tap — one unauthenticated request is root and no
+    # CVE-exact signature exists because the malformation was withheld. Skipped where the
+    # body-length EVENT already fired on that address, so the stronger signal wins; phrased as
+    # "verify this device", never a vulnerable verdict (an MNDP string is advertised, not proof).
+    for addr in sorted(web_mgmt_affected):
+        if ('MTK-023', addr) in seen_codes:
+            continue
+        ver = (dev_version.get(addr) or (None, None))[0]
+        name, cve = _MIKROTIK_REGISTRY['MTK-023']
+        add('MTK-023', name, 'HIGH', 'POSTURE', addr, [cve],
+            {'version': ver, 'posture_only': True, 'detect': 'version-screen',
+             'ceiling': 'vendor-withheld-malformation', 'confidence': 'medium',
+             'note': ('RouterOS %s advertised over MNDP is inside the CVE-2026-84411 range '
+                      '(fixed in 7.24; v6 and v7 long-term fixes were still release-pending at '
+                      'the 2026-10-06 advisory). The web management service behind WebFig takes '
+                      'one unauthenticated crafted request to root; no attempt was observed on '
+                      'this capture and no CVE-exact signature exists — the malformation was not '
+                      'disclosed. VERIFY THIS DEVICE build and whether www/www-ssl are reachable '
+                      'from anywhere untrusted; this is exposure, not a vulnerable verdict.'
+                      % (ver or 'unknown'))})
 
     # --- MTK-C01: a gated exploit code fired on a device already serving cleartext mgmt
     for (dev, code) in gated_hits:
@@ -23768,10 +24098,13 @@ def _mikrotik_selftest():
     check('mikrotik-chimay-posture',
           [_guard_rec(proto='UDP', sport=5678, dport=5678, payload=mndp('6.30.0'))],
           'posture', ['MTK-011'])
-    # A patched version raises nothing.
-    check('mikrotik-chimay-patched',
-          [_guard_rec(proto='UDP', sport=5678, dport=5678, payload=mndp('6.48.6'))],
-          'clean')
+    # A Chimay-Red-patched version raises no MTK-011. (6.48.6 is still inside the broad
+    # CVE-2026-84411 v6 range, so MTK-023 posture does fire — that is asserted separately.)
+    r = _mikrotik_analyze([_guard_rec(proto='UDP', sport=5678, dport=5678, payload=mndp('6.48.6'))])
+    _codes_chimay = {f['code'] for f in r['findings']}
+    scenarios.append({'name': 'mikrotik-chimay-patched',
+                      'expect': 'no MTK-011', 'got': str(sorted(_codes_chimay)),
+                      'pass': 'MTK-011' not in _codes_chimay})
     # MTK-003 Winbox path traversal.
     check('mikrotik-winbox-traversal',
           [_guard_rec(proto='TCP', dport=8291,
@@ -23883,16 +24216,128 @@ def _mikrotik_selftest():
                       payload=mndp_addr('7.22.1', ipv4='10.0.0.41')),
            ssh_syn('10.0.0.41')],
           'exposure', ['MTK-021'])
-    # Affected version but NO SSH seen: nothing (the exposure needs SSH on the wire).
-    r = check('mikrotik-mtk021-needs-ssh',
-              [_guard_rec(proto='UDP', src='10.0.0.50', sport=5678, dport=5678,
-                          payload=mndp('7.22.1'))], 'clean')
+    # Affected version but NO SSH seen: no MTK-021 (the exposure needs SSH on the wire).
+    # 7.22.1 is inside the CVE-2026-84411 range, so MTK-023 posture fires; MTK-021 must not.
+    r = _mikrotik_analyze([_guard_rec(proto='UDP', src='10.0.0.50', sport=5678, dport=5678,
+                                      payload=mndp('7.22.1'))])
+    _codes_needssh = {f['code'] for f in r['findings']}
+    scenarios.append({'name': 'mikrotik-mtk021-needs-ssh',
+                      'expect': 'no MTK-021 without SSH', 'got': str(sorted(_codes_needssh)),
+                      'pass': 'MTK-021' not in _codes_needssh})
     # A non-MikroTik SSH server contributes nothing, even on an affected-looking network.
     check('mikrotik-mtk021-openssh-ignored',
           [ssh_banner('10.0.0.60', 'OpenSSH_9.6p1 Debian-4'), ssh_syn('10.0.0.60')], 'clean')
     # IPv6 parity: the banner over IPv6 raises the same finding.
     check('mikrotik-mtk021-ipv6', [ssh_banner('2001:db8::30', 'ROSSSH-7.20.8', ipver=6)],
           'exposure', ['MTK-021'])
+
+    # --- MTK-022 SMB1 SessionSetupAndX crafted uniPwdLen (CVE-2026-56719 + CVE-2026-89028) ---
+    def smb_ss(wc, oem=0, uni=0, byte_count=0, block=b'', blob=None, nbss_len=None):
+        """Build an NBSS-wrapped SMB1 SessionSetupAndX by hand."""
+        hdr = _MIKROTIK_SMB1_MAGIC + bytes([_MIKROTIK_SMB_COM_SESSION_SETUP_ANDX]) + b'\x00' * 27
+        words = bytearray(wc * 2)
+        if wc == _MIKROTIK_SESSIONSETUP_WC_NTLM:
+            words[14:16] = oem.to_bytes(2, 'little')
+            words[16:18] = uni.to_bytes(2, 'little')
+        elif wc == _MIKROTIK_SESSIONSETUP_WC_EXTSEC and blob is not None:
+            words[14:16] = blob.to_bytes(2, 'little')
+        param = bytes([wc]) + bytes(words) + byte_count.to_bytes(2, 'little') + block
+        body = hdr + param
+        ln = len(body) if nbss_len is None else nbss_len
+        ext = (ln >> 16) & 0x01
+        return bytes([0x00, ext]) + (ln & 0xFFFF).to_bytes(2, 'big') + body
+
+    def smb_rec(payload):
+        return _guard_rec(proto='TCP', src='10.0.0.70', sport=50000,
+                          dst='10.0.0.71', dport=445, payload=payload)
+
+    # A well-formed SessionSetupAndX (passwords fit the byte block) raises nothing.
+    check('mikrotik-mtk022-wellformed',
+          [smb_rec(smb_ss(13, oem=24, uni=24, byte_count=48, block=b'\x00' * 48))], 'clean')
+    # The minimal crafted-uniPwdLen frame — both relations trip (the canonical 56719 case).
+    r = check('mikrotik-mtk022-crafted-unipwdlen',
+              [smb_rec(smb_ss(13, oem=0, uni=4096, byte_count=0, block=b''))],
+              'attack', ['MTK-022'])
+    f22 = [f for f in r['findings'] if f['code'] == 'MTK-022']
+    scenarios.append({'name': 'mikrotik-mtk022-names-both-cves',
+                      'expect': str(_MIKROTIK_MTK022_CVES),
+                      'got': str(f22[0]['cves'] if f22 else None),
+                      'pass': bool(f22) and f22[0]['cves'] == _MIKROTIK_MTK022_CVES})
+    # Underflow relation alone (declared lengths exceed ByteCount while the bytes are present).
+    check('mikrotik-mtk022-underflow-only',
+          [smb_rec(smb_ss(13, oem=200, uni=200, byte_count=0, block=b'\x00' * 400))],
+          'attack', ['MTK-022'])
+    # A malformed SessionSetupAndX that is NOT the uniPwdLen shape -> generic MTK-002, not 022.
+    r = check('mikrotik-mtk022-not-unipwdlen-is-mtk002',
+              [smb_rec(smb_ss(12, blob=4096, byte_count=0, block=b''))],
+              'attack', ['MTK-002'])
+    scenarios.append({'name': 'mikrotik-mtk022-wc12-not-filed-as-022',
+                      'expect': 'no MTK-022 on a WordCount-12 frame',
+                      'got': str(sorted({f['code'] for f in r['findings']})),
+                      'pass': 'MTK-022' not in {f['code'] for f in r['findings']}})
+    # WordCount-12 extended-security, well formed: the +16 uniPwdLen read must NOT run here.
+    check('mikrotik-mtk022-wc12-wellformed',
+          [smb_rec(smb_ss(12, blob=10, byte_count=10, block=b'\x00' * 10))], 'clean')
+    # Snaplen truncation must not false-positive: NBSS declares a long frame, capture is short,
+    # declared lengths are internally consistent -> nothing fires.
+    check('mikrotik-mtk022-truncated-no-fp',
+          [smb_rec(smb_ss(13, oem=24, uni=24, byte_count=48, block=b'\x00' * 10, nbss_len=32 + 1 + 26 + 2 + 48))],
+          'clean')
+
+    # --- MTK-023 web-mgmt HTTP body-length underflow (CVE-2026-84411), structural class ---
+    def http80(payload):
+        return _guard_rec(proto='TCP', src='10.0.0.80', sport=50001,
+                          dst='10.0.0.81', dport=80, payload=payload)
+
+    # A negative Content-Length — the single most underflow-shaped input there is.
+    check('mikrotik-mtk023-negative-cl',
+          [http80(b'POST / HTTP/1.1\r\nHost: x\r\nContent-Length: -5\r\n\r\n')],
+          'attack', ['MTK-023'])
+    # A non-numeric Content-Length.
+    check('mikrotik-mtk023-nonnumeric-cl',
+          [http80(b'POST / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n')],
+          'attack', ['MTK-023'])
+    # A Content-Length wider than 64 bits.
+    check('mikrotik-mtk023-over-64-bit-cl',
+          [http80(b'POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999999999999999999\r\n\r\n')],
+          'attack', ['MTK-023'])
+    # Two conflicting Content-Length values on one request.
+    check('mikrotik-mtk023-conflicting-cl',
+          [http80(b'POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 9\r\n\r\n')],
+          'attack', ['MTK-023'])
+    # Content-Length together with Transfer-Encoding: chunked.
+    check('mikrotik-mtk023-cl-and-te',
+          [http80(b'POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n')],
+          'attack', ['MTK-023'])
+    # A chunk size that is not valid hex (RFC 9112 7.1 = 1*HEXDIG).
+    check('mikrotik-mtk023-bad-chunk-size',
+          [http80(b'POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nXYZ\r\nhi\r\n')],
+          'attack', ['MTK-023'])
+    # A well-formed request with a sane Content-Length raises nothing (FP guard).
+    check('mikrotik-mtk023-wellformed-no-fp',
+          [http80(b'GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n')], 'clean')
+    # MTK-023 posture from an MNDP version inside the CVE-2026-84411 range (v7 < 7.24, so it is
+    # not also Chimay-Red): a posture-only exposure, no attempt on the wire.
+    r = check('mikrotik-mtk023-posture',
+              [_guard_rec(proto='UDP', src='10.0.0.82', sport=5678, dport=5678,
+                          payload=mndp('7.20.0'))], 'posture', ['MTK-023'])
+    f23 = [f for f in r['findings'] if f['code'] == 'MTK-023']
+    scenarios.append({'name': 'mikrotik-mtk023-posture-is-not-a-verdict',
+                      'expect': 'posture_only, confidence medium, names CVE-2026-84411',
+                      'got': str(f23[0]['detail'] if f23 else None),
+                      'pass': bool(f23) and (f23[0]['detail'] or {}).get('posture_only') is True
+                      and (f23[0]['detail'] or {}).get('confidence') == 'medium'
+                      and f23[0]['cves'] == ['CVE-2026-84411']})
+    # A patched version (7.24.0) raises no MTK-023 posture.
+    check('mikrotik-mtk023-patched',
+          [_guard_rec(proto='UDP', src='10.0.0.83', sport=5678, dport=5678,
+                      payload=mndp('7.24.0'))], 'clean')
+    # Registry wiring: both v3 codes present, MTK-022 carries its two CVEs.
+    scenarios.append({'name': 'mikrotik-v3-registry',
+                      'expect': 'MTK-022 + MTK-023 registered; MTK-022 = 2 CVEs',
+                      'got': str(sorted(_MIKROTIK_REGISTRY)[-2:]) + ' ' + str(_MIKROTIK_MTK022_CVES),
+                      'pass': ('MTK-022' in _MIKROTIK_REGISTRY and 'MTK-023' in _MIKROTIK_REGISTRY
+                               and len(_MIKROTIK_MTK022_CVES) == 2)})
 
     failed = sum(1 for s in scenarios if not s['pass'])
     return {'success': failed == 0, 'passed': len(scenarios) - failed,

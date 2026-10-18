@@ -4158,6 +4158,33 @@ the Flagged marker). One deliberate difference from the upstream module: a **7.2
 beta2** build (which predates the beta3 fix) is treated as affected — upstream's version
 parser reads `7.25beta3` as plain `7.25` and would call every 7.25 pre-release fixed.
 
+**v3 — the October 2026 audit (two new codes).** **`MTK-022`** (CVE-2026-56719 +
+CVE-2026-89028) parses the pre-auth **SMB1 SessionSetupAndX** request and flags a crafted
+`uniPwdLen`: the password-length fields claim more than the frame's own `ByteCount`
+(`CWE-191`, the length-arithmetic under-flow 89028 names) or reach past the bytes the frame
+carries (`CWE-125`, the out-of-bounds read 56719 names). It is **one code for both CVEs** on
+the `MTK-021` precedent — the handler runs *before* credential validation (PR:N) and the tap
+sees the crafted frame but never which way the daemon then broke, so the structural relations
+are reported as flags rather than guessed into one CVE; a malformed SessionSetupAndX that is
+*not* the `uniPwdLen` shape is reported under the generic `MTK-002` instead. The under-flow
+relation is declared-vs-declared and so survives a snaplen-truncated capture; the over-read
+relation, which needs the bytes actually present, is suppressed when the single segment did
+not carry the whole frame (no false positive on a legitimately long request the capture cut
+short). **`MTK-023`** (CVE-2026-84411, CVSS 9.8, unauthenticated root) is the web-management
+**HTTP body-length under-flow** — but a **structural class, not a CVE-exact signature**,
+because MikroTik and CISA (ICSA-26-272-06) withheld the function, path and corruption
+primitive. It reads the **raw** request header block (a negative `Content-Length` is
+otherwise clamped away before any consumer sees it) and flags the bounded set of body-length
+lies `CWE-191` permits — a negative or non-numeric `Content-Length`, one wider than 64 bits
+or absurdly large, conflicting/duplicate values, `Content-Length` together with
+`Transfer-Encoding: chunked`, or a non-hex / runaway chunk size — at **medium confidence by
+construction**, and raises a version-screen **posture** from MNDP alone (every RouterOS 6.x
+and 7.x below 7.24). The delivered-vs-declared case needs a flow-close signal the per-packet
+capture does not carry and is omitted. Two further v3 CVEs are **routed**, not duplicated
+here: the **xt_tls SNI `host_name` over-read** (detector in **TLS Watch**) and the
+**labelled-VPN MP_REACH NLRI** under-flow (detector in **BGP Path Watch**) — each lives in
+the module that already owns the decoder.
+
 **Dual-stack** (bare `port` clauses match v4 and v6; a narrow `ip6[6]` clause admits v6
 behind an extension header). SSH is captured as **SYNs and the banner only**: libpcap's
 `tcp[]` payload accessor is IPv4-only (it compiles but matches no IPv6 packet), so IPv6
