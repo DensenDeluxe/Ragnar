@@ -73,21 +73,56 @@ PHASE_META = {
 # Tools an operator may invoke from a `command` step. Recon/diagnostic tools are
 # always allowed; the ones marked active (offensive/validation) run only when
 # enable_active is on. Everything is argv-only (no shell).
-_ALLOWED_TOOLS = {
-    # passive / recon
-    "nmap": {"active": False}, "masscan": {"active": False},
-    "dig": {"active": False}, "host": {"active": False}, "whois": {"active": False},
-    "whatweb": {"active": False}, "nbtscan": {"active": False},
-    "onesixtyone": {"active": False}, "snmpwalk": {"active": False},
-    "fping": {"active": False}, "arp-scan": {"active": False},
-    # active / validation (gated by enable_active)
-    "nuclei": {"active": True}, "nikto": {"active": True},
-    "enum4linux": {"active": True}, "enum4linux-ng": {"active": True},
-    "smbclient": {"active": True}, "sslscan": {"active": True},
-    "sslyze": {"active": True}, "wpscan": {"active": True},
-    "testssl.sh": {"active": True}, "feroxbuster": {"active": True},
-    "gobuster": {"active": True}, "ffuf": {"active": True},
-}
+# Tools a `command` step may invoke. This is a SAFETY allowlist, not a feature
+# list: the step runs argv-only (never a shell), so the allowlist is what stops
+# a shared/uploaded playbook from running an arbitrary binary AS ROOT (rm, dd, a
+# reverse shell). It deliberately covers the whole installed security toolset,
+# not arbitrary system commands.
+#
+# Passive recon tools are always allowed; everything else is "active" and runs
+# only in an active step (gated by enable_attacks). Beyond this curated set we
+# also merge in every offensive tool the edition actually detected on this image
+# (see _merge_edition_tools below) so any installed Arsenal tool can be scripted
+# and the list stays current as tools are added. Note: Wi-Fi (aircrack-ng/
+# airodump-ng/wifite/reaver/bully/kismet) and cracking (hashcat/john) tools need
+# a monitor-mode capture or hash+wordlist inputs rather than an IP scope, and
+# interactive/long-running tools (msfconsole/setoolkit/responder/ettercap) will
+# run until the step timeout unless invoked non-interactively — they are allowed
+# but need the right args to be useful in a run-to-completion step.
+_RECON_TOOLS = ["nmap", "masscan", "dig", "host", "whois", "whatweb",
+                "nbtscan", "onesixtyone", "snmpwalk", "fping", "arp-scan"]
+_OFFENSIVE_TOOLS = [
+    # web / service validation
+    "nuclei", "nikto", "wpscan", "sslscan", "sslyze", "testssl.sh",
+    "feroxbuster", "gobuster", "ffuf", "sqlmap",
+    # SMB / AD / credentials
+    "enum4linux", "enum4linux-ng", "smbclient", "netexec", "nxc", "responder", "hydra",
+    # crack (need hash + wordlist inputs)
+    "hashcat", "john",
+    # wireless (need monitor mode + a capture, not an IP scope)
+    "aircrack-ng", "airodump-ng", "wifite", "reaver", "bully", "kismet",
+    # framework / MITM / capture (interactive or long-running; pass non-interactive args)
+    "msfconsole", "setoolkit", "ettercap", "tcpdump", "tshark",
+]
+_ALLOWED_TOOLS = {t: {"active": False} for t in _RECON_TOOLS}
+_ALLOWED_TOOLS.update({t: {"active": True} for t in _OFFENSIVE_TOOLS})
+
+
+def _merge_edition_tools():
+    """Allow every offensive tool the edition detected on THIS image too, so any
+    installed Arsenal tool can be scripted (active-gated) and the allowlist stays
+    in sync with what is actually installed. No-op off the Ulfberht image."""
+    try:
+        if ragnar_edition:
+            for t in (ragnar_edition.detect().get("tools") or []):
+                b = t.get("bin")
+                if b and b not in _ALLOWED_TOOLS:
+                    _ALLOWED_TOOLS[b] = {"active": True}
+    except Exception:
+        pass
+
+
+_merge_edition_tools()
 
 # Characters that must never appear in a command arg — closes shell-injection
 # even though we never use a shell. Also blocks path traversal of the binary.
@@ -338,8 +373,8 @@ def list_action_catalog():
             {"action": "nuclei", "phase": "assessment (active)",
              "params": {"severity": "[info..critical]", "tags": "[...]"}},
             {"action": "command", "phase": "any",
-             "params": {"tool": "allowlisted tool", "args": "[str,...]",
-                        "per_host": "bool", "per_target": "bool"}},
+             "params": {"tool": "any installed security tool (allowlisted)", "args": "[str,...]",
+                        "per_host": "bool", "per_target": "bool", "timeout": "seconds 10-3600 (default 900)"}},
             {"action": "report", "phase": "reporting", "params": {}},
         ],
         "tools": sorted(_ALLOWED_TOOLS),
@@ -646,6 +681,10 @@ def _act_command(run, params):
     if not binpath:
         _log(run, f"command: '{tool}' not installed; skipped."); return
     args = params.get("args", [])
+    try:
+        tmo = max(10, min(int(params.get("timeout", 900)), 3600))
+    except (TypeError, ValueError):
+        tmo = 900
     # Decide the iteration set for per-host / per-target steps.
     targets = [None]
     if params.get("per_host"):
@@ -664,7 +703,7 @@ def _act_command(run, params):
         _log(run, f"{tool} " + " ".join(argv))
         try:
             proc = subprocess.run([binpath] + argv, stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT, timeout=900)
+                                  stderr=subprocess.STDOUT, timeout=tmo)
             out = proc.stdout.decode("utf-8", "replace")
             lines = [l for l in out.splitlines() if l.strip()]
             tail = "\n".join(lines[-40:]) if lines else "(no output)"

@@ -87,19 +87,34 @@ on load — an invalid one is shown with the reason and cannot be run.
 | `nmap` | discovery | `ports` (`top-100` \| `top-1000` \| a portspec like `80,443,8000-8100`), `service_version`, `default_scripts` (safe NSE), `timing` (`T0`–`T5`) |
 | `posture` | diagnostics | `custom_rules`: `[{match, severity, title, ref}]` to flag your own services/ports on top of the built-in risk map |
 | `nuclei` | assessment | `severity` (`[info..critical]`), `tags` — runs against discovered web services |
-| `command` | any | `tool` (allowlisted), `args` (`[str,…]`), `per_host` / `per_target` to iterate discovered hosts / web URLs |
+| `command` | any | `tool` (allowlisted security tool), `args` (`[str,…]`), `per_host` / `per_target` to iterate discovered hosts / web URLs, `timeout` (seconds, 10–3600, default 900) |
 | `report` | reporting | — (added automatically if omitted) |
 
 **Placeholders** substituted at run time, always confined to your scope:
 `{scope}`, `{host}`, `{hosts}`, `{ports}`, `{web_urls}`.
 
-**The `command` action** lets experts invoke a tool directly, but safely: the
-tool must be on an **allowlist** (nmap, masscan, dig, whois, whatweb, nbtscan,
-snmpwalk, nuclei, nikto, enum4linux-ng, sslscan, wpscan, gobuster/ffuf/feroxbuster,
-…), args are rejected if they contain shell metacharacters, and everything runs
-as an argv list — **never through a shell**. Tools classed as active (nuclei,
-nikto, enum4linux-ng, the busters…) and any step with `"active": true` run
-**only** when active testing is enabled, same as the assessment phase.
+**The `command` action** lets experts invoke a tool directly, but safely. The
+allowlist covers the **whole installed offensive toolset** — every tool the
+edition detects on the image (nmap, masscan, nuclei, nikto, wpscan, sqlmap,
+hydra, netexec, enum4linux-ng, responder, ettercap, aircrack-ng/wifite/reaver,
+hashcat/john, msfconsole, tcpdump/tshark, …) plus a set of recon helpers (dig,
+whois, whatweb, nbtscan, snmpwalk, sslscan/sslyze, gobuster/ffuf/feroxbuster, …).
+It is a **safety** allowlist, not a feature list: the step runs as an **argv list,
+never through a shell**, args are rejected if they contain shell metacharacters,
+and the allowlist is what stops a shared/uploaded playbook from running an
+arbitrary binary (`rm`, `dd`, a reverse shell) — the engine runs as root.
+Everything offensive is classed **active** and runs **only** when active testing
+is enabled, same as the assessment phase.
+
+> **Fit note.** Scanners/enumerators (nmap, nuclei, sqlmap, netexec,
+> enum4linux-ng, the busters) fit the step model directly — point them at
+> `{scope}`/`{host}`/`{web_urls}` and read the output. Tools that need external
+> inputs or state are allowed but need the right args: **cracking** (hashcat,
+> john) wants a hash file + wordlist, **Wi-Fi** (aircrack-ng, airodump-ng,
+> wifite, reaver, bully, kismet) wants a monitor-mode capture rather than an IP
+> scope, and **interactive / long-running** tools (msfconsole, setoolkit,
+> responder, ettercap, tcpdump) should be invoked non-interactively (e.g.
+> `msfconsole -q -x …`) or they will run until the step `timeout`.
 
 ## Roadmap
 
