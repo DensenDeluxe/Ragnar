@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **396** distinct CVE IDs
-- **336** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **399** distinct CVE IDs
+- **339** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **51** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -41,7 +41,7 @@ detector works is in [nettools.md](nettools.md).
 | 2023 | 49 |
 | 2024 | 55 |
 | 2025 | 45 |
-| 2026 | 52 |
+| 2026 | 55 |
 
 ## By detector
 
@@ -73,7 +73,7 @@ detector works is in [nettools.md](nettools.md).
 | LDAP Watch | 3 |
 | Liebert Guard | 2 |
 | LLDP Watch | 30 |
-| MikroTik Guard | 16 |
+| MikroTik Guard | 19 |
 | Modbus Watch | 4 |
 | network_diagnostics | 1 |
 | NTP Watch | 15 |
@@ -483,6 +483,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-52897](https://nvd.nist.gov/vuln/detail/CVE-2026-52897) |  | detected | Arista Guard | — |
 | [CVE-2026-52898](https://nvd.nist.gov/vuln/detail/CVE-2026-52898) |  | detected | Arista Guard | — |
 | [CVE-2026-53275](https://nvd.nist.gov/vuln/detail/CVE-2026-53275) |  | detected | IGMP / MLD Watch | — |
+| [CVE-2026-56719](https://nvd.nist.gov/vuln/detail/CVE-2026-56719) |  | detected | MikroTik Guard | — |
 | [CVE-2026-67276](https://nvd.nist.gov/vuln/detail/CVE-2026-67276) | MikroTrick SSH key forgery (RouterOS) | detected | MikroTik Guard | — |
 | [CVE-2026-67281](https://nvd.nist.gov/vuln/detail/CVE-2026-67281) |  | detected | MikroTik Guard | — |
 | [CVE-2026-73458](https://nvd.nist.gov/vuln/detail/CVE-2026-73458) |  | detected | BFD Watch | — |
@@ -491,6 +492,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-81563](https://nvd.nist.gov/vuln/detail/CVE-2026-81563) |  | detected | DNS Watch | — |
 | [CVE-2026-81642](https://nvd.nist.gov/vuln/detail/CVE-2026-81642) | DNS compression-pointer loop | detected | DNS Watch | — |
 | [CVE-2026-81736](https://nvd.nist.gov/vuln/detail/CVE-2026-81736) |  | detected | DNS Watch | — |
+| [CVE-2026-84411](https://nvd.nist.gov/vuln/detail/CVE-2026-84411) |  | detected | MikroTik Guard | — |
 | [CVE-2026-86060](https://nvd.nist.gov/vuln/detail/CVE-2026-86060) | MikroTrick username escalation (RouterOS) | detected | MikroTik Guard | — |
+| [CVE-2026-89028](https://nvd.nist.gov/vuln/detail/CVE-2026-89028) |  | detected | MikroTik Guard | — |
 | [CVE-2026-93345](https://nvd.nist.gov/vuln/detail/CVE-2026-93345) |  | context only | BGP Path Watch | — |
 | [CVE-2026-102019](https://nvd.nist.gov/vuln/detail/CVE-2026-102019) |  | detected | RIP Watch | — |

@@ -2,6 +2,20 @@
 
 ## Releases
 
+### 2026-10-18
+
+#### [#978](https://github.com/PierreGode/Ragnar/pull/978) — feat(net): MikroTik Switch & Router Guard v3 — SMB1 SessionSetupAndX + web-mgmt body-length (Oct 2026 audit)
+*branch `feature/mikrotik-guard-v3`*
+
+- **MikroTik Guard v3** ports the two new codes from the standalone `mikrotikwatch` October 2026 audit into the in-app guard (`_mikrotik_analyze`), both detection-only on the per-packet capture model:
+  - **`MTK-022` (CVE-2026-56719 + CVE-2026-89028)** — the pre-auth **SMB1 SessionSetupAndX** crafted `uniPwdLen`. One code for both CVEs: the password-length fields claim more than the frame's own `ByteCount` (`CWE-191` length-arithmetic under-flow, 89028) or reach past the bytes the frame carries (`CWE-125` out-of-bounds read, 56719). The handler runs *before* credential validation (PR:N), and the tap sees the crafted frame but never which way the daemon's handler then broke, so the structural relations are reported as flags and a malformation that is **not** the `uniPwdLen` shape is filed under the generic `MTK-002`. The under-flow relation is declared-vs-declared (it survives a snaplen-truncated segment); the over-read relation is suppressed when the single segment did not carry the whole frame — no false positive on a legitimately long request the capture cut short.
+  - **`MTK-023` (CVE-2026-84411, CVSS 9.8, unauthenticated root)** — the web-management **HTTP body-length under-flow**, reported as a **structural class, not a CVE-exact signature**, because MikroTik and CISA (ICSA-26-272-06) withheld the function, path and corruption primitive. It reads the **raw** request header block (a negative `Content-Length` is otherwise clamped away before any consumer sees it) and flags the bounded set of body-length lies `CWE-191` permits — negative / non-numeric / over-64-bit / absurd / conflicting `Content-Length`, `Content-Length` with `Transfer-Encoding: chunked`, or a non-hex / runaway chunk size — at **medium confidence by construction**, and raises a version-screen **posture** from MNDP alone (every RouterOS 6.x and 7.x below 7.24). The delivered-vs-declared case needs a flow-close signal the per-packet model does not carry and is omitted.
+- **Two further v3 CVEs are routed, not duplicated here:** the **xt_tls SNI `host_name` over-read** (CVE-2026-52346 → **TLS Watch**) and the **labelled-VPN MP_REACH NLRI** under-flow (CVE-2026-93345 → **BGP Path Watch**), each handled where the decoder already lives. `MTK-C02` / `MTK-C03` remain deferred (cross-flow / cross-time correlations; `MTK-C02` also needs the unported `MTK-018`).
+- **CVE index +3 named / +3 detected → 399 named / 339 detected.** CVE-2026-56719, CVE-2026-89028 and CVE-2026-84411 all attribute to **MikroTik Guard** (all 2026, so the 2026 tally is 52 → 55); context (51) unchanged. CREDITS.md / README.md counts synced.
+- **Self-test:** the `mikrotik_guard` suite grows **27 → 46** scenarios — MTK-022 well-formed / minimal-crafted / under-flow-only / not-`uniPwdLen`→`MTK-002` / WordCount-12 gate / snaplen-truncation-no-FP, and MTK-023 six malformation cases + a well-formed FP guard + the MNDP version posture + a patched-version negative + registry wiring. Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Docs:** [nettools.md › MikroTik Guard](nettools.md#mikrotik-switch-and-router-guard).
+- *Note: PR number is a prediction. This branch and `feature/tls-watch-v9` both branch off `main`; whichever merges second will need a trivial reconcile on `docs/releases.md` and the CVE-count lines in `README.md` / `docs/CREDITS.md`.*
+
 ### 2026-10-17
 
 #### [#977](https://github.com/PierreGode/Ragnar/pull/977) — feat(net): BGP Pathwatch v7 — CVE-2026-93345 labelled-VPN NLRI (passive tap)
