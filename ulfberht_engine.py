@@ -881,15 +881,16 @@ def suggest_step(tool):
     return step
 
 
-def build_playbook_from_tools(name, tools, description=None):
-    """Assemble a methodology-ordered playbook from a list of tool binaries
-    (as picked in the Arsenal) and save it. Always includes an nmap discovery
-    sweep (so {host}/{web_urls}/{ports} resolve), a posture pass, and a report."""
+def build_playbook_spec(name, tools, description=None):
+    """Assemble a methodology-ordered playbook spec from tool binaries (as picked
+    in the Arsenal) WITHOUT saving — for the editor preview. Returns (spec, error).
+    Always includes an nmap discovery sweep (so {host}/{web_urls}/{ports} resolve),
+    a posture pass, and a report."""
     tools = [t for t in (tools or []) if t in _ALLOWED_TOOLS]
     if not name:
-        return {"success": False, "error": "Playbook needs a name."}
+        return None, "Playbook needs a name."
     if not tools:
-        return {"success": False, "error": "Select at least one tool."}
+        return None, "Select at least one tool."
     steps = []
     if "nmap" not in tools:   # ensure discovery populates the target placeholders
         steps.append({"phase": "discovery", "action": "nmap",
@@ -906,6 +907,14 @@ def build_playbook_from_tools(name, tools, description=None):
                        + "). Review/edit tool args before running."),
         "steps": steps,
     }
+    return spec, None
+
+
+def build_playbook_from_tools(name, tools, description=None):
+    """Build the spec from tools and save it (one-shot, no editor step)."""
+    spec, err = build_playbook_spec(name, tools, description)
+    if err:
+        return {"success": False, "error": err}
     return save_playbook(name, spec)
 
 
