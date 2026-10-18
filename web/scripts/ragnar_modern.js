@@ -29121,16 +29121,49 @@ function ulfShowHelp() {
     pre.classList.remove('hidden');
 }
 
+let ulfScopeTargets = null;   // set when a targets file is loaded
+function ulfLoadTargetsFile(input) {
+    const st = document.getElementById('ulf-scope-file-status');
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        // one target per line; strip blank lines and # comments
+        const lines = String(reader.result || '').split(/\r?\n/)
+            .map(l => l.replace(/#.*$/, '').trim()).filter(l => l.length);
+        if (!lines.length) { if (st) { st.style.color = '#f87171'; st.textContent = 'No targets found in file.'; } ulfScopeTargets = null; return; }
+        ulfScopeTargets = lines;
+        const sc = document.getElementById('ulf-scope');
+        if (sc) { sc.value = ''; sc.disabled = true; sc.placeholder = lines.length + ' targets from ' + f.name; }
+        if (st) { st.style.color = '#4ade80'; st.innerHTML = lines.length + ' targets from <b>' + _esc(f.name) + '</b> · <a onclick="ulfClearTargetsFile()" class="underline cursor-pointer">clear</a>'; }
+    };
+    reader.readAsText(f);
+}
+function ulfClearTargetsFile() {
+    ulfScopeTargets = null;
+    const sc = document.getElementById('ulf-scope'); if (sc) { sc.disabled = false; sc.placeholder = '192.168.1.0/24'; }
+    const st = document.getElementById('ulf-scope-file-status'); if (st) st.textContent = '';
+    const fi = document.getElementById('ulf-scope-file'); if (fi) fi.value = '';
+}
+
 function ulfStartRun() {
     const pb = (document.getElementById('ulf-playbook') || {}).value;
     const scope = ((document.getElementById('ulf-scope') || {}).value || '').trim();
     const active = (document.getElementById('ulf-active') || {}).checked;
     const msg = document.getElementById('ulf-run-msg');
-    if (!scope) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a scope (IP / CIDR / host).'; } return; }
+    const body = { playbook: pb, enable_active: active };
+    if (ulfScopeTargets && ulfScopeTargets.length) {
+        body.targets = ulfScopeTargets;
+    } else if (scope) {
+        body.scope = scope;
+    } else {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a scope (IP / CIDR / host) or load a targets file.'; }
+        return;
+    }
     if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Starting…'; }
     fetch('/api/ulfberht/run', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({playbook: pb, scope: scope, enable_active: active})
+        body: JSON.stringify(body)
     }).then(r => r.json()).then(d => {
         if (d.error) { if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error; } return; }
         ulfCurrentRun = d.run_id;

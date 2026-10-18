@@ -389,23 +389,42 @@ def _valid_scope(scope):
     return bool(scope) and bool(_SCOPE_RE.match(scope.strip()))
 
 
-def start_run(playbook_id, scope, enable_active=False):
-    """Kick off an engagement run in a background thread. Returns (run_id, err)."""
+# A single target (one line of a targets file): an IP / CIDR / host, no spaces.
+_TARGET_RE = re.compile(r"^[0-9A-Za-z._:/\-]{1,100}$")
+_MAX_TARGETS = 4096
+
+
+def _valid_target(t):
+    return bool(t) and bool(_TARGET_RE.match(t.strip()))
+
+
+def start_run(playbook_id, scope, enable_active=False, targets=None):
+    """Kick off an engagement run in a background thread. Returns (run_id, err).
+    Scope may be a single IP/CIDR/host (``scope``) or a list of them (``targets``,
+    e.g. parsed from an uploaded targets file — one per line)."""
     if not is_enabled():
         return None, "Ulfberht engine is available only on the Ragnar OS Ulfberht image."
     spec = _resolve_playbook(playbook_id)
     if not spec:
         return None, "Unknown or invalid playbook."
-    scope = (scope or "").strip()
-    if not _valid_scope(scope):
+    # Build the validated target list — an explicit list wins over the single scope.
+    if isinstance(targets, list):
+        tlist = [t.strip() for t in targets if isinstance(t, str) and _valid_target(t)]
+    else:
+        scope = (scope or "").strip()
+        tlist = [scope] if _valid_scope(scope) else []
+    if not tlist:
         return None, "Invalid or empty scope."
+    tlist = tlist[:_MAX_TARGETS]
+    scope_display = tlist[0] if len(tlist) == 1 else f"{len(tlist)} targets"
     run_id = uuid.uuid4().hex[:12]
     run = {
         "id": run_id,
         "playbook": spec["id"],
         "playbook_name": spec["name"],
         "steps": spec["steps"],
-        "scope": scope,
+        "scope": scope_display,
+        "targets": tlist,
         "enable_active": bool(enable_active),
         "status": "running",
         "phase": None,
@@ -545,7 +564,7 @@ def _act_nmap(run, params):
         cmd += ["-p", ports]
     else:
         cmd += ["--top-ports", "100"]
-    cmd += ["-oX", "-", run["scope"]]
+    cmd += ["-oX", "-"] + run["targets"]   # nmap accepts multiple targets as argv
     _log(run, "nmap " + " ".join(cmd[1:]))
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3600)
@@ -655,7 +674,7 @@ def _expand_args(run, args, target=None):
     out = []
     for a in args:
         if a == "{scope}":
-            out.append(run["scope"])
+            out += run["targets"]
         elif a == "{host}":
             out.append(target or "")
         elif a == "{hosts}":
@@ -732,6 +751,10 @@ def _act_report(run, params):
     A(f"# Engagement Report — {run['playbook_name']}")
     A("")
     A(f"- **Scope:** `{run['scope']}`")
+    if len(run.get("targets", [])) > 1:
+        _tg = run["targets"]
+        A("- **Targets:** " + ", ".join(f"`{t}`" for t in _tg[:50])
+          + (f" … (+{len(_tg) - 50} more)" if len(_tg) > 50 else ""))
     A(f"- **Started:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run['started']))}")
     A("- **Methodology:** NIST SP 800-115 (Discovery → Diagnostics → Assessment → Reporting)")
     A(f"- **Active validation:** {'enabled' if run['enable_active'] else 'not run (passive engagement)'}")
