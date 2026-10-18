@@ -5765,7 +5765,7 @@
                         </div>
                     </div>
                     <p id="ulf-playbook-desc" class="text-xs text-gray-500 mt-2"></p>
-                    <label class="flex items-center gap-2 mt-3 text-sm"><input type="checkbox" id="ulf-active"> <span>Enable active assessment phase <span class="text-xs text-gray-500">(authorized targets only; also requires attacks enabled)</span></span></label>
+                    <label class="flex items-center gap-2 mt-3 text-sm"><input type="checkbox" id="ulf-active" checked> <span>Enable active assessment phase <span class="text-xs text-gray-500">(authorized targets only — the Ulfberht edition is your authorization; not tied to auto-attacks)</span></span></label>
                     <button onclick="ulfStartRun()" class="mt-3 text-white px-4 py-2 rounded-lg text-sm" style="background:#dc2626">Run engagement</button>
                     <div id="ulf-run-msg" class="text-xs mt-2"></div>
                 </div>
@@ -5773,7 +5773,10 @@
                 <!-- Playbook library + upload (mirrors Device Console / Rubber Ducky script folders) -->
                 <div class="glass-card p-4 mb-4">
                     <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
-                        <div class="font-semibold text-sm">Playbook library <span id="ulf-lib-count" class="text-xs text-gray-500"></span></div>
+                        <button onclick="ulfToggleLibrary()" class="flex items-center gap-2 font-semibold text-sm text-left">
+                            <span id="ulf-lib-chevron" class="inline-block text-gray-400 transition-transform">▸</span>
+                            Playbook library <span id="ulf-lib-count" class="text-xs text-gray-500"></span>
+                        </button>
                         <div class="flex items-center gap-2">
                             <label class="text-white px-3 py-1.5 rounded text-xs cursor-pointer" style="background:#dc2626">Upload .json
                                 <input type="file" id="ulf-upload" accept=".json,application/json" class="hidden" onchange="ulfUploadPlaybook(this)">
@@ -5781,8 +5784,10 @@
                             <button onclick="ulfShowHelp()" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-xs">Format help</button>
                         </div>
                     </div>
-                    <p class="text-xs text-gray-500 mb-3">Built-in playbooks ship with the image. Upload your own <code>.json</code> playbooks — they sync to the <code>engagement_playbooks</code> folder in the <a onclick="showTab('files')" class="underline cursor-pointer">Files tab</a> (same as Device Console scripts &amp; Rubber Ducky payloads), where you can also edit or delete them.</p>
-                    <div id="ulf-library" class="grid sm:grid-cols-2 gap-2"></div>
+                    <div id="ulf-library-body" class="hidden">
+                        <p class="text-xs text-gray-500 mb-3 mt-1">Built-in playbooks ship with the image. Upload your own <code>.json</code> playbooks — they sync to the <code>engagement_playbooks</code> folder in the <a onclick="showTab('files')" class="underline cursor-pointer">Files tab</a> (same as Device Console scripts &amp; Rubber Ducky payloads), where you can also edit or delete them.</p>
+                        <div id="ulf-library" class="grid sm:grid-cols-2 gap-2"></div>
+                    </div>
                     <div id="ulf-upload-msg" class="text-xs mt-2"></div>
                     <pre id="ulf-help" class="hidden mt-3 p-3 bg-slate-900 rounded text-xs overflow-x-auto whitespace-pre-wrap" style="max-height:50vh"></pre>
                 </div>
@@ -9726,7 +9731,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261018-ulfberht-engage-v2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261018-ulfberht-engage-v3"></script>
 
 
 

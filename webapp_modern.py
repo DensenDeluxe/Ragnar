@@ -27276,22 +27276,23 @@ def ulfberht_playbook_delete_api(playbook_id):
 
 @app.route('/api/ulfberht/run', methods=['POST'])
 def ulfberht_run_api():
-    """Start an engagement run. The active/assessment phase runs only when the
-    caller opts in AND the server's enable_attacks flag is on."""
+    """Start an engagement run. The active/assessment phase runs when the caller
+    opts in per-run. It is authorized by the Ulfberht EDITION itself (the engine
+    is marker-locked to the official image) and is deliberately NOT tied to the
+    global 'enable_attacks' (auto-attacks) toggle — choosing the Ulfberht edition
+    is the authorization, so an operator can keep auto-attacks off and still run
+    a scoped active engagement."""
     try:
         import ulfberht_engine
         if not ulfberht_engine.is_enabled():
             return jsonify({"error": "Ulfberht engine is available only on the Ragnar OS Ulfberht image."}), 403
         data = request.get_json(silent=True) or {}
-        want_active = bool(data.get('enable_active'))
-        server_allows = bool(shared_data.config.get('enable_attacks', True))
-        active = want_active and server_allows
+        active = bool(data.get('enable_active'))
         run_id, err = ulfberht_engine.start_run(
             data.get('playbook', ''), data.get('scope', ''), enable_active=active)
         if err:
             return jsonify({"error": err}), 400
-        return jsonify({"run_id": run_id, "active": active,
-                        "active_blocked": want_active and not server_allows})
+        return jsonify({"run_id": run_id, "active": active, "active_blocked": False})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
