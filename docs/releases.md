@@ -4,6 +4,13 @@
 
 ### 2026-10-18
 
+#### [#982](https://github.com/PierreGode/Ragnar/pull/982) — feat(ulfberht): Engagements UX — active phase authorized by the edition, collapsible playbook library
+*branch `feature/ulfberht-engagements-ux`*
+
+- **Active phase is authorized by the Ulfberht EDITION, not the global auto-attacks toggle.** The active/assessment phase now runs on the per-run opt-in **+ the edition lock** (the engine is marker-locked to the official image) and is **no longer tied to `enable_attacks`** — an operator can keep auto-attacks off and still run a scoped active engagement. `/api/ulfberht/run` drops the `enable_attacks` coupling; the **"Enable active assessment" checkbox now defaults to checked**; the label and Format-help text no longer say "requires attacks enabled".
+- **Collapsible playbook library** — default collapsed, showing only the header + **Upload .json** + **Format help** buttons; click the header (chevron) to expand the playbook cards. Keeps the Engagements tab tidy as the library grows.
+- **Cache-buster → v3** so the Format help (which lists the live tool catalog — the full ~41-tool offensive set from #981) refreshes on a normal reload.
+
 #### [#981](https://github.com/PierreGode/Ragnar/pull/981) — feat(ulfberht): playbook `command` action covers the full installed offensive toolset
 *branch `feature/ulfberht-playbook-arsenal`*
 
