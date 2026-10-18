@@ -1272,7 +1272,7 @@ def build_ai_prompt(name, tools, instruction):
         "  2. \"command\" steps run as an argv list, NEVER through a shell. Each arg is a",
         "     string. These characters are FORBIDDEN in any arg:  ; & | < > $ ` \\ \" '  and newlines.",
         "     No pipes, redirects, command chaining, globbing or sub-shells.",
-        "  3. \"tool\" MUST be one of the allowlisted tools below — nothing else.",
+        "  3. \"tool\" MUST be one of the allowlisted tools below — or best fit.",
         "  4. End with a {\"phase\": \"reporting\", \"action\": \"report\"} step.",
         "  5. Output valid JSON only.",
         "",
