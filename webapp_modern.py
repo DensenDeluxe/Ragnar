@@ -27248,6 +27248,11 @@ def ulfberht_playbooks_api():
             data = request.get_json(silent=True) or {}
             name = data.get('name') or (data.get('playbook') or {}).get('name') \
                 or (data.get('playbook') or {}).get('id')
+            # Arsenal builder: {name, tools:[bin,...]} -> generate + save a playbook.
+            if isinstance(data.get('tools'), list):
+                res = ulfberht_engine.build_playbook_from_tools(
+                    name, data.get('tools'), data.get('description'))
+                return jsonify(res), (200 if res.get('success') else 400)
             content = data.get('playbook', data.get('content'))
             if content is None:
                 return jsonify({"success": False, "error": "Missing 'playbook' body."}), 400

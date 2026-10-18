@@ -28852,13 +28852,52 @@ function refreshSystemStatus() {
 // ── Ulfberht edition ("hidden switch") ──────────────────────────────────────
 // Reveals the System-tab edition card only on the security-distro base; on a
 // standard Raspberry Pi OS build the card stays hidden and nothing changes.
-function _ulfToolChip(t) {
-    const chip = document.createElement('span');
-    chip.className = 'text-xs px-2 py-0.5 rounded';
-    chip.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12)';
+let ulfArsenalSel = new Set();
+const _ULF_CHIP_OFF = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12)';
+const _ULF_CHIP_ON = 'background:rgba(220,38,38,0.25);border:1px solid rgba(220,38,38,0.6)';
+function _ulfToolChip(t, selectable) {
+    const chip = document.createElement(selectable ? 'button' : 'span');
+    chip.className = 'ulf-chip text-xs px-2 py-0.5 rounded' + (selectable ? ' cursor-pointer' : '');
+    chip.style.cssText = _ULF_CHIP_OFF;
     chip.title = (t.category || '') + ' · ' + (t.path || '');
     chip.textContent = t.name || t.bin;
+    if (selectable) {
+        chip.type = 'button';
+        chip.dataset.bin = t.bin || '';
+        if (ulfArsenalSel.has(chip.dataset.bin)) chip.style.cssText = _ULF_CHIP_ON;
+        chip.onclick = () => ulfArsenalToggle(chip);
+    }
     return chip;
+}
+function ulfArsenalToggle(chip) {
+    const bin = chip.dataset.bin; if (!bin) return;
+    if (ulfArsenalSel.has(bin)) { ulfArsenalSel.delete(bin); chip.style.cssText = _ULF_CHIP_OFF; }
+    else { ulfArsenalSel.add(bin); chip.style.cssText = _ULF_CHIP_ON; }
+    const c = document.getElementById('ulf-arsenal-sel-count'); if (c) c.textContent = ulfArsenalSel.size;
+}
+function ulfArsenalClearSel() {
+    ulfArsenalSel.clear();
+    document.querySelectorAll('#ulf-arsenal-tools .ulf-chip').forEach(ch => ch.style.cssText = _ULF_CHIP_OFF);
+    const c = document.getElementById('ulf-arsenal-sel-count'); if (c) c.textContent = '0';
+    const m = document.getElementById('ulf-arsenal-build-msg'); if (m) m.textContent = '';
+}
+function ulfArsenalBuild() {
+    const msg = document.getElementById('ulf-arsenal-build-msg');
+    const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    if (!ulfArsenalSel.size) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Select at least one tool.'; } return; }
+    if (!name) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a playbook name.'; } return; }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Building…'; }
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, tools: [...ulfArsenalSel] }) })
+        .then(r => r.json()).then(d => {
+            if (d.success) {
+                if (msg) { msg.style.color = d.warning ? '#fbbf24' : '#4ade80';
+                    msg.textContent = d.warning ? ('Saved with a note: ' + d.warning)
+                        : ('Saved “' + (d.file || name) + '” — now in the Engagements tab.'); }
+                ulfArsenalClearSel();
+                if (typeof ulfLoadPlaybooks === 'function') ulfLoadPlaybooks();
+            } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Build failed'; }
+        }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
 }
 let ulfEnabled = false;
 function fetchEdition() {
@@ -28898,7 +28937,7 @@ function fetchEdition() {
                 const at = document.getElementById('ulf-arsenal-tools');
                 if (at) {
                     at.innerHTML = '';
-                    (d.tools || []).forEach(t => at.appendChild(_ulfToolChip(t)));
+                    (d.tools || []).forEach(t => at.appendChild(_ulfToolChip(t, true)));
                     if (!(d.tools || []).length) at.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
                 }
                 ars.classList.remove('hidden');
