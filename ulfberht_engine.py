@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """
-Ulfberht Engagement engine -- coordinated security workflows.
+Ulfberht Engagement engine -- coordinated, data-driven security workflows.
 
 This is the professional/educational differentiator of the Ragnar OS Ulfberht
 edition: not a drawer of tools, but **playbooks** that chain the phases of a real
 engagement -- discovery -> diagnostics -> assessment -> reporting -- under one
 scope, into one methodology-aligned report (NIST SP 800-115 / PTES).
+
+v2 — playbooks are now DATA, not code:
+  * A playbook is an ordered list of **steps**; each step runs one **action**
+    from a fixed catalog (nmap / posture / nuclei / command / report) with
+    validated parameters.
+  * Built-in playbooks ship with the image; **operators can author and upload
+    their own** `.json` playbooks, which live in data/engagement_playbooks/ and
+    show up in the Files tab (same pattern as Device Console scripts and Rubber
+    Ducky payloads). Uploaded playbooks are validated on load.
+  * The `command` action can run an **allowlisted** tool with validated args
+    (no shell, no metacharacters) — power for experts without turning a JSON
+    file into arbitrary shell.
 
 It is EXCLUSIVE to the official Ulfberht image: every entry point checks the
 build-time edition marker via ragnar_edition. On the standard image, or on a
@@ -13,18 +25,24 @@ stock Kali box that merely ran install_ragnar.sh, the engine refuses to run and
 the UI never shows it.
 
 Safety model:
-  * Scope is entered once and every step is confined to it.
+  * Scope is entered once; {scope} is the only target placeholder and every tool
+    is pointed at it (or at hosts discovered inside it).
   * Discovery + diagnostics are passive/safe and always allowed.
-  * The assessment phase is active and runs ONLY when the caller passes
-    enable_active=True (wired to Ragnar's existing enable_attacks opt-in).
-  * Everything runs in a background thread with per-tool timeouts.
+  * Any step marked "active" (and the built-in assessment actions) runs ONLY
+    when the caller passes enable_active=True (wired to Ragnar's enable_attacks
+    opt-in). An uploaded playbook cannot bypass that gate.
+  * `command` tools are allowlisted; args are validated to contain no shell
+    metacharacters; everything runs via a list argv (never shell=True) with a
+    per-step timeout.
 
 In-memory run registry (ephemeral; a run does not survive a service restart),
-which is the right scope for v1.
+which is the right scope for a live engagement console.
 """
 from __future__ import annotations
 
 import html
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -38,6 +56,9 @@ try:
 except Exception:  # pragma: no cover - defensive
     ragnar_edition = None
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+PLAYBOOKS_DIR = os.path.join(_HERE, "data", "engagement_playbooks")
+
 # ── Methodology ─────────────────────────────────────────────────────────────
 # Phases map to NIST SP 800-115 ("Technical Guide to Information Security
 # Testing and Assessment"). Kept explicit so reports and teaching line up.
@@ -49,16 +70,28 @@ PHASE_META = {
     "reporting":   {"name": "Reporting",   "nist": "NIST SP 800-115 §8 (Post-Testing / Reporting)", "active": False},
 }
 
-PLAYBOOKS = {
-    "scoped-network-assessment": {
-        "id": "scoped-network-assessment",
-        "name": "Scoped Network Assessment",
-        "description": ("Sweep a scope for live hosts and services, derive a "
-                        "security posture from what is exposed, optionally "
-                        "validate findings, and produce one engagement report."),
-        "phases": list(PHASES),
-    },
+# Tools an operator may invoke from a `command` step. Recon/diagnostic tools are
+# always allowed; the ones marked active (offensive/validation) run only when
+# enable_active is on. Everything is argv-only (no shell).
+_ALLOWED_TOOLS = {
+    # passive / recon
+    "nmap": {"active": False}, "masscan": {"active": False},
+    "dig": {"active": False}, "host": {"active": False}, "whois": {"active": False},
+    "whatweb": {"active": False}, "nbtscan": {"active": False},
+    "onesixtyone": {"active": False}, "snmpwalk": {"active": False},
+    "fping": {"active": False}, "arp-scan": {"active": False},
+    # active / validation (gated by enable_active)
+    "nuclei": {"active": True}, "nikto": {"active": True},
+    "enum4linux": {"active": True}, "enum4linux-ng": {"active": True},
+    "smbclient": {"active": True}, "sslscan": {"active": True},
+    "sslyze": {"active": True}, "wpscan": {"active": True},
+    "testssl.sh": {"active": True}, "feroxbuster": {"active": True},
+    "gobuster": {"active": True}, "ffuf": {"active": True},
 }
+
+# Characters that must never appear in a command arg — closes shell-injection
+# even though we never use a shell. Also blocks path traversal of the binary.
+_ARG_BAD = re.compile(r"[;&|<>$`\n\r\\\"']")
 
 # Cleartext / high-risk services we flag in the diagnostics posture pass.
 # (service-name or port) -> (severity, title, reference)
@@ -81,9 +114,81 @@ _RISK_PORTS = {23: "telnet", 21: "ftp", 513: "rlogin", 514: "rsh",
                161: "snmp", 1433: "ms-sql-s", 3306: "mysql", 3389: "rdp"}
 
 _SCOPE_RE = re.compile(r"^[0-9a-zA-Z\.\:/\-\s]{1,200}$")
+_PORTSPEC_RE = re.compile(r"^[0-9,\-]{1,64}$")
 
 _runs = {}
 _lock = threading.Lock()
+
+
+# ── Built-in playbooks (step form) ──────────────────────────────────────────
+# Each is a dict: id, name, description, steps[]. A step is
+#   {"phase", "action", "params"{}, "active"?}.
+BUILTIN_PLAYBOOKS = {
+    "scoped-network-assessment": {
+        "id": "scoped-network-assessment",
+        "name": "Scoped Network Assessment",
+        "description": ("Sweep a scope for live hosts and services, derive a "
+                        "security posture from what is exposed, optionally "
+                        "validate web findings, and produce one report."),
+        "steps": [
+            {"phase": "discovery",   "action": "nmap",
+             "params": {"ports": "top-100", "service_version": True, "timing": "T4"}},
+            {"phase": "diagnostics", "action": "posture"},
+            {"phase": "assessment",  "action": "nuclei",
+             "params": {"severity": ["medium", "high", "critical"]}, "active": True},
+            {"phase": "reporting",   "action": "report"},
+        ],
+    },
+    "web-app-assessment": {
+        "id": "web-app-assessment",
+        "name": "Web Application Assessment",
+        "description": ("Find web services across the scope, fingerprint them, "
+                        "and run nuclei + a Nikto pass against each — a focused "
+                        "web engagement with a consolidated report."),
+        "steps": [
+            {"phase": "discovery",   "action": "nmap",
+             "params": {"ports": "80,443,8080,8443,8000,8888", "service_version": True, "timing": "T4"}},
+            {"phase": "diagnostics", "action": "posture"},
+            {"phase": "diagnostics", "action": "command",
+             "params": {"tool": "whatweb", "args": ["--no-errors", "{web_urls}"]}},
+            {"phase": "assessment",  "action": "nuclei",
+             "params": {"severity": ["low", "medium", "high", "critical"]}, "active": True},
+            {"phase": "assessment",  "action": "command",
+             "params": {"tool": "nikto", "args": ["-ask", "no", "-nointeractive", "-host", "{web_urls}"],
+                        "per_target": True}, "active": True},
+            {"phase": "reporting",   "action": "report"},
+        ],
+    },
+    "host-service-audit": {
+        "id": "host-service-audit",
+        "name": "Full-Port Host & Service Audit",
+        "description": ("Deep per-host audit: all TCP ports with version + safe "
+                        "default NSE scripts, posture analysis, and a report. "
+                        "Passive — no active exploitation."),
+        "steps": [
+            {"phase": "discovery",   "action": "nmap",
+             "params": {"ports": "1-65535", "service_version": True, "default_scripts": True, "timing": "T4"}},
+            {"phase": "diagnostics", "action": "posture"},
+            {"phase": "reporting",   "action": "report"},
+        ],
+    },
+    "smb-ad-recon": {
+        "id": "smb-ad-recon",
+        "name": "SMB / Active Directory Recon",
+        "description": ("Hunt SMB/LDAP/Kerberos across the scope and enumerate "
+                        "exposed SMB with enum4linux-ng. Enumeration is active "
+                        "— it runs only with active testing enabled."),
+        "steps": [
+            {"phase": "discovery",   "action": "nmap",
+             "params": {"ports": "88,135,139,389,445,636,3268,5985", "service_version": True, "timing": "T4"}},
+            {"phase": "diagnostics", "action": "posture"},
+            {"phase": "assessment",  "action": "command",
+             "params": {"tool": "enum4linux-ng", "args": ["-A", "{host}"], "per_host": True},
+             "active": True},
+            {"phase": "reporting",   "action": "report"},
+        ],
+    },
+}
 
 
 def is_enabled():
@@ -94,10 +199,157 @@ def is_enabled():
         return False
 
 
+# ── Playbook loading / validation ───────────────────────────────────────────
+def _slugify(name):
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return s or ("playbook-" + uuid.uuid4().hex[:6])
+
+
+def _validate_playbook(spec):
+    """Return (normalized_spec, error_or_None). Does not raise."""
+    if not isinstance(spec, dict):
+        return None, "Playbook must be a JSON object."
+    name = str(spec.get("name") or spec.get("id") or "").strip()
+    if not name:
+        return None, "Playbook needs a 'name'."
+    steps = spec.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None, "Playbook needs a non-empty 'steps' array."
+    norm_steps = []
+    for i, st in enumerate(steps):
+        if not isinstance(st, dict):
+            return None, f"Step {i+1} must be an object."
+        action = st.get("action")
+        if action not in _ACTIONS:
+            return None, f"Step {i+1}: unknown action '{action}'. Allowed: {', '.join(sorted(_ACTIONS))}."
+        phase = st.get("phase") or _DEFAULT_PHASE.get(action, "diagnostics")
+        if phase not in PHASES:
+            return None, f"Step {i+1}: unknown phase '{phase}'."
+        params = st.get("params") or {}
+        if not isinstance(params, dict):
+            return None, f"Step {i+1}: 'params' must be an object."
+        if action == "command":
+            tool = params.get("tool")
+            if tool not in _ALLOWED_TOOLS:
+                return None, (f"Step {i+1}: tool '{tool}' is not allowlisted. "
+                              f"Allowed: {', '.join(sorted(_ALLOWED_TOOLS))}.")
+            args = params.get("args", [])
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                return None, f"Step {i+1}: 'args' must be an array of strings."
+            for a in args:
+                if _ARG_BAD.search(a):
+                    return None, f"Step {i+1}: arg '{a}' contains forbidden shell characters."
+        if action == "nmap":
+            ps = params.get("ports")
+            if ps and not (ps in ("top-100", "top-1000") or _PORTSPEC_RE.match(str(ps))):
+                return None, f"Step {i+1}: invalid ports '{ps}'."
+        norm_steps.append({
+            "phase": phase, "action": action, "params": params,
+            "active": bool(st.get("active")) or PHASE_META[phase]["active"],
+        })
+    return {
+        "id": _slugify(spec.get("id") or name),
+        "name": name,
+        "description": str(spec.get("description") or "").strip(),
+        "steps": norm_steps,
+    }, None
+
+
+def _derive_phases(steps):
+    seen = []
+    for st in steps:
+        if st["phase"] not in seen:
+            seen.append(st["phase"])
+    return [p for p in PHASES if p in seen]
+
+
+def _public_playbook(spec, source, valid=True, error=None):
+    return {
+        "id": spec["id"], "name": spec["name"],
+        "description": spec.get("description", ""),
+        "steps": spec.get("steps", []),
+        "phases": _derive_phases(spec.get("steps", [])),
+        "source": source, "valid": valid, "error": error,
+        "active_steps": sum(1 for s in spec.get("steps", []) if s.get("active")),
+    }
+
+
+def _load_user_playbooks():
+    """Read data/engagement_playbooks/*.json. Returns list of _public_playbook."""
+    out = []
+    try:
+        files = sorted(f for f in os.listdir(PLAYBOOKS_DIR) if f.endswith(".json"))
+    except OSError:
+        return out
+    for fn in files:
+        path = os.path.join(PLAYBOOKS_DIR, fn)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except Exception as e:
+            out.append({"id": _slugify(fn[:-5]), "name": fn, "description": "",
+                        "steps": [], "phases": [], "source": "user",
+                        "valid": False, "error": f"Invalid JSON: {e}", "active_steps": 0,
+                        "file": fn})
+            continue
+        if "id" not in raw:
+            raw["id"] = fn[:-5]
+        norm, err = _validate_playbook(raw)
+        if err:
+            out.append({"id": _slugify(raw.get("id") or fn[:-5]),
+                        "name": raw.get("name") or fn, "description": raw.get("description", ""),
+                        "steps": raw.get("steps", []) if isinstance(raw.get("steps"), list) else [],
+                        "phases": [], "source": "user", "valid": False, "error": err,
+                        "active_steps": 0, "file": fn})
+        else:
+            pub = _public_playbook(norm, "user")
+            pub["file"] = fn
+            out.append(pub)
+    return out
+
+
 def list_playbooks():
-    return list(PLAYBOOKS.values())
+    """Built-in + user playbooks, each tagged with source/validity for the UI."""
+    pbs = [_public_playbook(p, "builtin") for p in BUILTIN_PLAYBOOKS.values()]
+    pbs += _load_user_playbooks()
+    return pbs
 
 
+def _resolve_playbook(playbook_id):
+    """Return a runnable, validated spec {id,name,steps} or None."""
+    if playbook_id in BUILTIN_PLAYBOOKS:
+        return BUILTIN_PLAYBOOKS[playbook_id]
+    for pub in _load_user_playbooks():
+        if pub["id"] == playbook_id and pub["valid"]:
+            return {"id": pub["id"], "name": pub["name"],
+                    "description": pub["description"], "steps": pub["steps"]}
+    return None
+
+
+def list_action_catalog():
+    """Describe the action catalog + allowlisted tools (for the authoring UI)."""
+    return {
+        "actions": [
+            {"action": "nmap", "phase": "discovery",
+             "params": {"ports": "top-100|top-1000|<portspec>", "service_version": "bool",
+                        "default_scripts": "bool (safe NSE)", "timing": "T0-T5"}},
+            {"action": "posture", "phase": "diagnostics",
+             "params": {"custom_rules": "[{match,severity,title,ref}]"}},
+            {"action": "nuclei", "phase": "assessment (active)",
+             "params": {"severity": "[info..critical]", "tags": "[...]"}},
+            {"action": "command", "phase": "any",
+             "params": {"tool": "allowlisted tool", "args": "[str,...]",
+                        "per_host": "bool", "per_target": "bool"}},
+            {"action": "report", "phase": "reporting", "params": {}},
+        ],
+        "tools": sorted(_ALLOWED_TOOLS),
+        "active_tools": sorted(t for t, m in _ALLOWED_TOOLS.items() if m["active"]),
+        "placeholders": ["{scope}", "{host}", "{hosts}", "{ports}", "{web_urls}"],
+        "phases": [{"id": p, **PHASE_META[p]} for p in PHASES],
+    }
+
+
+# ── Run registry ─────────────────────────────────────────────────────────────
 def _valid_scope(scope):
     return bool(scope) and bool(_SCOPE_RE.match(scope.strip()))
 
@@ -106,16 +358,18 @@ def start_run(playbook_id, scope, enable_active=False):
     """Kick off an engagement run in a background thread. Returns (run_id, err)."""
     if not is_enabled():
         return None, "Ulfberht engine is available only on the Ragnar OS Ulfberht image."
-    if playbook_id not in PLAYBOOKS:
-        return None, "Unknown playbook."
+    spec = _resolve_playbook(playbook_id)
+    if not spec:
+        return None, "Unknown or invalid playbook."
     scope = (scope or "").strip()
     if not _valid_scope(scope):
         return None, "Invalid or empty scope."
     run_id = uuid.uuid4().hex[:12]
     run = {
         "id": run_id,
-        "playbook": playbook_id,
-        "playbook_name": PLAYBOOKS[playbook_id]["name"],
+        "playbook": spec["id"],
+        "playbook_name": spec["name"],
+        "steps": spec["steps"],
         "scope": scope,
         "enable_active": bool(enable_active),
         "status": "running",
@@ -155,7 +409,7 @@ def get_report(run_id):
     return run["report_md"] if run else None
 
 
-# ── Execution ───────────────────────────────────────────────────────────────
+# ── Execution ─────────────────────────────────────────────────────────────────
 def _log(run, msg):
     with _lock:
         _runs[run["id"]]["log"].append(f"{time.strftime('%H:%M:%S')}  {msg}")
@@ -174,48 +428,110 @@ def _finding(run, severity, title, host, detail, ref=""):
         })
 
 
+def run_findings(run):
+    with _lock:
+        return list(_runs[run["id"]]["findings"])
+
+
+def _mark_phase(run, phase):
+    _set(run, phase=phase)
+    _log(run, f"── {PHASE_META[phase]['name']} ({PHASE_META[phase]['nist']})")
+    cur = get_run(run["id"])["phases_done"]
+    if phase not in cur:
+        _set(run, phases_done=cur + [phase])
+
+
 def _execute(run):
-    rid = run["id"]
+    """Run the playbook's steps in order, grouped by phase in the log/report."""
     try:
-        hosts = _phase_discovery(run)
-        _phase_diagnostics(run, hosts)
-        _phase_assessment(run, hosts)
-        _phase_reporting(run)
+        last_phase = None
+        for step in run["steps"]:
+            phase = step["phase"]
+            if phase != last_phase:
+                _mark_phase(run, phase)
+                last_phase = phase
+            action = step["action"]
+            if step.get("active") and not run["enable_active"]:
+                _log(run, f"skipped active step '{action}' — active testing not enabled (enable_attacks off).")
+                continue
+            try:
+                _ACTIONS[action](run, step.get("params") or {})
+            except Exception as e:
+                _log(run, f"step '{action}' error: {e}")
+        # Always finish with a report even if the playbook omitted one.
+        if not get_run(run["id"])["report_md"]:
+            _act_report(run, {})
         _set(run, status="completed", phase=None, finished=time.time())
     except Exception as e:  # never leave a run wedged in "running"
         _log(run, f"ERROR: {e}")
         _set(run, status="failed", finished=time.time())
 
 
-def _mark_phase(run, phase):
-    _set(run, phase=phase)
-    _log(run, f"── {PHASE_META[phase]['name']} ({PHASE_META[phase]['nist']})")
+# ── Target helpers ───────────────────────────────────────────────────────────
+def _web_targets(run):
+    out = []
+    for h in get_run(run["id"])["hosts"]:
+        for p in h["ports"]:
+            if p["service"] in ("http", "https") or p["port"] in (80, 443, 8080, 8443, 8000, 8888):
+                scheme = "https" if (p["service"] == "https" or p["port"] in (443, 8443)) else "http"
+                out.append(f"{scheme}://{h['ip']}:{p['port']}")
+    return out
 
 
-def _phase_discovery(run):
-    _mark_phase(run, "discovery")
-    scope = run["scope"]
-    hosts = []
+def _host_ips(run):
+    return [h["ip"] for h in get_run(run["id"])["hosts"]]
+
+
+def _discovered_ports(run):
+    ports = sorted({str(p["port"]) for h in get_run(run["id"])["hosts"] for p in h["ports"]})
+    return ",".join(ports)
+
+
+# ── Actions ──────────────────────────────────────────────────────────────────
+def _act_nmap(run, params):
     nmap = shutil.which("nmap")
     if not nmap:
         _log(run, "nmap not found; discovery skipped.")
-        return hosts
-    # Host + service discovery, XML out for robust parsing. Top 100 ports keeps
-    # it quick; -T4 timing; version detection.
-    _log(run, f"nmap -sV --top-ports 100 over {scope}")
+        return
+    cmd = [nmap]
+    if params.get("service_version", True):
+        cmd.append("-sV")
+    if params.get("default_scripts"):
+        cmd.append("-sC")
+    timing = str(params.get("timing", "T4"))
+    if re.match(r"^T[0-5]$", timing):
+        cmd.append("-" + timing)
+    ports = str(params.get("ports", "top-100"))
+    if ports == "top-100":
+        cmd += ["--top-ports", "100"]
+    elif ports == "top-1000":
+        cmd += ["--top-ports", "1000"]
+    elif _PORTSPEC_RE.match(ports):
+        cmd += ["-p", ports]
+    else:
+        cmd += ["--top-ports", "100"]
+    cmd += ["-oX", "-", run["scope"]]
+    _log(run, "nmap " + " ".join(cmd[1:]))
     try:
-        proc = subprocess.run(
-            [nmap, "-sV", "--top-ports", "100", "-T4", "-oX", "-", scope],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=1800,
-        )
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3600)
         hosts = _parse_nmap_xml(proc.stdout.decode("utf-8", "replace"))
     except subprocess.TimeoutExpired:
-        _log(run, "nmap timed out (1800s).")
+        _log(run, "nmap timed out."); return
     except Exception as e:
-        _log(run, f"nmap failed: {e}")
-    _set(run, hosts=hosts, phases_done=run["phases_done"] + ["discovery"])
-    _log(run, f"{len(hosts)} live host(s), {sum(len(h['ports']) for h in hosts)} open port(s).")
-    return hosts
+        _log(run, f"nmap failed: {e}"); return
+    # Merge into any hosts already discovered (ports deduped per host).
+    existing = {h["ip"]: h for h in get_run(run["id"])["hosts"]}
+    for h in hosts:
+        if h["ip"] in existing:
+            seen = {(p["port"], p["proto"]) for p in existing[h["ip"]]["ports"]}
+            for p in h["ports"]:
+                if (p["port"], p["proto"]) not in seen:
+                    existing[h["ip"]]["ports"].append(p)
+        else:
+            existing[h["ip"]] = h
+    merged = list(existing.values())
+    _set(run, hosts=merged)
+    _log(run, f"{len(merged)} live host(s), {sum(len(h['ports']) for h in merged)} open port(s).")
 
 
 def _parse_nmap_xml(xml_text):
@@ -252,71 +568,124 @@ def _parse_nmap_xml(xml_text):
     return hosts
 
 
-def _phase_diagnostics(run, hosts):
-    _mark_phase(run, "diagnostics")
-    # Passive posture analysis from what discovery exposed. This is the safe
-    # middle phase that also *aims* the assessment phase.
-    for h in hosts:
+def _act_posture(run, params):
+    custom = params.get("custom_rules") or []
+    custom_map = {}
+    for r in custom:
+        if isinstance(r, dict) and r.get("match"):
+            custom_map[str(r["match"]).lower()] = (
+                r.get("severity", "medium"), r.get("title", f"Custom rule: {r['match']}"),
+                r.get("ref", ""))
+    n0 = len(run_findings(run))
+    for h in get_run(run["id"])["hosts"]:
         for p in h["ports"]:
             key = p["service"] or _RISK_PORTS.get(p["port"], "")
-            risk = _RISK_SERVICES.get(key)
+            risk = _RISK_SERVICES.get(key) or custom_map.get(key) or custom_map.get(str(p["port"]))
             if risk:
                 sev, title, ref = risk
                 banner = " ".join(x for x in (p["product"], p["version"]) if x)
                 detail = f"{p['port']}/{p['proto']} {key}" + (f" — {banner}" if banner else "")
                 _finding(run, sev, title, h["ip"], detail, ref)
-    _set(run, phases_done=run["phases_done"] + ["diagnostics"])
-    n = len(run_findings(run))
-    _log(run, f"Posture analysis produced {n} finding(s).")
+    _log(run, f"Posture analysis produced {len(run_findings(run)) - n0} finding(s).")
 
 
-def run_findings(run):
-    with _lock:
-        return list(_runs[run["id"]]["findings"])
-
-
-def _phase_assessment(run, hosts):
-    _mark_phase(run, "assessment")
-    if not run["enable_active"]:
-        _log(run, "Assessment skipped — active testing not enabled (enable_attacks off).")
-        _set(run, phases_done=run["phases_done"] + ["assessment"])
-        return
-    # Best-effort active validation against web services, using nuclei when it is
-    # present. Confined to hosts/ports already found in scope.
+def _act_nuclei(run, params):
     nuclei = shutil.which("nuclei")
-    web = [(h["ip"], p["port"]) for h in hosts for p in h["ports"]
-           if p["service"] in ("http", "https") or p["port"] in (80, 443, 8080, 8443)]
+    web = _web_targets(run)
     if not web:
-        _log(run, "No web services found to validate.")
-    elif not nuclei:
-        _log(run, "nuclei not installed; assessment of web services skipped.")
-    else:
-        for ip, port in web[:25]:
-            scheme = "https" if port in (443, 8443) else "http"
-            target = f"{scheme}://{ip}:{port}"
-            _log(run, f"nuclei -silent {target}")
-            try:
-                proc = subprocess.run(
-                    [nuclei, "-u", target, "-silent", "-nc"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=600,
-                )
-                for line in proc.stdout.decode("utf-8", "replace").splitlines():
-                    line = line.strip()
-                    if line:
-                        _finding(run, "medium", "Nuclei match", ip, line, "nuclei")
-            except Exception as e:
-                _log(run, f"nuclei failed on {target}: {e}")
-    _set(run, phases_done=run["phases_done"] + ["assessment"])
+        _log(run, "No web services found to validate."); return
+    if not nuclei:
+        _log(run, "nuclei not installed; web assessment skipped."); return
+    sev = params.get("severity") or ["medium", "high", "critical"]
+    tags = params.get("tags") or []
+    for target in web[:25]:
+        cmd = [nuclei, "-u", target, "-silent", "-nc"]
+        if sev:
+            cmd += ["-severity", ",".join(s for s in sev if re.match(r"^[a-z]+$", str(s)))]
+        if tags:
+            cmd += ["-tags", ",".join(t for t in tags if re.match(r"^[a-z0-9,_-]+$", str(t)))]
+        _log(run, "nuclei " + " ".join(cmd[1:]))
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=900)
+            for line in proc.stdout.decode("utf-8", "replace").splitlines():
+                line = line.strip()
+                if line:
+                    _finding(run, "medium", "Nuclei match", target, line, "nuclei")
+        except Exception as e:
+            _log(run, f"nuclei failed on {target}: {e}")
+
+
+def _expand_args(run, args, target=None):
+    """Substitute placeholders; returns None if a placeholder yields nothing."""
+    out = []
+    for a in args:
+        if a == "{scope}":
+            out.append(run["scope"])
+        elif a == "{host}":
+            out.append(target or "")
+        elif a == "{hosts}":
+            out += _host_ips(run)
+        elif a == "{ports}":
+            out.append(_discovered_ports(run) or "1-1000")
+        elif a == "{web_urls}":
+            if target:
+                out.append(target)
+            else:
+                out += _web_targets(run)
+        else:
+            out.append(a)
+    return [x for x in out if x != ""]
+
+
+def _act_command(run, params):
+    tool = params.get("tool")
+    meta = _ALLOWED_TOOLS.get(tool)
+    if not meta:
+        _log(run, f"command: tool '{tool}' not allowlisted; skipped."); return
+    binpath = shutil.which(tool)
+    if not binpath:
+        _log(run, f"command: '{tool}' not installed; skipped."); return
+    args = params.get("args", [])
+    # Decide the iteration set for per-host / per-target steps.
+    targets = [None]
+    if params.get("per_host"):
+        targets = _host_ips(run) or []
+    elif params.get("per_target"):
+        targets = _web_targets(run) or []
+    if not targets:
+        _log(run, f"command: no targets for {tool}; skipped."); return
+    for tgt in targets[:25]:
+        argv = _expand_args(run, args, tgt)
+        if not argv:
+            continue
+        # Final safety sweep — no metacharacters survived substitution.
+        if any(_ARG_BAD.search(a) for a in argv):
+            _log(run, f"command: refusing unsafe args for {tool}."); continue
+        _log(run, f"{tool} " + " ".join(argv))
+        try:
+            proc = subprocess.run([binpath] + argv, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, timeout=900)
+            out = proc.stdout.decode("utf-8", "replace")
+            lines = [l for l in out.splitlines() if l.strip()]
+            tail = "\n".join(lines[-40:]) if lines else "(no output)"
+            host = tgt or run["scope"]
+            _finding(run, "info", f"{tool} output", host, tail[:4000], tool)
+            _log(run, f"{tool} finished ({len(lines)} line(s)).")
+        except subprocess.TimeoutExpired:
+            _log(run, f"{tool} timed out.")
+        except Exception as e:
+            _log(run, f"{tool} failed: {e}")
 
 
 def _sev_rank(s):
-    return {"high": 0, "medium": 1, "low": 2, "info": 3}.get(s, 4)
+    return {"high": 0, "critical": 0, "medium": 1, "low": 2, "info": 3}.get(s, 4)
 
 
-def _phase_reporting(run):
-    _mark_phase(run, "reporting")
-    # mark the phase done before rendering so the report reflects itself
-    _set(run, phases_done=get_run(run["id"])["phases_done"] + ["reporting"])
+def _act_report(run, params):
+    # mark reporting done before rendering so the report reflects itself
+    cur = get_run(run["id"])["phases_done"]
+    if "reporting" not in cur:
+        _set(run, phases_done=cur + ["reporting"], phase="reporting")
     run = get_run(run["id"])  # snapshot with all findings + phases
     findings = sorted(run["findings"], key=lambda f: _sev_rank(f["severity"]))
     lines = []
@@ -325,7 +694,7 @@ def _phase_reporting(run):
     A("")
     A(f"- **Scope:** `{run['scope']}`")
     A(f"- **Started:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run['started']))}")
-    A(f"- **Methodology:** NIST SP 800-115 (Discovery → Diagnostics → Assessment → Reporting)")
+    A("- **Methodology:** NIST SP 800-115 (Discovery → Diagnostics → Assessment → Reporting)")
     A(f"- **Active validation:** {'enabled' if run['enable_active'] else 'not run (passive engagement)'}")
     A("")
     A("## Summary")
@@ -334,7 +703,8 @@ def _phase_reporting(run):
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
     A(f"- Hosts live: **{len(run['hosts'])}**")
     A(f"- Findings: **{len(findings)}** "
-      f"(high {counts.get('high',0)}, medium {counts.get('medium',0)}, low {counts.get('low',0)})")
+      f"(high {counts.get('high',0)+counts.get('critical',0)}, "
+      f"medium {counts.get('medium',0)}, low {counts.get('low',0)}, info {counts.get('info',0)})")
     A("")
     A("## Hosts & services")
     if run["hosts"]:
@@ -352,7 +722,11 @@ def _phase_reporting(run):
     if findings:
         for f in findings:
             A(f"### [{f['severity'].upper()}] {f['title']} — {f['host']}")
-            A(f"- {f['detail']}")
+            det = f["detail"]
+            if "\n" in det:
+                A("```"); A(det); A("```")
+            else:
+                A(f"- {det}")
             if f["ref"]:
                 A(f"- Reference: {f['ref']}")
             A("")
@@ -369,23 +743,107 @@ def _phase_reporting(run):
     _set(run, report_md="\n".join(lines))
 
 
+_ACTIONS = {
+    "nmap": _act_nmap,
+    "posture": _act_posture,
+    "nuclei": _act_nuclei,
+    "command": _act_command,
+    "report": _act_report,
+}
+_DEFAULT_PHASE = {"nmap": "discovery", "posture": "diagnostics",
+                  "nuclei": "assessment", "command": "assessment", "report": "reporting"}
+
+
+# ── Playbook file management (for the Files tab / upload API) ─────────────────
+def _safe_pb_name(name):
+    base = os.path.basename(str(name or "")).strip()
+    if not base.endswith(".json"):
+        base += ".json"
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    return base if base != ".json" else ""
+
+
+def save_playbook(name, content):
+    """Create/overwrite a user playbook .json. content is a JSON string or dict.
+    Returns {success, error?, id?, file?, warning?}."""
+    fn = _safe_pb_name(name)
+    if not fn:
+        return {"success": False, "error": "Invalid playbook name."}
+    if isinstance(content, (dict, list)):
+        raw = content
+    else:
+        try:
+            raw = json.loads(content)
+        except Exception as e:
+            return {"success": False, "error": f"Not valid JSON: {e}"}
+    norm, err = _validate_playbook(raw if isinstance(raw, dict) else {})
+    # We still save an invalid playbook so the operator can fix it in Files, but
+    # report the validation error so the UI can warn.
+    os.makedirs(PLAYBOOKS_DIR, exist_ok=True)
+    path = os.path.join(PLAYBOOKS_DIR, fn)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(raw, fh, indent=2)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    res = {"success": True, "file": fn, "id": _slugify((raw.get("id") if isinstance(raw, dict) else None) or fn[:-5])}
+    if err:
+        res["warning"] = err
+    return res
+
+
+def delete_playbook(playbook_id):
+    for pub in _load_user_playbooks():
+        if pub["id"] == playbook_id or pub.get("file") == playbook_id:
+            try:
+                os.remove(os.path.join(PLAYBOOKS_DIR, pub["file"]))
+                return {"success": True}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+    return {"success": False, "error": "No such user playbook."}
+
+
+def ensure_examples():
+    """Drop a commented example playbook on first use so operators have a
+    template in the Files tab. Never overwrites."""
+    try:
+        os.makedirs(PLAYBOOKS_DIR, exist_ok=True)
+        ex = os.path.join(PLAYBOOKS_DIR, "example-quick-triage.json")
+        if not os.path.exists(ex) and not os.listdir(PLAYBOOKS_DIR):
+            with open(ex, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "id": "example-quick-triage",
+                    "name": "Example — Quick Triage",
+                    "description": "Top-100 sweep + posture + a safe whatweb pass. Copy and edit me.",
+                    "steps": [
+                        {"phase": "discovery", "action": "nmap",
+                         "params": {"ports": "top-100", "service_version": True}},
+                        {"phase": "diagnostics", "action": "posture"},
+                        {"phase": "diagnostics", "action": "command",
+                         "params": {"tool": "whatweb", "args": ["--no-errors", "{web_urls}"]}},
+                        {"phase": "reporting", "action": "report"},
+                    ],
+                }, fh, indent=2)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    import json
-    import os
+    import sys
     os.environ.setdefault("RAGNAR_EDITION", "ulfberht")  # dev test
     if ragnar_edition:
         ragnar_edition._cache = None
-    rid, err = start_run("scoped-network-assessment",
-                         os.environ.get("ULF_SCOPE", "127.0.0.1"),
-                         enable_active=False)
+    pb = sys.argv[1] if len(sys.argv) > 1 else "scoped-network-assessment"
+    scope = os.environ.get("ULF_SCOPE", "127.0.0.1")
+    rid, err = start_run(pb, scope, enable_active=("--active" in sys.argv))
     if err:
         print("error:", err); raise SystemExit(1)
     while True:
         r = get_run(rid)
         if r["status"] != "running":
             break
-        time.sleep(2)
-    print(json.dumps({"status": r["status"], "findings": r["findings"],
-                      "hosts": r["hosts"]}, indent=2))
+        time.sleep(1)
+    print(json.dumps({"status": r["status"], "hosts": r["hosts"],
+                      "findings": r["findings"], "log": r["log"]}, indent=2))
     print("\n----- REPORT -----\n")
     print(get_report(rid))

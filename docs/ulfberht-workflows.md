@@ -41,23 +41,71 @@ to a client — and something a student can be graded on.
 1. Boot the Ulfberht image; open the web UI (`:8000`). The **⚔️ Engagements** tab
    appears (it won't on a non-Ulfberht box). The detected offensive toolset also
    shows as the **Arsenal** panel on the Pentest tab.
-2. Pick a playbook, enter a **scope** (IP / CIDR / host), optionally enable the
-   active phase, and **Run engagement**.
+2. Pick a playbook — built-in or one of your own from the **Playbook library**
+   (where you can also **Upload .json** playbooks and delete your custom ones) —
+   enter a **scope** (IP / CIDR / host), optionally enable the active phase, and
+   **Run engagement**.
 3. Watch the phases progress and findings stream in; when it completes, **view**
    or **download** the engagement report.
 
-### Playbooks
+### Built-in playbooks
 
-- **Scoped Network Assessment** — the flagship: sweep → posture → (optional)
-  validation → report. More playbooks (web-app, Wi-Fi, AD/SMB) build on the same
-  engine.
+| Playbook | What it does |
+|----------|--------------|
+| **Scoped Network Assessment** | Top-100 sweep → posture → (gated) nuclei on web services → report. The flagship. |
+| **Web Application Assessment** | Web ports → posture → `whatweb` fingerprint → (gated) nuclei + Nikto per web target → report. |
+| **Full-Port Host & Service Audit** | All 65 535 TCP ports with version + safe default NSE scripts → posture → report. Passive. |
+| **SMB / Active Directory Recon** | SMB/LDAP/Kerberos sweep → posture → (gated) `enum4linux-ng` per host → report. |
+
+### Playbooks are data — author and upload your own
+
+A playbook is a small **JSON** file: an ordered list of **steps**, each running
+one **action** with validated parameters. You can write your own and **upload**
+them in the Engagements tab; they sync to the **`engagement_playbooks`** folder
+in the **Files tab** (exactly like Device Console scripts and Rubber Ducky
+payloads), where you can edit or delete them. Uploaded playbooks are validated
+on load — an invalid one is shown with the reason and cannot be run.
+
+```json
+{
+  "id": "my-playbook",
+  "name": "My Playbook",
+  "description": "What this engagement does",
+  "steps": [
+    { "phase": "discovery",   "action": "nmap",    "params": { "ports": "top-100", "service_version": true } },
+    { "phase": "diagnostics", "action": "posture" },
+    { "phase": "assessment",  "action": "command", "params": { "tool": "nikto", "args": ["-host", "{web_urls}"], "per_target": true }, "active": true },
+    { "phase": "reporting",   "action": "report" }
+  ]
+}
+```
+
+**Actions**
+
+| Action | Phase | Parameters |
+|--------|-------|------------|
+| `nmap` | discovery | `ports` (`top-100` \| `top-1000` \| a portspec like `80,443,8000-8100`), `service_version`, `default_scripts` (safe NSE), `timing` (`T0`–`T5`) |
+| `posture` | diagnostics | `custom_rules`: `[{match, severity, title, ref}]` to flag your own services/ports on top of the built-in risk map |
+| `nuclei` | assessment | `severity` (`[info..critical]`), `tags` — runs against discovered web services |
+| `command` | any | `tool` (allowlisted), `args` (`[str,…]`), `per_host` / `per_target` to iterate discovered hosts / web URLs |
+| `report` | reporting | — (added automatically if omitted) |
+
+**Placeholders** substituted at run time, always confined to your scope:
+`{scope}`, `{host}`, `{hosts}`, `{ports}`, `{web_urls}`.
+
+**The `command` action** lets experts invoke a tool directly, but safely: the
+tool must be on an **allowlist** (nmap, masscan, dig, whois, whatweb, nbtscan,
+snmpwalk, nuclei, nikto, enum4linux-ng, sslscan, wpscan, gobuster/ffuf/feroxbuster,
+…), args are rejected if they contain shell metacharacters, and everything runs
+as an argv list — **never through a shell**. Tools classed as active (nuclei,
+nikto, enum4linux-ng, the busters…) and any step with `"active": true` run
+**only** when active testing is enabled, same as the assessment phase.
 
 ## Roadmap
 
-- More playbooks (web-app via ZAP/nuclei, Wi-Fi via the Nexmon onboard radio,
-  AD/SMB via netexec/enum4linux).
 - Persisted engagement history + PDF export + SIEM push of findings (reusing
   Ragnar's existing SIEM egress).
+- Wi-Fi playbooks driving the Nexmon onboard radio.
 - Deeper feed-forward from the passive watcher/guard layer into the diagnostics
   phase.
 

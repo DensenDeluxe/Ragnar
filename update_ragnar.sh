@@ -248,6 +248,18 @@ if ! pip3 install --break-system-packages --upgrade -r requirements.txt; then
     done < requirements.txt
 fi
 
+# flask-socketio: Debian/Kali apt ships 5.6.0, which crashes the web terminal's
+# /terminal Socket.IO namespace on Flask 3.1+ ("AttributeError: property
+# 'session' of 'RequestContext' object has no setter"). 5.6.1 fixes it, but the
+# apt package has no dist-info RECORD so the `pip --upgrade -r requirements.txt`
+# above cannot replace it — install 5.6.1 alongside with --ignore-installed
+# (/usr/local precedes /usr/lib on the import path, so it wins).
+if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.version("flask-socketio").split(".")[:3]); sys.exit(0 if v>=(5,6,1) else 1)' 2>/dev/null; then
+    echo -e "  Ensuring flask-socketio >= 5.6.1 (apt ships a build that breaks the web terminal)..."
+    pip3 install --break-system-packages --ignore-installed "flask-socketio>=5.6.1" >/dev/null 2>&1 \
+        || echo -e "  ${YELLOW}!${NC} Could not ensure flask-socketio >= 5.6.1 (web terminal may not work)"
+fi
+
 echo -e "${BLUE}Step 5.1: Checking package system health...${NC}"
 # apt refuses every operation while a previous dpkg run is unfinished
 # ("E: dpkg was interrupted, you must manually run 'dpkg --configure -a'").

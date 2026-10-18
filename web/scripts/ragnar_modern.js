@@ -1307,39 +1307,79 @@ function _termTeardown() {
     try { if (_termSocket) { _termSocket.disconnect(); _termSocket = null; } } catch (e) { /* ignore */ }
 }
 
+// Fit retried until the mount is actually laid out (classic xterm gotcha: a
+// fit() while the tab is display:none gives 0 cols and the terminal renders
+// blank). Retries a few times until cols>0, then syncs the server PTY size.
+function _termFitRetry(tries) {
+    tries = (tries == null) ? 8 : tries;
+    if (!_term || !_termFit) return;
+    try { _termFit.fit(); } catch (e) { /* mount not sized yet */ }
+    if ((!_term.cols || _term.cols < 2) && tries > 0) {
+        setTimeout(() => _termFitRetry(tries - 1), 120);
+    } else {
+        _sendTermResize();
+    }
+}
+
+let _termWatchdog = null;
 function initTerminal() {
     const mount = document.getElementById('xterm-mount');
     const status = document.getElementById('terminal-status');
     if (!mount) return;
-    if (typeof Terminal === 'undefined') {
-        if (status) status.innerHTML = '<span class="text-red-400">Terminal library failed to load.</span>';
+    const setStatus = (html) => { if (status) status.innerHTML = html; };
+    if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
+        setStatus('<span class="text-red-400">Terminal library failed to load. Reload the page; if it persists the vendored xterm assets are missing.</span>');
         return;
     }
     if (!_terminalEnabled()) {
-        if (status) status.innerHTML = '<span class="text-amber-300">Web terminal is disabled.</span> Enable it in Config → Web Terminal.';
+        setStatus('<span class="text-amber-300">Web terminal is disabled.</span> Enable it in Config → Web Terminal.');
         _termTeardown();
         return;
     }
-    if (status) status.textContent = '';
+    setStatus('<span class="text-gray-400">Connecting…</span>');
 
-    if (!_term) {
-        _term = new Terminal({ cursorBlink: true, fontSize: 13,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-            theme: { background: '#0f172a', foreground: '#e2e8f0' } });
-        _termFit = new FitAddon.FitAddon();
-        _term.loadAddon(_termFit);
-        _term.open(mount);
-        _term.onData(d => { if (_termSocket && _termSocket.connected) _termSocket.emit('terminal_input', { data: d }); });
+    try {
+        if (!_term) {
+            _term = new Terminal({ cursorBlink: true, fontSize: 13,
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                theme: { background: '#0f172a', foreground: '#e2e8f0' } });
+            _termFit = new FitAddon.FitAddon();
+            _term.loadAddon(_termFit);
+            _term.open(mount);
+            _term.onData(d => { if (_termSocket && _termSocket.connected) _termSocket.emit('terminal_input', { data: d }); });
+        }
+    } catch (e) {
+        setStatus('<span class="text-red-400">Terminal failed to initialise: ' + _esc(e.message || e) + '</span>');
+        return;
     }
-    try { _termFit.fit(); } catch (e) { /* mount not sized yet */ }
+    _termFitRetry();
 
     if (!_termSocket || !_termSocket.connected) {
         _term.reset();
-        _termSocket = io('/terminal', { reconnection: false });
-        _termSocket.on('connect', () => { setTimeout(() => { try { _termFit.fit(); } catch (e) {} _sendTermResize(); _term.focus(); }, 60); });
-        _termSocket.on('terminal_output', d => _term.write(d.data || ''));
-        _termSocket.on('terminal_exit', () => _term.write('\r\n\x1b[33m[session ended — press Reconnect for a new shell]\x1b[0m\r\n'));
-        _termSocket.on('connect_error', () => _term.write('\r\n\x1b[31m[could not open terminal — is it enabled and are you logged in?]\x1b[0m\r\n'));
+        try { _termSocket = io('/terminal', { reconnection: false, timeout: 8000 }); }
+        catch (e) { setStatus('<span class="text-red-400">Could not open socket: ' + _esc(e.message || e) + '</span>'); return; }
+        if (_termWatchdog) clearTimeout(_termWatchdog);
+        // If neither connect nor connect_error fires (e.g. the namespace is
+        // silently refused), never leave the pane blank — say so.
+        _termWatchdog = setTimeout(() => {
+            if (!_termSocket || !_termSocket.connected) {
+                setStatus('<span class="text-amber-300">Still connecting… if this hangs, the terminal may be disabled server-side or you need to log in. Press Reconnect.</span>');
+            }
+        }, 8000);
+        _termSocket.on('connect', () => {
+            if (_termWatchdog) { clearTimeout(_termWatchdog); _termWatchdog = null; }
+            setStatus('');
+            setTimeout(() => { _termFitRetry(); try { _term.focus(); } catch (e) {} }, 60);
+        });
+        _termSocket.on('terminal_output', d => { if (status && status.textContent) setStatus(''); _term.write(d.data || ''); });
+        _termSocket.on('terminal_exit', () => { _term.write('\r\n\x1b[33m[session ended — press Reconnect for a new shell]\x1b[0m\r\n'); });
+        _termSocket.on('disconnect', () => { setStatus('<span class="text-amber-300">Disconnected. Press Reconnect for a new shell.</span>'); });
+        _termSocket.on('connect_error', (err) => {
+            if (_termWatchdog) { clearTimeout(_termWatchdog); _termWatchdog = null; }
+            const m = (err && (err.message || err)) || 'unknown';
+            setStatus('<span class="text-red-400">Could not open terminal (' + _esc(String(m)) + ') — is it enabled in Config → Web Terminal, and are you logged in?</span>');
+            _term.write('\r\n\x1b[31m[could not open terminal — enable it in Config → Web Terminal and ensure you are logged in]\x1b[0m\r\n');
+        });
     }
 
     if (!_termResizeHooked) {
@@ -1350,7 +1390,7 @@ function initTerminal() {
         });
         _termResizeHooked = true;
     }
-    setTimeout(() => { try { _termFit.fit(); } catch (e) {} _sendTermResize(); }, 80);
+    setTimeout(() => _termFitRetry(), 120);
 }
 
 // Auto clone/pull the external RagnarScripts library when the Dashboard or
@@ -28874,20 +28914,67 @@ let ulfPlaybooks = [];
 let ulfCurrentRun = null;
 let ulfPollTimer = null;
 
+let ulfCatalog = null;
+
 function ulfLoadPlaybooks() {
     fetch('/api/ulfberht/playbooks').then(r => r.json()).then(d => {
         if (!d.enabled) return;
         ulfPlaybooks = d.playbooks || [];
+        ulfCatalog = d.catalog || ulfCatalog;
         const sel = document.getElementById('ulf-playbook');
         if (sel) {
+            const prev = sel.value;
             sel.innerHTML = '';
-            ulfPlaybooks.forEach(p => {
+            ulfPlaybooks.filter(p => p.valid !== false).forEach(p => {
                 const o = document.createElement('option');
-                o.value = p.id; o.textContent = p.name; sel.appendChild(o);
+                o.value = p.id;
+                o.textContent = p.name + (p.source === 'user' ? ' (custom)' : '');
+                sel.appendChild(o);
             });
+            if (prev && ulfPlaybooks.some(p => p.id === prev && p.valid !== false)) sel.value = prev;
             ulfPlaybookDesc();
         }
+        ulfRenderLibrary();
     }).catch(() => {});
+}
+
+function ulfRenderLibrary() {
+    const lib = document.getElementById('ulf-library');
+    const cnt = document.getElementById('ulf-lib-count');
+    if (!lib) return;
+    lib.innerHTML = '';
+    if (cnt) cnt.textContent = '· ' + ulfPlaybooks.length + ' playbook(s)';
+    ulfPlaybooks.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'p-3 rounded text-xs';
+        card.style.cssText = 'background:rgba(255,255,255,0.04);border:1px solid ' +
+            (p.valid === false ? 'rgba(248,113,113,0.5)' : 'rgba(255,255,255,0.10)');
+        const badge = p.source === 'builtin'
+            ? '<span class="px-1.5 py-0.5 rounded" style="background:rgba(96,165,250,0.18);color:#93c5fd">built-in</span>'
+            : '<span class="px-1.5 py-0.5 rounded" style="background:rgba(220,38,38,0.18);color:#fca5a5">custom</span>';
+        const phases = (p.phases || []).map(ph => '<span class="px-1 rounded" style="background:rgba(255,255,255,0.06)">' + _esc(ph) + '</span>').join(' ');
+        let body = '<div class="flex items-center justify-between gap-2"><b>' + _esc(p.name) + '</b>' + badge + '</div>' +
+            '<div class="text-gray-400 mt-1">' + _esc(p.description || '') + '</div>';
+        if (p.valid === false) {
+            body += '<div class="mt-1" style="color:#f87171">⚠ ' + _esc(p.error || 'invalid') + '</div>';
+        } else {
+            body += '<div class="mt-2 flex flex-wrap gap-1">' + phases + '</div>' +
+                '<div class="text-gray-500 mt-1">' + (p.steps || []).length + ' step(s)' +
+                (p.active_steps ? ' · ' + p.active_steps + ' active' : '') + '</div>';
+        }
+        body += '<div class="mt-2 flex gap-2">';
+        if (p.valid !== false) body += '<button onclick="ulfUsePlaybook(\'' + _esc(p.id) + '\')" class="bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded">Use</button>';
+        if (p.source === 'user') body += '<button onclick="ulfDeletePlaybook(\'' + _esc(p.id) + '\')" class="px-2 py-1 rounded" style="background:rgba(220,38,38,0.25);color:#fca5a5">Delete</button>';
+        body += '</div>';
+        card.innerHTML = body;
+        lib.appendChild(card);
+    });
+}
+
+function ulfUsePlaybook(id) {
+    const sel = document.getElementById('ulf-playbook');
+    if (sel) { sel.value = id; ulfPlaybookDesc(); }
+    const sc = document.getElementById('ulf-scope'); if (sc) { sc.focus(); sc.scrollIntoView({behavior:'smooth', block:'center'}); }
 }
 
 function ulfPlaybookDesc() {
@@ -28895,7 +28982,66 @@ function ulfPlaybookDesc() {
     const desc = document.getElementById('ulf-playbook-desc');
     if (!sel || !desc) return;
     const p = ulfPlaybooks.find(x => x.id === sel.value);
-    desc.textContent = p ? p.description : '';
+    if (!p) { desc.textContent = ''; return; }
+    const steps = (p.steps || []).map(s => s.phase + '/' + s.action + (s.active ? '*' : '')).join('  →  ');
+    desc.innerHTML = _esc(p.description || '') + '<br><span class="text-gray-600">' + _esc(steps) +
+        (p.active_steps ? '   ·   * = active step (needs attacks enabled)' : '') + '</span>';
+}
+
+function ulfUploadPlaybook(input) {
+    const msg = document.getElementById('ulf-upload-msg');
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        let obj;
+        try { obj = JSON.parse(reader.result); }
+        catch (e) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Not valid JSON: ' + e.message; } input.value = ''; return; }
+        fetch('/api/ulfberht/playbooks', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: file.name, playbook: obj})
+        }).then(r => r.json()).then(d => {
+            if (msg) {
+                if (d.success) { msg.style.color = d.warning ? '#fbbf24' : '#4ade80';
+                    msg.textContent = d.warning ? ('Saved, but will not run until fixed: ' + d.warning) : ('Saved ' + (d.file || file.name)); }
+                else { msg.style.color = '#f87171'; msg.textContent = d.error || 'Upload failed'; }
+            }
+            ulfLoadPlaybooks();
+        }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+        input.value = '';
+    };
+    reader.readAsText(file);
+}
+
+function ulfDeletePlaybook(id) {
+    if (!confirm('Delete custom playbook "' + id + '"? (removes it from the engagement_playbooks folder)')) return;
+    fetch('/api/ulfberht/playbooks/' + encodeURIComponent(id), {method: 'DELETE'})
+        .then(r => r.json()).then(() => ulfLoadPlaybooks()).catch(() => {});
+}
+
+function ulfShowHelp() {
+    const pre = document.getElementById('ulf-help');
+    if (!pre) return;
+    if (!pre.classList.contains('hidden')) { pre.classList.add('hidden'); return; }
+    const cat = ulfCatalog || {};
+    const example = {
+        id: 'my-playbook', name: 'My Playbook', description: 'What this engagement does',
+        steps: [
+            {phase: 'discovery', action: 'nmap', params: {ports: 'top-100', service_version: true}},
+            {phase: 'diagnostics', action: 'posture'},
+            {phase: 'assessment', action: 'command', params: {tool: 'nikto', args: ['-host', '{web_urls}'], per_target: true}, active: true},
+            {phase: 'reporting', action: 'report'}
+        ]
+    };
+    let t = 'PLAYBOOK FORMAT (.json)\n\n' + JSON.stringify(example, null, 2) + '\n\n';
+    t += 'ACTIONS: ' + (cat.actions || []).map(a => a.action).join(', ') + '\n\n';
+    t += 'ALLOWLISTED TOOLS (command action): ' + (cat.tools || []).join(', ') + '\n\n';
+    t += 'ACTIVE TOOLS (need attacks enabled): ' + (cat.active_tools || []).join(', ') + '\n\n';
+    t += 'PLACEHOLDERS: ' + (cat.placeholders || []).join(', ') + '\n\n';
+    t += 'Steps marked "active": true (and assessment actions) run only with active testing enabled.\n';
+    t += 'command args are validated: allowlisted tool only, no shell metacharacters, argv (never a shell).';
+    pre.textContent = t;
+    pre.classList.remove('hidden');
 }
 
 function ulfStartRun() {
@@ -28955,7 +29101,7 @@ function ulfRenderRun(d) {
     if (fl) {
         fl.innerHTML = '';
         (d.findings || []).forEach(f => {
-            const col = {high:'#f87171', medium:'#fbbf24', low:'#60a5fa'}[f.severity] || '#9ca3af';
+            const col = {critical:'#f87171', high:'#f87171', medium:'#fbbf24', low:'#60a5fa', info:'#9ca3af'}[f.severity] || '#9ca3af';
             const row = document.createElement('div');
             row.className = 'text-xs p-2 rounded';
             row.style.cssText = 'background:rgba(255,255,255,0.04)';

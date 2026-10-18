@@ -4,6 +4,15 @@
 
 ### 2026-10-18
 
+#### [#980](https://github.com/PierreGode/Ragnar/pull/980) — feat(ulfberht): data-driven Engagements v2 — uploadable playbooks, advanced actions + terminal fix
+*branch `feature/ulfberht-engagements-v2`*
+
+- **Engagements engine is now data-driven.** A playbook is an ordered list of **steps**, each running a catalog **action** (`nmap` / `posture` / `nuclei` / `command` / `report`) with validated params — instead of one hardcoded Python workflow. Four **built-in playbooks** ship: *Scoped Network Assessment*, *Web Application Assessment*, *Full-Port Host & Service Audit*, *SMB / Active Directory Recon*.
+- **Operators can author and upload their own `.json` playbooks** from the Engagements tab. They sync to a new **`engagement_playbooks`** folder in the **Files tab** (editable/deletable there — same pattern as Device Console `console_scripts` and Rubber Ducky payloads) and are **validated on load**: an invalid playbook is listed with the reason and cannot run.
+- **New `command` action** runs an **allowlisted** tool (nmap, masscan, dig, whois, whatweb, nbtscan, snmpwalk, nuclei, nikto, enum4linux-ng, sslscan, wpscan, gobuster/ffuf/feroxbuster…) with **validated argv — no shell, no metacharacters**. Active tools and any `"active": true` step stay **double-gated by `enable_attacks`**, like the assessment phase. Scope-confined placeholders: `{scope}` `{host}` `{hosts}` `{ports}` `{web_urls}`.
+- **Engagements UI**: a Playbook library (built-in + custom, source badges, step/phase chips, step counts), **Upload .json**, delete custom, selected-playbook step preview, and a format-help panel; findings now render `critical`/`info` severities. Engine + UI stay **marker-gated** to the official Ulfberht image.
+- **Web Terminal fix (root cause + hardening).** On a Kali/Debian base the terminal's `/terminal` Socket.IO namespace silently failed — a **blank, unresponsive pane** — because the apt `python3-flask-socketio` is **5.6.0**, which crashes on Flask 3.1+ when the connect handler touches the session (`AttributeError: property 'session' of 'RequestContext' object has no setter`); the dashboard's default namespace survived because it never reads the session. `install_ragnar.sh` and `update_ragnar.sh` now **ensure flask-socketio ≥ 5.6.1** (the apt build has no dist-info RECORD, so it's installed alongside with `--ignore-installed`, which wins on the import path); `requirements.txt` bumped to match. Separately, `initTerminal()` is hardened so the pane can **never sit silently blank** again: `fit()` is retried until the pane is laid out (the xterm-in-hidden-container 0-column bug), connect/disconnect/error states are surfaced, and a connect watchdog reports a stuck namespace. New endpoints: `POST`/`DELETE /api/ulfberht/playbooks` + an action catalog in the list payload. Docs: [docs/ulfberht-workflows.md](ulfberht-workflows.md).
+
 #### fix(sdr): make the ESP-SDR pilot-tone trim robust on a busy 2.4 GHz band
 *branch `fix/esp-pilot-tone-baseline`*
 
