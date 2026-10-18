@@ -4,6 +4,11 @@
 
 ### 2026-10-18
 
+#### fix(sdr): make the ESP-SDR pilot-tone trim robust on a busy 2.4 GHz band
+*branch `fix/esp-pilot-tone-baseline`*
+
+- Follow-up hardening of the HackRF pilot-tone crystal trim. On a congested band the first cut could **lock onto ambient Wi-Fi instead of the pilot and apply a wrong-sign trim** (e.g. +50 kHz where −50 was correct — worse than uncalibrated), because the default pilot sat at **2437 MHz = Wi-Fi ch6 centre** and a single max-hold caught passing Wi-Fi/BLE bursts. Now the calibration (1) measures the ESP **twice — tone off then on — and differences them**, cancelling the ESP's fixed internal spurs and any static ambient; (2) uses a **frame average** per measurement, not max-hold, so the continuous CW pilot stays up while bursty Wi-Fi/BLE averages down; and (3) defaults the pilot to **2480 MHz** (above ch1/6/11, clear of the ESP's spurs). Result on hardware: a correct one-step lock to ≈ −52 kHz / −21 ppm, repeatable within a few kHz, no sign flips. Also re-probe the HackRF once if `hackrf_info` glitches right after a transmit. `rf_mhz` / `tx_vga` remain overridable; default TX-VGA raised to 40. `esp_sdr --selftest` 23/23 (new baseline-difference check proving a raw max-hold would mis-lock an ambient hump while the differenced measurement isolates the pilot), `sdr_spectrum --selftest` 33/33.
+
 #### feat(sdr): ESP-SDR crystal trim via a HackRF pilot tone
 *branch `feature/esp-hackrf-pilot-tone-cal`*
 

@@ -32081,29 +32081,42 @@ def register_network_diagnostics(app, logger=None):
             # passive band-shape correlation above). Very low power — the ESP is
             # centimetres away. Transmit only for the measurement, then stop.
             _log("net/esp/trim tone")
-            hk = sdr_spectrum.status()
-            if not (hk.get('detect') or {}).get('available'):
-                return jsonify({"ok": False, "error": "no HackRF detected — connect a HackRF "
-                                "to transmit the pilot tone"})
+            # hackrf_info (via detect) can momentarily fail right after a prior
+            # TX while the device settles, so re-probe once before giving up.
+            def _hackrf_ready():
+                return bool((sdr_spectrum.status().get('detect') or {}).get('available'))
+            if not _hackrf_ready():
+                time.sleep(1.5)
+                if not _hackrf_ready():
+                    return jsonify({"ok": False, "error": "no HackRF detected — connect a HackRF "
+                                    "to transmit the pilot tone"})
             try:
-                rf_mhz = float(data.get('rf_mhz') or 2437.0)
+                # Default 2480 MHz: above Wi-Fi ch1/6/11 and clear of the ESP's
+                # observed internal spurs, so the pilot sits in a quiet spot.
+                rf_mhz = float(data.get('rf_mhz') or 2480.0)
             except (TypeError, ValueError):
                 return _bad('Invalid rf_mhz')
             try:
-                tx_vga = int(data.get('tx_vga')) if data.get('tx_vga') is not None else 30
+                tx_vga = int(data.get('tx_vga')) if data.get('tx_vga') is not None else 40
             except (TypeError, ValueError):
                 return _bad('Invalid tx_vga')
             rf_hz = rf_mhz * 1e6
-            tx = sdr_spectrum.transmit_tone(rf_hz, tx_vga=tx_vga)
-            if not tx.get('ok'):
-                return jsonify(tx)
-            try:
-                res = esp_sdr.calibrate_vs_tone(rf_hz)
-            finally:
-                sdr_spectrum.tx_tone_stop()
+            tx_info = {}
+
+            def _tx_on():
+                r = sdr_spectrum.transmit_tone(rf_hz, tx_vga=tx_vga)
+                tx_info.update(r or {})
+                return r
+
+            # Baseline (tone off) vs tone (on) — calibrate_vs_tone drives the TX
+            # through these callbacks and differences the two, so the pilot is
+            # isolated from ambient Wi-Fi / ESP spurs on the chosen frequency.
+            res = esp_sdr.calibrate_vs_tone(rf_hz, tx_on=_tx_on, tx_off=sdr_spectrum.tx_tone_stop)
             if isinstance(res, dict):
                 res.setdefault('rf_mhz', rf_mhz)
-                res['tx'] = {"rf_hz": tx.get('rf_hz'), "tx_vga": tx.get('tx_vga'), "amp": tx.get('amp')}
+                if tx_info:
+                    res['tx'] = {"rf_hz": tx_info.get('rf_hz'), "tx_vga": tx_info.get('tx_vga'),
+                                 "amp": tx_info.get('amp')}
             return jsonify(res)
         if data.get('auto'):
             _log("net/esp/trim auto")
