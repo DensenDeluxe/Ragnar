@@ -4,6 +4,13 @@
 
 ### 2026-10-18
 
+#### [#981](https://github.com/PierreGode/Ragnar/pull/981) — feat(ulfberht): playbook `command` action covers the full installed offensive toolset
+*branch `feature/ulfberht-playbook-arsenal`*
+
+- Engagement playbooks' **`command`** action can now invoke **any of the installed offensive tools** (the ~25 Arsenal tools: `sqlmap`, `hydra`, `netexec`, `hashcat`, `john`, `aircrack-ng`/`wifite`/`reaver`, `responder`, `ettercap`, `msfconsole`, `tcpdump`/`tshark`, … on top of the existing nmap/nuclei/nikto/wpscan/enum4linux-ng/busters), not just the short curated list. The allowlist is now the recon set + every offensive tool, **plus every tool the edition actually detects on the image** (merged from `ragnar_edition`), so it covers the full Arsenal and stays in sync as tools are added.
+- It remains a **safety** allowlist, not a feature list: steps run **argv-only (never a shell)**, args containing shell metacharacters are rejected, and arbitrary non-tool binaries (`rm`, `dd`, `bash`, a reverse shell) stay **blocked** — the engine runs as root, so that guardrail matters. Offensive tools are all `active` (gated by `enable_attacks`).
+- New optional per-step **`timeout`** (10–3600 s, default 900) for long-running tools. Docs note which tools fit the scope-targeted step model vs which need external inputs (cracking/Wi-Fi) or non-interactive args (`msfconsole -q -x …`). Docs: [docs/ulfberht-workflows.md](ulfberht-workflows.md).
+
 #### [#980](https://github.com/PierreGode/Ragnar/pull/980) — feat(ulfberht): data-driven Engagements v2 — uploadable playbooks, advanced actions + terminal fix
 *branch `feature/ulfberht-engagements-v2`*
 
