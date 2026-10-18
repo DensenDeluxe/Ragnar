@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **395** distinct CVE IDs
+- **396** distinct CVE IDs
 - **336** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **50** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **51** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-102019**
@@ -41,7 +41,7 @@ detector works is in [nettools.md](nettools.md).
 | 2023 | 49 |
 | 2024 | 55 |
 | 2025 | 45 |
-| 2026 | 51 |
+| 2026 | 52 |
 
 ## By detector
 
@@ -52,7 +52,7 @@ detector works is in [nettools.md](nettools.md).
 | ARP Watch | 4 |
 | Aruba Guard | 42 |
 | BFD Watch | 5 |
-| BGP Path Watch | 14 |
+| BGP Path Watch | 15 |
 | BLE Pentest (active) | 6 |
 | CDP Watch | 27 |
 | CFM Watch | 4 |
@@ -492,4 +492,5 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-81642](https://nvd.nist.gov/vuln/detail/CVE-2026-81642) | DNS compression-pointer loop | detected | DNS Watch | — |
 | [CVE-2026-81736](https://nvd.nist.gov/vuln/detail/CVE-2026-81736) |  | detected | DNS Watch | — |
 | [CVE-2026-86060](https://nvd.nist.gov/vuln/detail/CVE-2026-86060) | MikroTrick username escalation (RouterOS) | detected | MikroTik Guard | — |
+| [CVE-2026-93345](https://nvd.nist.gov/vuln/detail/CVE-2026-93345) |  | context only | BGP Path Watch | — |
 | [CVE-2026-102019](https://nvd.nist.gov/vuln/detail/CVE-2026-102019) |  | detected | RIP Watch | — |

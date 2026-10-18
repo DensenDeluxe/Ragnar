@@ -413,8 +413,13 @@ class BgpTap:
     """
 
     def __init__(self, on_message: Optional[Callable] = None,
-                 link_offset: int = 14, port: int = BGP_PORT):
+                 link_offset: int = 14, port: int = BGP_PORT,
+                 on_teardown: Optional[Callable] = None):
         self.on_message = on_message
+        # on_teardown(flow, src, dst, family) fires when a session closes
+        # (RST/FIN). Some findings are only meaningful as "the trigger landed
+        # and then the session died" -- see bgpcve.BgpCveTracker.
+        self.on_teardown = on_teardown
         self.link_offset = link_offset
         self.port = port
         self.streams: dict[tuple, TcpResync] = {}
@@ -452,7 +457,9 @@ class BgpTap:
         key = (l3.src, tcp.sport, l3.dst, tcp.dport)
         if tcp.rst or tcp.syn:
             # session restart: drop stale buffer rather than splice across it
-            self.streams.pop(key, None)
+            had = self.streams.pop(key, None)
+            if tcp.rst and self.on_teardown is not None:
+                self._teardown(key, l3, had)
             if not tcp.payload:
                 return []
 
@@ -476,8 +483,18 @@ class BgpTap:
                 self.on_message(msg)
 
         if tcp.fin:
-            self.streams.pop(key, None)
+            had = self.streams.pop(key, None)
+            if self.on_teardown is not None:
+                self._teardown(key, l3, had)
         return out
+
+    def _teardown(self, key, l3, had) -> None:
+        """Notify the detector layer that a session closed. Contained: a
+        failing callback must never take the tap down."""
+        try:
+            self.on_teardown(key, l3.src, l3.dst, l3.family or 0)
+        except Exception:
+            pass
 
     # -- live capture: the only part that touches a NIC --------------------- #
     def run_live(self, iface: str, bpf: str = BPF_DUAL_STACK,

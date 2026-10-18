@@ -3737,7 +3737,8 @@ flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** / **CVE-
 **CVE-2023-41358**, MP_UNREACH **CVE-2023-47234**, EOR-bypass **CVE-2023-47235**,
 Prefix-SID **CVE-2024-31948**, FlowSpec **CVE-2026-37457**, MP_REACH **CVE-2026-37458**,
 NHC-TLV **CVE-2026-37459**, OPEN optional-parameter **CVE-2022-40302** / **CVE-2022-43681**,
-GoBGP IPv6-ext-community **CVE-2026-37461** and UPDATE-length underflow **CVE-2026-37462**;
+GoBGP IPv6-ext-community **CVE-2026-37461** and UPDATE-length underflow **CVE-2026-37462**,
+MikroTik RouterOS labelled-VPN NLRI **CVE-2026-93345** *(v7)*;
 **CERT VU#347067**) with an [OSV](https://osv.dev) pointer. These are byte-level parser
 signatures the passive **text** watcher cannot reconstruct, so they are named as posture;
 run the standalone BGP tap for byte-level detection.
@@ -3879,11 +3880,17 @@ and BGPsec does **no** signature validation, which would not be passive):
   BGP-LS update from a peer that should not originate it) and malformed TLVs.
 - **Passive tap** (`bgptap.py`): a receive-only L3 tap with **dual-stack** parse (IPv6
   extension-header walk), marker-resync TCP reassembly and BGP message framing — the
-  shared front-end that feeds the parser-CVE (`bgpcve.py`, 14 detectors / 12 codes),
-  BGPsec and SR-Policy tiers from a raw capture rather than a live session.
+  shared front-end that feeds the parser-CVE (`bgpcve.py`, **15 detectors / 14 codes** as
+  of v7), BGPsec and SR-Policy tiers from a raw capture rather than a live session. **v7**
+  adds **CVE-2026-93345** (MikroTik RouterOS labelled-VPN NLRI, CWE-1284): `PW-BGP-013`
+  fires on a labelled-VPN MP_REACH NLRI (SAFI 128/129) whose prefix-length octet is below
+  the structural minimum for the family — the RouterOS iterator reads past it — and
+  `PW-BGP-014` is the post-trigger confirmation, the correlated session drop that says the
+  plane crashed. (Named as context in the in-app `do_bgp_watch` malformed-attribute
+  advisory; the byte-level detection lives in this standalone tap.)
 
-These are wired into the Detector Self-Test as the **`bgp_tap` (57)**, **`bgpsec` (47)**
-and **`bgp_srte` (65)** suites — 169 offline checks, run in their own interpreter (no
+These are wired into the Detector Self-Test as the **`bgp_tap` (74)**, **`bgpsec` (47)**
+and **`bgp_srte` (65)** suites — 186 offline checks, run in their own interpreter (no
 root, no network). The live capture adapters/routes for these tiers are a planned
 follow-up; today they ship vendored and self-test-validated.
 

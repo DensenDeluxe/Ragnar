@@ -20278,7 +20278,9 @@ _BGP_ADVISORIES = {
                    'CVE-2024-31948, FlowSpec CVE-2026-37457, MP_REACH CVE-2026-37458, '
                    'NHC-TLV CVE-2026-37459, OPEN optional-parameter CVE-2022-40302 / '
                    'CVE-2022-43681) and GoBGP (IPv6 extended-community CVE-2026-37461, '
-                   'UPDATE length underflow CVE-2026-37462). The malformed bytes are a '
+                   'UPDATE length underflow CVE-2026-37462) and MikroTik RouterOS '
+                   '(labelled-VPN MP_REACH NLRI prefix-length underflow CVE-2026-93345). '
+                   'The malformed bytes are a '
                    'byte-level parser signature the passive text watcher does not '
                    'reconstruct, and the software version is not visible on the wire — '
                    'these are named as exposure posture; check OSV for your BGP build '
@@ -20286,7 +20288,8 @@ _BGP_ADVISORIES = {
         'refs': ['CVE-2023-38802', 'CVE-2024-30395', 'CVE-2024-44070', 'CVE-2023-41358',
                  'CVE-2023-47234', 'CVE-2023-47235', 'CVE-2024-31948', 'CVE-2022-40302',
                  'CVE-2022-43681', 'CVE-2026-37457', 'CVE-2026-37458', 'CVE-2026-37459',
-                 'CVE-2026-37461', 'CVE-2026-37462', 'VU#347067', _BGP_OSV_URL],
+                 'CVE-2026-37461', 'CVE-2026-37462', 'CVE-2026-93345',
+                 'VU#347067', _BGP_OSV_URL],
     },
 }
 
