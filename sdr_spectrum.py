@@ -60,6 +60,13 @@ def _which(name):
 
 _HACKRF_INFO = _which("hackrf_info")
 _HACKRF_SWEEP = _which("hackrf_sweep")
+_HACKRF_TRANSFER = _which("hackrf_transfer")
+
+# TX pilot-tone state (used only by transmit_tone / tx_tone_stop, below). The
+# HackRF transmits a single CW carrier the TCXO-less ESP-SDR locks onto to trim
+# its crystal — see transmit_tone().
+_TX_PROC = None
+_TX_FILE = None
 
 # Named bands (MHz). Wi-Fi 6 GHz is within HackRF's range but its edges vary by
 # region; 2.4 and 5 cover the common troubleshooting cases.
@@ -583,6 +590,118 @@ def get_frames(since=0):
 
 
 # --------------------------------------------------------------------------
+# TX pilot tone — transmit a single CW carrier so the TCXO-less ESP-SDR can
+# cross-calibrate its crystal against the HackRF's accurate reference. The
+# HackRF tunes to ``rf_hz - offset_hz`` and we feed it an interleaved cs8 IQ
+# buffer of a complex sinusoid at ``+offset_hz``, so the emitted carrier sits
+# exactly at ``rf_hz`` while the LO stays clear of the DC/LO-leakage spike. A
+# short buffer is looped with ``-R``. Very low power, meant for a receiver a
+# few cm away — not a transmitter for anything over the air.
+# --------------------------------------------------------------------------
+
+def tone_iq_cs8(offset_hz, fs_hz, dur_s=0.25, amp=100):
+    """Interleaved signed-8-bit IQ (bytes) of a complex tone at ``offset_hz``.
+
+    The buffer holds a whole number of cycles so looping it is phase-seamless.
+    Pure — selftested without hardware."""
+    import numpy as np
+    n = max(64, int(fs_hz * dur_s))
+    cycles = max(1, int(round(offset_hz * n / float(fs_hz))))   # integer cycles → seamless loop
+    k = 2.0 * np.pi * cycles / n
+    t = np.arange(n)
+    a = max(1, min(127, int(amp)))
+    i = np.clip(np.round(np.cos(k * t) * a), -127, 127).astype(np.int8)
+    q = np.clip(np.round(np.sin(k * t) * a), -127, 127).astype(np.int8)
+    iq = np.empty(2 * n, dtype=np.int8)
+    iq[0::2] = i
+    iq[1::2] = q
+    return iq.tobytes(), int(round(cycles * fs_hz / float(n)))   # (bytes, actual emitted offset Hz)
+
+
+def transmit_tone(rf_hz, offset_hz=2_000_000, fs_hz=8_000_000, tx_vga=30, amp=False):
+    """Start transmitting a CW tone at ``rf_hz`` (loops until tx_tone_stop()).
+
+    Frees the device from any running RX sweep first. ``tx_vga`` is the TX VGA
+    gain 0..47 dB (kept modest — the ESP is centimetres away); ``amp`` enables
+    the +~11 dB PA (off by default). Returns {ok, ...} or {ok:False, error}.
+    """
+    global _TX_PROC, _TX_FILE
+    if _run([_HACKRF_TRANSFER, "-h"])[0] == 127 and not os.path.exists(_HACKRF_TRANSFER):
+        return {"ok": False, "error": "hackrf_transfer not installed (apt install hackrf)"}
+    d = detect()
+    if not d.get("available"):
+        return {"ok": False, "error": d.get("error", "no HackRF")}
+    tx_tone_stop()                      # clear any previous tone
+    stop()                              # a running sweep holds the device — free it
+    import tempfile
+    rf_hz = int(rf_hz)
+    lo = int(rf_hz - offset_hz)
+    try:
+        iq, emitted_off = tone_iq_cs8(offset_hz, fs_hz)
+        fd, path = tempfile.mkstemp(suffix=".cs8", prefix="esp_tone_")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(iq)
+    except Exception as exc:            # pragma: no cover - defensive
+        return {"ok": False, "error": "could not build the tone buffer: %s" % exc}
+    txv = max(0, min(47, int(tx_vga)))
+    args = [_HACKRF_TRANSFER, "-t", path, "-f", str(lo), "-s", str(int(fs_hz)),
+            "-x", str(txv), "-a", "1" if amp else "0", "-R"]
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+    except Exception as exc:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"ok": False, "error": "failed to launch hackrf_transfer: %s" % exc}
+    time.sleep(0.4)                     # catch an immediate failure (device busy / bad args)
+    if proc.poll() is not None:
+        err = ""
+        try:
+            err = (proc.stderr.read() or "").strip()[:200]
+        except Exception:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"ok": False, "error": "hackrf_transfer exited immediately: %s" % (err or "unknown")}
+    _TX_PROC = proc
+    _TX_FILE = path
+    return {"ok": True, "rf_hz": rf_hz, "lo_hz": lo, "offset_hz": int(emitted_off),
+            "fs_hz": int(fs_hz), "tx_vga": txv, "amp": bool(amp)}
+
+
+def tx_tone_stop():
+    """Stop the pilot tone and clean up its buffer. Safe to call when idle."""
+    global _TX_PROC, _TX_FILE
+    p = _TX_PROC
+    if p is not None:
+        try:
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        except Exception:               # pragma: no cover - defensive
+            pass
+    _TX_PROC = None
+    if _TX_FILE:
+        try:
+            os.unlink(_TX_FILE)
+        except OSError:
+            pass
+        _TX_FILE = None
+    return {"ok": True}
+
+
+def tx_active():
+    """True while a pilot tone is transmitting."""
+    return _TX_PROC is not None and _TX_PROC.poll() is None
+
+
+# --------------------------------------------------------------------------
 # Self-test (pure parsing / frame-assembly checks — no hardware needed)
 # --------------------------------------------------------------------------
 
@@ -649,6 +768,25 @@ def selftest():
         fb2.add(*parse_sweep_line(r))
     check("frame: bucket out of band ignored", fb2._bucket(2_600_000_000) is None)
     check("frame: bucket at band low = 0", fb2._bucket(2_400_000_000) == 0)
+
+    # --- TX pilot-tone IQ buffer (pure; no device) ---
+    try:
+        import numpy as _np
+        raw, emitted = tone_iq_cs8(2_000_000, 8_000_000, dur_s=0.05)
+        buf = _np.frombuffer(raw, dtype=_np.int8)
+        check("tone: interleaved IQ is 2 int8 per sample", len(buf) % 2 == 0 and len(buf) > 0)
+        iqc = buf[0::2].astype(_np.float32) + 1j * buf[1::2].astype(_np.float32)
+        # the dominant FFT bin must sit at the requested +2 MHz of 8 MS/s
+        sp = _np.fft.fftshift(_np.abs(_np.fft.fft(iqc)))
+        fb = _np.fft.fftshift(_np.fft.fftfreq(len(iqc), 1.0 / 8_000_000))
+        peak_hz = float(fb[int(_np.argmax(sp))])
+        check("tone: spectral peak at +2 MHz offset", abs(peak_hz - 2_000_000) < 60_000,
+              "%.0f Hz" % peak_hz)
+        check("tone: emitted offset within 1%% of requested", abs(emitted - 2_000_000) < 20_000,
+              "%d Hz" % emitted)
+        check("tone: amplitude within int8 range", int(buf.max()) <= 127 and int(buf.min()) >= -127)
+    except Exception as _exc:   # pragma: no cover - numpy always present in app
+        check("tone: IQ buffer generation", False, str(_exc))
 
     # --- hackrf_info parser ---
     info = parse_hackrf_info(

@@ -669,9 +669,9 @@
           +(cfg.espTrim?'<fieldset class="dsec dtrim"><legend>Frequency trim (no TCXO)</legend>'
             +'<div class="drow"><label>Offset</label><input type="number" class="ftin" step="1" style="flex:0 0 76px;width:76px"><span>kHz</span><span class="ftppm" style="color:var(--muted);margin-left:auto"></span></div>'
             +'<div class="drow"><button class="mini ftauto" title="Lock the frequency axis to the 2.4 GHz Wi-Fi channel centres (ch 1/6/11). Takes about 7 seconds.">&#127760;&nbsp;Auto-trim (Wi-Fi)</button>'
-              +'<button class="mini fthk" title="Cross-reference against a connected HackRF (TCXO). Both radios sweep the same 2.4 GHz window and the ESP is aligned to the HackRF. The most accurate option. Takes about 12 seconds.">&#128225;&nbsp;vs HackRF</button>'
+              +'<button class="mini fthk" title="Calibrate against a connected HackRF: the HackRF briefly transmits a low-power pilot tone (2.4 GHz) and the ESP locks its crystal onto that known carrier. The most accurate option — immune to the ESP\'s own spurs. Transmits for a few seconds; keep the two radios close. Takes about 8 seconds.">&#128225;&nbsp;vs HackRF</button>'
               +'<button class="mini ftzero" title="Clear the trim (FOFS 0)">Reset</button></div>'
-            +'<div class="dnote ftnote">The ESP32 has no TCXO: its LO sits a few ppm off and drifts with temperature. <b>Auto-trim</b> nulls it against the 2.4 GHz Wi-Fi carriers (needs ch 1/6/11 traffic); <b>vs HackRF</b> cross-references a connected HackRF (TCXO truth) for the most accurate lock; or set an offset by hand. Applied at the LO (<code>FOFS</code>).</div>'
+            +'<div class="dnote ftnote">The ESP32 has no TCXO: its LO sits a few ppm off and drifts with temperature. <b>Auto-trim</b> nulls it against the 2.4 GHz Wi-Fi carriers (needs ch 1/6/11 traffic); <b>vs HackRF</b> has the HackRF briefly transmit a low-power pilot tone the ESP locks onto (TCXO-accurate, spur-proof — the best lock); or set an offset by hand. Applied at the LO (<code>FOFS</code>).</div>'
             +'</fieldset>':'')
         +'</div>'
         +'<div class="recbar hidden"></div>'
@@ -1895,7 +1895,8 @@
     if(this.ftAuto) this.ftAuto.addEventListener('click',function(){
       self._trimRun(self.ftAuto,{auto:1},'measuring… (~7 s)','Measuring the 2.4 GHz Wi-Fi channel centres…','Wi-Fi'); });
     if(this.ftHk) this.ftHk.addEventListener('click',function(){
-      self._trimRun(self.ftHk,{hackrf:1},'measuring… (~12 s)','Sweeping the HackRF, then the ESP, on the same 2.4 GHz window…','HackRF'); });
+      if(!window.confirm('Calibrate against the HackRF?\n\nThe HackRF will briefly transmit a low-power pilot tone on 2.4 GHz (a few seconds) so the ESP can lock its crystal onto a known reference. Only do this with the HackRF and ESP close together on your own bench.')) return;
+      self._trimRun(self.ftHk,{tone:1},'transmitting… (~8 s)','The HackRF is transmitting a pilot tone; the ESP is locking onto it…','HackRF'); });
     this.trimRefresh();                       // show the persisted trim on load
   };
   // Run a calibration (auto-Wi-Fi or vs-HackRF): disable the button, POST, report.
@@ -1907,7 +1908,9 @@
       .then(function(r){return r.json();}).then(function(res){
         btn.disabled=false; btn.innerHTML=old; if(self.ftAuto) self.ftAuto.disabled=false; if(self.ftHk) self.ftHk.disabled=false;
         if(res&&res.ok){ self._trimShow(res);
-          var how=(refName==='HackRF')?('HackRF (corr '+(res.corr!=null?res.corr:'?')+', '+(res.overlap_mhz||'?')+' MHz)'):('Wi-Fi ch '+((res.channels||[]).join('/')));
+          var how=(refName==='HackRF')
+            ?('the HackRF pilot tone ('+(res.rf_mhz||'?')+' MHz, SNR '+(res.snr_db!=null?res.snr_db:'?')+' dB)')
+            :('Wi-Fi ch '+((res.channels||[]).join('/')));
           if(self.ftNote) self.ftNote.innerHTML='Locked to '+how+': was '+fmtSigned(res.offset_khz)+' kHz off, trim now <b>'+res.fofs_khz+' kHz</b> ('+fmtSigned(res.fofs_ppm)+' ppm).'; }
         else if(self.ftNote) self.ftNote.textContent=(res&&res.error)||(refName+' calibration failed.');
         self.trimRefresh();

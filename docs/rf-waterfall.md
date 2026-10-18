@@ -40,17 +40,25 @@ the Pi's USB, and the panel flips live.
     the crystal's physical range (~±100 kHz); in a congested 2.4 GHz environment
     it declines rather than mis-calibrate. It's only as accurate as the APs' own
     oscillators (averaged across channels).
-  - **vs HackRF** cross-references a connected **HackRF** (TCXO truth): both radios
-    sweep the same narrow ~40 MHz window around ch 6, and the ESP spectrum is
-    cross-correlated against the HackRF's (resolution-matched, sub-bin). Because
-    both see the same ambient RF, overlapping-channel contamination cancels — this
-    is the most accurate option (limited mainly by the HackRF's bin resolution over
-    the window, ~tens of kHz). Applies only on a strong correlation (≥0.5).
+  - **vs HackRF** (the most accurate, and the recommended option) has the connected
+    **HackRF** briefly **transmit a low-power CW pilot tone** at a known frequency
+    (2437.0 MHz by default); the ESP tunes a narrow window around it and locks its
+    crystal onto that one strong, known carrier. Because it keys on a single known
+    tone it is **immune to the ESP's own internal spurs** — which defeat a passive
+    band-shape correlation — and it converges to a sub-ppm residual (a few kHz) in
+    one step. The UI asks before transmitting; keep the HackRF and ESP close (a few
+    cm) and only on your own bench. SNR of the detected tone is reported. Needs a
+    HackRF (a TX-capable SDR). *(A passive, receive-only `{hackrf:1}` cross-correlation
+    also exists but is unreliable on spur-heavy ESP boards — the pilot tone replaced
+    it as the default.)*
 
   The trim is applied at the LO (`FOFS`) and persists across restarts
-  (`data/esp_sdr_fofs.json`, git-ignored, device-specific). Backend:
-  `esp_sdr.set_fofs` / `esp_sdr.auto_trim` / `esp_sdr.calibrate_vs_reference`, all
-  via `/api/net/esp/trim` (POST `{khz:N}` / `{auto:1}` / `{hackrf:1}`).
+  (`data/esp_sdr_fofs.json`, git-ignored, device-specific). On this firmware
+  `+FOFS` raises the LO (a fixed carrier then reads lower), so the pilot-tone trim
+  is `fofs + measured_offset`. Backend: `esp_sdr.set_fofs` / `esp_sdr.auto_trim` /
+  `esp_sdr.calibrate_vs_tone` (+ legacy `calibrate_vs_reference`) and
+  `sdr_spectrum.transmit_tone` / `tx_tone_stop`, all via `/api/net/esp/trim` (POST
+  `{khz:N}` / `{auto:1}` / `{tone:1[,rf_mhz:M,tx_vga:G]}` / legacy `{hackrf:1}`).
 - The node is auto-discovered on any Espressif serial port (env override
   `RAGNAR_ESP_SDR_PORT`). A capture left streaming by a crashed client is
   self-healed on the next probe (a `RELEASE` doubles as the stream stop byte).
