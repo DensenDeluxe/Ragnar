@@ -1379,7 +1379,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         ["sqlalchemy>=1.4.0"]="sqlalchemy"
         ["python-nmap>=0.7.0"]="nmap"
         ["flask>=3.0.0"]="flask"
-        ["flask-socketio>=5.3.0"]="flask_socketio"
+        ["flask-socketio>=5.6.1"]="flask_socketio"
         ["flask-cors>=4.0.0"]="flask_cors"
         ["psutil>=5.9.0"]="psutil"
         ["logger>=1.4"]="logger"
@@ -1399,6 +1399,21 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         fi
     done
     
+    # flask-socketio: the Debian/Kali apt package (python3-flask-socketio,
+    # installed above) is 5.6.0, which crashes the web terminal's /terminal
+    # Socket.IO namespace on Flask 3.1+ with "AttributeError: property 'session'
+    # of 'RequestContext' object has no setter" — the connect handler reads the
+    # session and flask-socketio 5.6.0 tries to write it back to a now-read-only
+    # property. 5.6.1 fixes it. The apt package carries no dist-info RECORD, so
+    # pip cannot upgrade it in place (the plain pip loop above skips it on a mere
+    # presence check); install 5.6.1 alongside with --ignore-installed (it lands
+    # in /usr/local, which precedes /usr/lib on the import path, so it wins).
+    if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.version("flask-socketio").split(".")[:3]); sys.exit(0 if v>=(5,6,1) else 1)' 2>/dev/null; then
+        log "INFO" "Ensuring flask-socketio >= 5.6.1 (apt ships a build that breaks the web terminal)..."
+        pip3 install --break-system-packages --ignore-installed "flask-socketio>=5.6.1" || \
+            log "WARNING" "Could not upgrade flask-socketio to >=5.6.1 — the web terminal may not work until it is."
+    fi
+
     # Install OpenAI package separately for root (since service runs as root)
     log "INFO" "Installing OpenAI package for root user..."
     sudo pip3 install --break-system-packages --ignore-installed "openai>=2.0.0" || {
