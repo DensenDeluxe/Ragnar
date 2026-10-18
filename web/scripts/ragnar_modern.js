@@ -28881,23 +28881,53 @@ function ulfArsenalClearSel() {
     const c = document.getElementById('ulf-arsenal-sel-count'); if (c) c.textContent = '0';
     const m = document.getElementById('ulf-arsenal-build-msg'); if (m) m.textContent = '';
 }
+// Build = GENERATE the playbook (server-side, not saved) and open it in the
+// editor below. Saving happens from the editor (ulfArsenalSaveEdited).
 function ulfArsenalBuild() {
     const msg = document.getElementById('ulf-arsenal-build-msg');
     const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
     if (!ulfArsenalSel.size) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Select at least one tool.'; } return; }
     if (!name) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a playbook name.'; } return; }
-    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Building…'; }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Generating…'; }
     fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name, tools: [...ulfArsenalSel] }) })
+        body: JSON.stringify({ name: name, tools: [...ulfArsenalSel], preview: true }) })
         .then(r => r.json()).then(d => {
-            if (d.success) {
-                if (msg) { msg.style.color = d.warning ? '#fbbf24' : '#4ade80';
-                    msg.textContent = d.warning ? ('Saved with a note: ' + d.warning)
-                        : ('Saved “' + (d.file || name) + '” — now in the Engagements tab.'); }
-                ulfArsenalClearSel();
-                if (typeof ulfLoadPlaybooks === 'function') ulfLoadPlaybooks();
+            if (d.success && d.spec) {
+                const ed = document.getElementById('ulf-arsenal-editor');
+                if (ed) ed.value = JSON.stringify(d.spec, null, 2);
+                const wrap = document.getElementById('ulf-arsenal-editor-wrap');
+                if (wrap) wrap.classList.remove('hidden');
+                if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Generated — edit below, then Save.'; }
+                const sm = document.getElementById('ulf-arsenal-save-msg'); if (sm) sm.textContent = '';
+                if (ed) ed.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Build failed'; }
         }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfArsenalCancelEdit() {
+    const wrap = document.getElementById('ulf-arsenal-editor-wrap'); if (wrap) wrap.classList.add('hidden');
+    const sm = document.getElementById('ulf-arsenal-save-msg'); if (sm) sm.textContent = '';
+}
+
+function ulfArsenalSaveEdited() {
+    const sm = document.getElementById('ulf-arsenal-save-msg');
+    const ed = document.getElementById('ulf-arsenal-editor');
+    const nameInput = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    let spec;
+    try { spec = JSON.parse((ed || {}).value || ''); }
+    catch (e) { if (sm) { sm.style.color = '#f87171'; sm.textContent = 'Invalid JSON: ' + e.message; } return; }
+    if (sm) { sm.style.color = '#9ca3af'; sm.textContent = 'Saving…'; }
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: (spec && spec.name) || nameInput, playbook: spec }) })
+        .then(r => r.json()).then(d => {
+            if (d.success) {
+                if (sm) { sm.style.color = d.warning ? '#fbbf24' : '#4ade80';
+                    sm.textContent = d.warning ? ('Saved, but will not run until fixed: ' + d.warning)
+                        : ('Saved “' + (d.file || nameInput) + '” — now in the Engagements tab.'); }
+                if (!d.warning) { ulfArsenalCancelEdit(); ulfArsenalClearSel(); }
+                if (typeof ulfLoadPlaybooks === 'function') ulfLoadPlaybooks();
+            } else if (sm) { sm.style.color = '#f87171'; sm.textContent = d.error || 'Save failed'; }
+        }).catch(e => { if (sm) { sm.style.color = '#f87171'; sm.textContent = 'Failed: ' + e; } });
 }
 let ulfEnabled = false;
 function fetchEdition() {

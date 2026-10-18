@@ -4,6 +4,12 @@
 
 ### 2026-10-18
 
+#### [#985](https://github.com/PierreGode/Ragnar/pull/985) — feat(ulfberht): Arsenal "Build playbook" opens an editor before saving
+*branch `feature/ulfberht-arsenal-editor`*
+
+- Follow-up to #984. **Build playbook** no longer generates-and-saves in one shot — it now **generates the playbook and opens it in an inline JSON editor** so you can tweak the steps/args first; it's only saved (→ appears in the Engagements tab) when you click **Save**.
+- `POST /api/ulfberht/playbooks` with `{name, tools, preview:true}` returns the generated spec **without saving**; Save POSTs the edited JSON back through the normal validated save path. Engine split: `build_playbook_spec()` (build, no save) vs `build_playbook_from_tools()` (build + save).
+
 #### [#984](https://github.com/PierreGode/Ragnar/pull/984) — feat(ulfberht): Arsenal builds Engagements playbooks from selected tools
 *branch `feature/ulfberht-arsenal-builder`*
 

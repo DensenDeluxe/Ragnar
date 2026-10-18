@@ -27248,8 +27248,17 @@ def ulfberht_playbooks_api():
             data = request.get_json(silent=True) or {}
             name = data.get('name') or (data.get('playbook') or {}).get('name') \
                 or (data.get('playbook') or {}).get('id')
-            # Arsenal builder: {name, tools:[bin,...]} -> generate + save a playbook.
+            # Arsenal builder: {name, tools:[bin,...]} -> generate a playbook.
+            # With preview:true, return the generated spec WITHOUT saving (the UI
+            # opens it in an editor to tweak, then POSTs it back as {playbook});
+            # otherwise build + save in one shot.
             if isinstance(data.get('tools'), list):
+                if data.get('preview'):
+                    spec, err = ulfberht_engine.build_playbook_spec(
+                        name, data.get('tools'), data.get('description'))
+                    if err:
+                        return jsonify({"success": False, "error": err}), 400
+                    return jsonify({"success": True, "spec": spec})
                 res = ulfberht_engine.build_playbook_from_tools(
                     name, data.get('tools'), data.get('description'))
                 return jsonify(res), (200 if res.get('success') else 400)
