@@ -4,6 +4,11 @@
 
 ### 2026-10-19
 
+#### [#997](https://github.com/PierreGode/Ragnar/pull/997) — feat(ulfberht): live run log in the Engagements run panel
+*branch `feature/ulfberht-run-live-log`*
+
+- The engagement run panel now shows the **live run log** — the timestamped lines the engine emits (`nmap: scanning …`, phase transitions, per-step output) stream in under the phase row as the run progresses, as plain text (no box). It stays pinned to the newest line unless you scroll up to read back, and reopening a past run shows its full saved log. Data was already returned by `GET /api/ulfberht/run/<id>` (`log`); the panel just renders it now.
+
 #### [#996](https://github.com/PierreGode/Ragnar/pull/996) — feat(ulfberht): "Generate with AI" actually generates the playbook (on-device)
 *branch `feature/ulfberht-ai-generate`*
 

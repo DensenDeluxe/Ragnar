@@ -29303,6 +29303,21 @@ function ulfRenderRun(d) {
             ph.appendChild(sp);
         });
     }
+    // Live run log — plain text that grows as the run progresses. Stays pinned
+    // to the newest line unless the operator has scrolled up to read back.
+    const lg = document.getElementById('ulf-run-log');
+    if (lg) {
+        const lines = d.log || [];
+        if (lines.length) {
+            const atBottom = (lg.scrollHeight - lg.scrollTop - lg.clientHeight) < 24;
+            lg.textContent = lines.join('\n');
+            lg.classList.remove('hidden');
+            if (atBottom) lg.scrollTop = lg.scrollHeight;
+        } else {
+            lg.textContent = '';
+            lg.classList.add('hidden');
+        }
+    }
     const fc = document.getElementById('ulf-finding-count');
     if (fc) fc.textContent = (d.findings || []).length;
     const fl = document.getElementById('ulf-findings');
