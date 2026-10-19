@@ -27360,10 +27360,12 @@ def ulfberht_run_api():
         data = request.get_json(silent=True) or {}
         active = bool(data.get('enable_active'))
         # scope is a single IP/CIDR/host; targets is an optional list (e.g. from
-        # an uploaded targets file, one per line) and takes precedence.
+        # an uploaded targets file, one per line) and takes precedence. A wireless
+        # playbook ignores scope/targets and uses iface/bssid/channel instead.
         run_id, err = ulfberht_engine.start_run(
             data.get('playbook', ''), data.get('scope', ''),
-            enable_active=active, targets=data.get('targets'))
+            enable_active=active, targets=data.get('targets'),
+            iface=data.get('iface'), bssid=data.get('bssid'), channel=data.get('channel'))
         if err:
             return jsonify({"error": err}), 400
         return jsonify({"run_id": run_id, "active": active, "active_blocked": False})
