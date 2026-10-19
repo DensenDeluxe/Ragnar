@@ -21184,12 +21184,15 @@ def connect_wifi():
                     message += ' Your display will show the IP once it restarts.'
                 else:
                     logger.warning(f"Display enable requested but failed: {dmsg}")
-        else:
-            logger.error(f"API: Failed to connect to {ssid} (live). Credentials are saved; rebooting to let NetworkManager auto-join.")
-            # The live hand-off failed, but the Wi-Fi profile (and display choice)
-            # are already persisted. A reboot frees wlan0 of any AP leftovers and
-            # NetworkManager auto-connects the saved profile, coming up in the
-            # chosen mode. Schedule it detached so this response returns first.
+        elif was_in_ap_mode or is_ap_client_request():
+            logger.error(f"API: Failed to connect to {ssid} (live) during AP onboarding. Credentials are saved; rebooting to let NetworkManager auto-join.")
+            # ONBOARDING ONLY. On a single-radio board the AP->client hand-off can
+            # flake: wlan0 was just taken back from hostapd. The Wi-Fi profile (and
+            # display choice) are already persisted, so a reboot frees wlan0 of AP
+            # leftovers and NetworkManager auto-connects the saved profile, coming
+            # up in the chosen mode. Schedule it detached so this response returns
+            # first. This path runs ONLY from the captive portal / AP mode — never
+            # when configuring Wi-Fi from a normally-reachable session.
             message = ('Saved. The AP will close and Ragnar will reboot to join '
                        f'"{ssid}"' + (' and start your display' if want_display else '') +
                        '. Give it ~1 minute, then reach it at http://ragnar.local:8000'
@@ -21205,6 +21208,15 @@ def connect_wifi():
                 logger.error(f"Could not schedule reboot after saving Wi-Fi: {e}")
                 message = (f'Saved "{ssid}", but could not auto-reboot. Power-cycle '
                            'Ragnar and it will join the network on boot.')
+        else:
+            # Configuring Wi-Fi from a normally-reachable session (dashboard over
+            # ethernet / existing Wi-Fi), NOT the captive portal. Do NOT reboot the
+            # box on a failed join — that was the old behaviour and it looked like
+            # "it reboots instead of connecting". The profile is saved; surface the
+            # error so the operator can fix the password / check range and retry.
+            logger.error(f"API: Failed to connect to {ssid} (live). Profile saved; not rebooting (not an AP-onboarding flow).")
+            message = (f'Could not connect to "{ssid}". The Wi-Fi profile was saved — '
+                       'check the password and that the network is in range, then try again.')
 
         return jsonify({
             'success': success,
@@ -27246,6 +27258,15 @@ def ulfberht_playbooks_api():
             return jsonify({"enabled": False, "playbooks": []})
         if request.method == 'POST':
             data = request.get_json(silent=True) or {}
+            # AI prompt generator: build a copy-paste prompt for the operator's own
+            # AI (no AI runs here, nothing is saved). Checked first because the body
+            # also carries `tools`, which would otherwise hit the builder branch.
+            if data.get('ai_prompt'):
+                prompt, err = ulfberht_engine.build_ai_prompt(
+                    data.get('name'), data.get('tools') or [], data.get('instruction') or '')
+                if err:
+                    return jsonify({"success": False, "error": err}), 400
+                return jsonify({"success": True, "prompt": prompt})
             name = data.get('name') or (data.get('playbook') or {}).get('name') \
                 or (data.get('playbook') or {}).get('id')
             # Arsenal builder: {name, tools:[bin,...]} -> generate a playbook.

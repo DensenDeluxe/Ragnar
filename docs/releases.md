@@ -4,6 +4,18 @@
 
 ### 2026-10-19
 
+#### [#994](https://github.com/PierreGode/Ragnar/pull/994) — Ulfberht Arsenal AI + user-reported fixes (Wi-Fi, terminal, uploads, Pi Connect)
+*branch `fix/consolidated-batch`*
+
+A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid cross-PR conflicts).
+
+- **Arsenal "Build playbook" is now tailored to the selected tools** (not generic): `_TOOL_STEP_TEMPLATES` covers every selectable tool with a real step (cracking → hash file + wordlist + longer timeout, wireless → monitor-mode interface, capture/MITM/framework → non-interactive argv like `msfconsole -r <rc>`), and the generated description is category-aware and flags steps that need operator input.
+- **Arsenal "Generate with AI" (bring your own AI, offline):** describe the engagement → Ragnar builds a complete copy-paste prompt (schema + action catalog + tool allowlist + argv/no-shell rules + selected tools + instruction + a worked example) for your own AI; paste the JSON reply into the editor to validate & save. No AI/key on the device. `POST /api/ulfberht/playbooks {ai_prompt:true,…}` → `{prompt}`.
+- **Wi-Fi: a failed connect from the dashboard no longer reboots the box.** The AP→client onboarding reboot (single-radio recovery) was firing for any failed join; it's now gated to the captive-portal/AP flow (`was_in_ap_mode or is_ap_client_request()`). Otherwise the profile is saved and a clear error is returned to retry.
+- **Web terminal self-heal on web updates:** `scripts/post_update.sh` now ensures `flask-socketio >= 5.6.1` (the apt 5.6.0 crashes the `/terminal` Socket.IO namespace on Flask 3.1+). Fresh-install and the CLI updater already forced it; the web updater didn't, so web-updated / freshly-imaged boxes (Kali, WSL) kept the broken build.
+- **Files: "⬆ Upload here" button for the `engagement_playbooks` folder** (backend already accepted uploads there; only the button was missing).
+- **Raspberry Pi Connect auto-install** (`scripts/install_pi_connect.sh`, hooked into the installer and `provision_network_tools.sh`): Ragnar's Mesh tab integrates Pi Connect but the binary was absent on the Kali/Ulfberht base. The Pi apt repo can't be used on Kali (its SHA1-signed key is rejected by modern apt), so the script installs the verified `rpi-connect-lite` `.deb` directly over HTTPS (deps already present) — no foreign repo. ARM-only, idempotent. Validated live on Kali arm64 (`rpi-connect 2.13.0`).
+
 #### [#990](https://github.com/PierreGode/Ragnar/pull/990) — fix(ai): AI endpoint panel no longer 500s when the openai SDK is missing
 *branch `fix/ai-openai-optional`*
 

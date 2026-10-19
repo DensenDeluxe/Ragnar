@@ -548,11 +548,20 @@ enables linger, turns the per-user service on, and runs `rpi-connect signin
 headless box with nobody logged in. The key is sent once and never stored or
 logged. Enabling a second remote-access path is still your call, not automatic.
 
+**Ragnar installs the `rpi-connect` binary for you** (`scripts/install_pi_connect.sh`,
+run by the installer and on every update) so the Mesh tab can sign in — you only
+supply the account. On Raspberry Pi OS it comes from the Pi apt repo; on the
+Kali/Ulfberht base, where that repo isn't present (and its SHA1-signed key is
+rejected by modern apt), Ragnar downloads the `rpi-connect-lite` `.deb` straight
+from the archive and verifies its SHA256 before installing — no third-party repo
+is added. It's ARM-only and a no-op on x86 (e.g. a WSL box). Sign-in stays your
+call, not automatic.
+
 Prefer the command line? Run these **as your login user (e.g. `pi`/`ragnar`),
 not as root** — Connect is a per-user service:
 
 ```sh
-sudo apt install rpi-connect
+sudo apt install rpi-connect        # Raspberry Pi OS; on Kali Ragnar already installed it
 rpi-connect on                       # starts the per-user service
 rpi-connect signin                   # interactive: open the link it prints
 rpi-connect signin -auth-key <KEY>   # or non-interactive, with a key
