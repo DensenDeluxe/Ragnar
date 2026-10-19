@@ -2,6 +2,15 @@
 
 ## Releases
 
+### 2026-10-19
+
+#### [#990](https://github.com/PierreGode/Ragnar/pull/990) — fix(ai): AI endpoint panel no longer 500s when the openai SDK is missing
+*branch `fix/ai-openai-optional`*
+
+- The **Self-Hosted / Custom Endpoint** panel (Settings → AI) returned **HTTP 500** from **Connect** (`/api/ai/models`) and **Scan Network** (`/api/ai/discover`) on images where the `openai` Python package wasn't installed — the installer only *warns* if its pip step fails, so some images shipped without it.
+- **Graceful degradation:** `ai_service` now imports even when the `openai` SDK is absent (lazy import) so its non-LLM helpers and the endpoint routes keep working; `AIService` reports a clear "openai not installed — run the updater" message instead of crashing. `/api/ai/discover` no longer imports outside its `try` (it needs only `normalize_base_url`, so it works SDK-free — it even scans the tailnet/subnet for Ollama). `/api/ai/models` falls back to a plain-HTTP `GET {base_url}/models` when the SDK is missing, so **Connect still works for local/Ollama endpoints** with no SDK; otherwise it returns a clean error, never a 500.
+- **Self-heal:** `update_ragnar.sh` and `scripts/post_update.sh` now (re)install `openai>=2.0.0` on any update if it's missing (cheap no-op when present), mirroring the flask-socketio guard — so already-deployed boxes fix themselves on the next update.
+
 ### 2026-10-18
 
 #### [#987](https://github.com/PierreGode/Ragnar/pull/987) — feat(ulfberht): persisted engagement history + pro HTML/PDF report with remediation

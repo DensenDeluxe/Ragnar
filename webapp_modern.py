@@ -30660,32 +30660,53 @@ def list_ai_models():
             except Exception:
                 api_key = ''
 
-        from openai import OpenAI
-        client = OpenAI(
-            api_key=api_key or 'ragnar-local',
-            base_url=base_url,
-            timeout=10.0,
-            max_retries=0,
-        )
         try:
-            resp = client.models.list()
-        except Exception as e:
-            logger.warning(f"AI model listing failed for {base_url}: {e}")
-            return jsonify({
-                'success': False,
-                'error': f'Could not reach {base_url} — check the URL and that the server is running.{port_hint}'
-            }), 502
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=api_key or 'ragnar-local',
+                base_url=base_url,
+                timeout=10.0,
+                max_retries=0,
+            )
+            try:
+                resp = client.models.list()
+            except Exception as e:
+                logger.warning(f"AI model listing failed for {base_url}: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': f'Could not reach {base_url} — check the URL and that the server is running.{port_hint}'
+                }), 502
+            models = sorted({
+                getattr(m, 'id', None)
+                for m in (getattr(resp, 'data', None) or [])
+                if getattr(m, 'id', None)
+            })
+        except ImportError:
+            # openai SDK absent (lean / airgapped image) — talk to the
+            # OpenAI-compatible /models endpoint directly over HTTP so Connect
+            # still works. Mirrors the SDK's GET {base_url}/models.
+            import json as _json
+            from urllib.request import urlopen, Request
+            headers = {'Accept': 'application/json'}
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+            try:
+                req = Request(base_url.rstrip('/') + '/models', headers=headers)
+                with urlopen(req, timeout=10) as r:
+                    payload = _json.loads(r.read().decode('utf-8', 'replace'))
+                models = sorted({m.get('id') for m in (payload.get('data') or []) if m.get('id')})
+            except Exception as e:
+                logger.warning(f"AI model listing (HTTP fallback) failed for {base_url}: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': f'Could not reach {base_url} — check the URL and that the server is running.{port_hint}'
+                }), 502
 
-        models = sorted({
-            getattr(m, 'id', None)
-            for m in (getattr(resp, 'data', None) or [])
-            if getattr(m, 'id', None)
-        })
         return jsonify({
             'success': True,
-            'models': models,
+            'models': models or [],
             'base_url': base_url,
-            'count': len(models),
+            'count': len(models or []),
         })
     except Exception as e:
         logger.error(f"Error listing AI models: {e}")
@@ -30785,8 +30806,8 @@ def discover_ai_endpoints():
     Every candidate is probed on :11434 concurrently; responders are returned
     with their model lists so the UI can offer them as one-click endpoints.
     """
-    from ai_service import normalize_base_url
     try:
+        from ai_service import normalize_base_url  # inside try: never 500 the page
         candidates = {}  # ip -> {name, os, source}
 
         # --- Tailnet peers (Ragnar Mesh already speaks Tailscale) ---
