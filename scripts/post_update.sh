@@ -123,6 +123,21 @@ if ! python3 -c 'import openai' 2>/dev/null; then
     pip3 install $PIP_ARGS --ignore-installed "openai>=2.0.0" || fail "could not install openai (AI features show a clear message until it is)"
 fi
 
+# --- flask-socketio self-heal (web terminal) --------------------------------
+# The Debian/Kali apt package (python3-flask-socketio) is 5.6.0, which crashes
+# the /terminal Socket.IO namespace on Flask 3.1+ ("property 'session' ... has
+# no setter"), so the web terminal won't connect. Its apt build has no dist-info
+# RECORD, so a plain `pip --upgrade -r requirements.txt` can't replace it, and
+# the deps block only runs when requirements.txt changed. Ensure >= 5.6.1 here
+# on every web update (installs to /usr/local, which wins on the import path).
+# Cheap no-op when already satisfied.
+if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.version("flask-socketio").split(".")[:3]); sys.exit(0 if v>=(5,6,1) else 1)' 2>/dev/null; then
+    step "flask-socketio >= 5.6.1 (web terminal)"
+    PIP_ARGS="--break-system-packages"
+    pip3 install --help 2>/dev/null | grep -q -- '--break-system-packages' || PIP_ARGS=""
+    pip3 install $PIP_ARGS --ignore-installed "flask-socketio>=5.6.1" || fail "could not ensure flask-socketio >= 5.6.1 (web terminal may not connect)"
+fi
+
 # --- data files -------------------------------------------------------------
 if [ -f "$REPO/init_data_files.sh" ]; then
     step "data file templates"
