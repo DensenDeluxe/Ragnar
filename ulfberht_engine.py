@@ -129,6 +129,10 @@ _merge_edition_tools()
 # even though we never use a shell. Also blocks path traversal of the binary.
 _ARG_BAD = re.compile(r"[;&|<>$`\n\r\\\"']")
 
+# Strip ANSI/VT100 escape sequences from tool output (wifite, aircrack etc. emit
+# coloured text) so the report shows clean text, not raw "\x1b[32m…" garbage.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
 # Cleartext / high-risk services we flag in the diagnostics posture pass.
 # (service-name or port) -> (severity, title, reference)
 _RISK_SERVICES = {
@@ -241,6 +245,23 @@ BUILTIN_PLAYBOOKS = {
             {"phase": "reporting",   "action": "report"},
         ],
     },
+    "wireless-wpa-audit": {
+        "id": "wireless-wpa-audit",
+        "name": "Wireless WPA/WPS Audit",
+        "description": ("Wi-Fi engagement (no IP scope): survey nearby networks on "
+                        "the monitor interface, then run wifite against WPA/WPS. "
+                        "Set a monitor interface (e.g. wlan1mon); BSSID/channel "
+                        "optional. Needs an adapter in monitor mode."),
+        "wireless": True,
+        "steps": [
+            {"phase": "discovery",  "action": "command",
+             "params": {"tool": "airodump-ng", "args": ["{iface}"], "timeout": 90}},
+            {"phase": "assessment", "action": "command",
+             "params": {"tool": "wifite", "args": ["-i", "{iface}", "--kill"], "timeout": 900},
+             "active": True},
+            {"phase": "reporting",  "action": "report"},
+        ],
+    },
 }
 
 
@@ -304,6 +325,7 @@ def _validate_playbook(spec):
         "id": _slugify(spec.get("id") or name),
         "name": name,
         "description": str(spec.get("description") or "").strip(),
+        "wireless": bool(spec.get("wireless")),
         "steps": norm_steps,
     }, None
 
@@ -323,6 +345,7 @@ def _public_playbook(spec, source, valid=True, error=None):
         "steps": spec.get("steps", []),
         "phases": _derive_phases(spec.get("steps", [])),
         "source": source, "valid": valid, "error": error,
+        "wireless": bool(spec.get("wireless")),
         "active_steps": sum(1 for s in spec.get("steps", []) if s.get("active")),
     }
 
@@ -374,8 +397,8 @@ def _resolve_playbook(playbook_id):
         return BUILTIN_PLAYBOOKS[playbook_id]
     for pub in _load_user_playbooks():
         if pub["id"] == playbook_id and pub["valid"]:
-            return {"id": pub["id"], "name": pub["name"],
-                    "description": pub["description"], "steps": pub["steps"]}
+            return {"id": pub["id"], "name": pub["name"], "description": pub["description"],
+                    "wireless": pub.get("wireless", False), "steps": pub["steps"]}
     return None
 
 
@@ -397,7 +420,9 @@ def list_action_catalog():
         ],
         "tools": sorted(_ALLOWED_TOOLS),
         "active_tools": sorted(t for t, m in _ALLOWED_TOOLS.items() if m["active"]),
-        "placeholders": ["{scope}", "{host}", "{hosts}", "{ports}", "{web_urls}"],
+        "placeholders": ["{scope}", "{host}", "{hosts}", "{ports}", "{web_urls}",
+                          "{iface}", "{bssid}", "{channel}"],
+        "wireless_tools": sorted(_WIRELESS_TOOLS),
         "phases": [{"id": p, **PHASE_META[p]} for p in PHASES],
     }
 
@@ -416,25 +441,62 @@ def _valid_target(t):
     return bool(t) and bool(_TARGET_RE.match(t.strip()))
 
 
-def start_run(playbook_id, scope, enable_active=False, targets=None):
+# ── Wireless engagements ─────────────────────────────────────────────────────
+# Wi-Fi tools work off the airwaves, not an IP scope: they need a monitor-mode
+# interface ({iface}) and optionally a target BSSID ({bssid}) / channel. A
+# playbook flagged "wireless": true runs with no IP discovery.
+_WIRELESS_TOOLS = {"wifite", "airodump-ng", "aircrack-ng", "reaver", "bully",
+                   "kismet", "hcxdumptool"}
+_IFACE_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")          # e.g. wlan1mon
+_BSSID_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")   # AA:BB:CC:DD:EE:FF
+_CHANNEL_RE = re.compile(r"^[0-9]{1,3}$")
+
+
+def _valid_iface(v):
+    return bool(v) and bool(_IFACE_RE.match(v.strip()))
+
+
+def start_run(playbook_id, scope, enable_active=False, targets=None,
+              iface=None, bssid=None, channel=None):
     """Kick off an engagement run in a background thread. Returns (run_id, err).
-    Scope may be a single IP/CIDR/host (``scope``) or a list of them (``targets``,
-    e.g. parsed from an uploaded targets file — one per line)."""
+
+    IP engagements take a single IP/CIDR/host (``scope``) or a list (``targets``).
+    A playbook flagged ``wireless`` instead takes a monitor-mode ``iface`` and an
+    optional target ``bssid`` / ``channel`` — no IP scope, no nmap discovery."""
     if not is_enabled():
         return None, "Ulfberht engine is available only on the Ragnar OS Ulfberht image."
     spec = _resolve_playbook(playbook_id)
     if not spec:
         return None, "Unknown or invalid playbook."
-    # Build the validated target list — an explicit list wins over the single scope.
-    if isinstance(targets, list):
-        tlist = [t.strip() for t in targets if isinstance(t, str) and _valid_target(t)]
+
+    wireless = bool(spec.get("wireless"))
+    iface = (iface or "").strip()
+    bssid = (bssid or "").strip()
+    channel = (channel or "").strip()
+    if wireless:
+        # Wi-Fi engagement: validate the (optional) interface / BSSID / channel;
+        # there is no IP scope to validate.
+        if iface and not _valid_iface(iface):
+            return None, "Invalid monitor interface (e.g. wlan1mon)."
+        if bssid and not _BSSID_RE.match(bssid):
+            return None, "Invalid BSSID (expected AA:BB:CC:DD:EE:FF)."
+        if channel and not _CHANNEL_RE.match(channel):
+            return None, "Invalid channel (1–196)."
+        tlist = []
+        scope_display = ("wireless · " + (iface or "no interface")
+                         + (f" · {bssid}" if bssid else ""))
     else:
-        scope = (scope or "").strip()
-        tlist = [scope] if _valid_scope(scope) else []
-    if not tlist:
-        return None, "Invalid or empty scope."
-    tlist = tlist[:_MAX_TARGETS]
-    scope_display = tlist[0] if len(tlist) == 1 else f"{len(tlist)} targets"
+        # Build the validated target list — an explicit list wins over the scope.
+        if isinstance(targets, list):
+            tlist = [t.strip() for t in targets if isinstance(t, str) and _valid_target(t)]
+        else:
+            scope = (scope or "").strip()
+            tlist = [scope] if _valid_scope(scope) else []
+        if not tlist:
+            return None, "Invalid or empty scope."
+        tlist = tlist[:_MAX_TARGETS]
+        scope_display = tlist[0] if len(tlist) == 1 else f"{len(tlist)} targets"
+
     run_id = uuid.uuid4().hex[:12]
     run = {
         "id": run_id,
@@ -443,6 +505,8 @@ def start_run(playbook_id, scope, enable_active=False, targets=None):
         "steps": spec["steps"],
         "scope": scope_display,
         "targets": tlist,
+        "wireless": wireless,
+        "iface": iface, "bssid": bssid, "channel": channel,
         "enable_active": bool(enable_active),
         "status": "running",
         "phase": None,
@@ -465,6 +529,7 @@ def start_run(playbook_id, scope, enable_active=False, targets=None):
 _RUN_SUMMARY_KEYS = ("id", "playbook_name", "scope", "status", "phase",
                      "started", "finished")
 _PERSIST_KEYS = ("id", "playbook", "playbook_name", "scope", "targets",
+                 "wireless", "iface", "bssid", "channel",
                  "enable_active", "status", "phase", "phases_done", "started",
                  "finished", "hosts", "findings", "log", "report_md", "report_html")
 
@@ -615,6 +680,9 @@ def _discovered_ports(run):
 
 # ── Actions ──────────────────────────────────────────────────────────────────
 def _act_nmap(run, params):
+    if run.get("wireless"):
+        _log(run, "wireless engagement — skipping IP discovery (nmap).")
+        return
     nmap = shutil.which("nmap")
     if not nmap:
         _log(run, "nmap not found; discovery skipped.")
@@ -688,6 +756,9 @@ def _parse_nmap_xml(xml_text):
                 "service": (svc.get("name") if svc is not None else "") or "",
                 "product": (svc.get("product") if svc is not None else "") or "",
                 "version": (svc.get("version") if svc is not None else "") or "",
+                # nmap sets tunnel="ssl" for TLS-wrapped services (https etc.), so
+                # we don't flag an HTTPS service as "unencrypted HTTP".
+                "tunnel": (svc.get("tunnel") if svc is not None else "") or "",
             })
         if addr:
             hosts.append({"ip": addr, "name": name, "ports": ports})
@@ -706,6 +777,11 @@ def _act_posture(run, params):
     for h in get_run(run["id"])["hosts"]:
         for p in h["ports"]:
             key = p["service"] or _RISK_PORTS.get(p["port"], "")
+            # A TLS-wrapped web service (nmap: service "http" + tunnel "ssl", i.e.
+            # HTTPS) is NOT cleartext — don't raise the "Unencrypted HTTP" finding.
+            if key == "http" and (p.get("tunnel") == "ssl"
+                                  or p["service"] in ("https", "ssl/http")):
+                continue
             risk = _RISK_SERVICES.get(key) or custom_map.get(key) or custom_map.get(str(p["port"]))
             if risk:
                 sev, title, ref = risk
@@ -758,6 +834,11 @@ def _expand_args(run, args, target=None):
                 out.append(target)
             else:
                 out += _web_targets(run)
+        elif a in ("{iface}", "{bssid}", "{channel}"):
+            v = (run.get(a[1:-1]) or "").strip()
+            if not v:
+                return None   # wireless placeholder with no value → skip this step
+            out.append(v)
         else:
             out.append(a)
     return [x for x in out if x != ""]
@@ -778,7 +859,9 @@ def _act_command(run, params):
         tmo = 900
     # Decide the iteration set for per-host / per-target steps.
     targets = [None]
-    if params.get("per_host"):
+    if run.get("wireless"):
+        targets = [None]   # Wi-Fi: a single invocation on the monitor interface
+    elif params.get("per_host"):
         targets = _host_ips(run) or []
     elif params.get("per_target"):
         targets = _web_targets(run) or []
@@ -787,6 +870,9 @@ def _act_command(run, params):
     for tgt in targets[:25]:
         argv = _expand_args(run, args, tgt)
         if not argv:
+            if any(a in ("{iface}", "{bssid}", "{channel}") for a in args):
+                _log(run, f"command: {tool} skipped — set the monitor interface / "
+                          f"BSSID / channel for this wireless step.")
             continue
         # Final safety sweep — no metacharacters survived substitution.
         if any(_ARG_BAD.search(a) for a in argv):
@@ -795,7 +881,7 @@ def _act_command(run, params):
         try:
             proc = subprocess.run([binpath] + argv, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, timeout=tmo)
-            out = proc.stdout.decode("utf-8", "replace")
+            out = _ANSI.sub("", proc.stdout.decode("utf-8", "replace"))
             lines = [l for l in out.splitlines() if l.strip()]
             tail = "\n".join(lines[-40:]) if lines else "(no output)"
             host = tgt or run["scope"]
@@ -945,18 +1031,25 @@ pre{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:6px;overflow:aut
         A("<h2>Targets</h2><p class=muted>" + ", ".join(f"<code>{e(t)}</code>" for t in run["targets"][:100])
           + (f" … (+{len(run['targets'])-100} more)" if len(run["targets"]) > 100 else "") + "</p>")
     # hosts & services
-    A("<h2>Hosts &amp; services</h2>")
-    if run["hosts"]:
-        A("<table><tr><th>Host</th><th>Port</th><th>Service</th><th>Product / version</th></tr>")
-        for h in run["hosts"]:
-            for p in h["ports"]:
-                pv = e(" ".join(x for x in (p["product"], p["version"]) if x))
-                hn = f" ({e(h['name'])})" if h["name"] else ""
-                A(f"<tr><td>{e(h['ip'])}{hn}</td><td>{p['port']}/{e(p['proto'])}</td>"
-                  f"<td>{e(p['service'])}</td><td>{pv}</td></tr>")
-        A("</table>")
+    if run.get("wireless"):
+        A("<h2>Wireless engagement</h2>")
+        A(f"<p class=muted>Interface <code>{e(run.get('iface') or 'n/a')}</code>"
+          + (f" &middot; BSSID <code>{e(run['bssid'])}</code>" if run.get('bssid') else "")
+          + (f" &middot; channel <code>{e(run['channel'])}</code>" if run.get('channel') else "")
+          + ". Captured networks and tool output are in the run log.</p>")
     else:
-        A("<p class=muted>No live hosts found in scope.</p>")
+        A("<h2>Hosts &amp; services</h2>")
+        if run["hosts"]:
+            A("<table><tr><th>Host</th><th>Port</th><th>Service</th><th>Product / version</th></tr>")
+            for h in run["hosts"]:
+                for p in h["ports"]:
+                    pv = e(" ".join(x for x in (p["product"], p["version"]) if x))
+                    hn = f" ({e(h['name'])})" if h["name"] else ""
+                    A(f"<tr><td>{e(h['ip'])}{hn}</td><td>{p['port']}/{e(p['proto'])}</td>"
+                      f"<td>{e(p['service'])}</td><td>{pv}</td></tr>")
+            A("</table>")
+        else:
+            A("<p class=muted>No live hosts found in scope.</p>")
     # findings
     A("<h2>Findings</h2>")
     if findings:
@@ -1079,12 +1172,13 @@ _TOOL_STEP_TEMPLATES = {
     "hashcat":       ("assessment", "command", {"tool": "hashcat", "args": ["-m", "0", "-a", "0", "/root/engagement/hashes.txt", "/usr/share/wordlists/rockyou.txt"], "timeout": 1800}),
     "john":          ("assessment", "command", {"tool": "john", "args": ["--wordlist=/usr/share/wordlists/rockyou.txt", "/root/engagement/hashes.txt"], "timeout": 1800}),
     # ── wireless (need a monitor-mode interface / a capture — edit these) ─────
-    "airodump-ng":   ("discovery",  "command", {"tool": "airodump-ng", "args": ["wlan1mon"], "timeout": 120}),
+    "airodump-ng":   ("discovery",  "command", {"tool": "airodump-ng", "args": ["{iface}"], "timeout": 120}),
+    "hcxdumptool":   ("discovery",  "command", {"tool": "hcxdumptool", "args": ["-i", "{iface}", "-o", "/root/engagement/wpa.pcapng"], "timeout": 120}),
     "aircrack-ng":   ("assessment", "command", {"tool": "aircrack-ng", "args": ["-w", "/usr/share/wordlists/rockyou.txt", "/root/engagement/capture.cap"], "timeout": 1800}),
-    "wifite":        ("assessment", "command", {"tool": "wifite", "args": ["-i", "wlan1mon", "--kill"], "timeout": 600}),
-    "reaver":        ("assessment", "command", {"tool": "reaver", "args": ["-i", "wlan1mon", "-b", "AA:BB:CC:DD:EE:FF", "-vv"], "timeout": 1200}),
-    "bully":         ("assessment", "command", {"tool": "bully", "args": ["wlan1mon", "-b", "AA:BB:CC:DD:EE:FF"], "timeout": 1200}),
-    "kismet":        ("discovery",  "command", {"tool": "kismet", "args": ["-c", "wlan1mon"], "timeout": 120}),
+    "wifite":        ("assessment", "command", {"tool": "wifite", "args": ["-i", "{iface}", "--kill"], "timeout": 600}),
+    "reaver":        ("assessment", "command", {"tool": "reaver", "args": ["-i", "{iface}", "-b", "{bssid}", "-vv"], "timeout": 1200}),
+    "bully":         ("assessment", "command", {"tool": "bully", "args": ["{iface}", "-b", "{bssid}"], "timeout": 1200}),
+    "kismet":        ("discovery",  "command", {"tool": "kismet", "args": ["-c", "{iface}"], "timeout": 120}),
     # ── framework / MITM / capture (interactive or long-running) ─────────────
     "responder":     ("assessment", "command", {"tool": "responder", "args": ["-I", "eth0", "-A"], "timeout": 120}),
     "msfconsole":    ("assessment", "command", {"tool": "msfconsole", "args": ["-q", "-r", "/root/engagement/msf.rc"], "timeout": 1200}),
@@ -1177,14 +1271,22 @@ def build_playbook_spec(name, tools, description=None):
         return None, "Playbook needs a name."
     if not tools:
         return None, "Select at least one tool."
+    # A selection made entirely of Wi-Fi tools builds a WIRELESS playbook: no IP
+    # discovery / posture, uses the monitor interface ({iface}) instead of a scope.
+    wireless = all(t in _WIRELESS_TOOLS for t in tools)
     steps = []
-    if "nmap" not in tools:   # ensure discovery populates the target placeholders
-        steps.append({"phase": "discovery", "action": "nmap",
-                      "params": {"ports": "top-100", "service_version": True}})
-    for t in tools:
-        steps.append(suggest_step(t))
-    steps.append({"phase": "diagnostics", "action": "posture"})
-    steps.append({"phase": "reporting", "action": "report"})
+    if wireless:
+        for t in tools:
+            steps.append(suggest_step(t))
+        steps.append({"phase": "reporting", "action": "report"})
+    else:
+        if "nmap" not in tools:   # ensure discovery populates the target placeholders
+            steps.append({"phase": "discovery", "action": "nmap",
+                          "params": {"ports": "top-100", "service_version": True}})
+        for t in tools:
+            steps.append(suggest_step(t))
+        steps.append({"phase": "diagnostics", "action": "posture"})
+        steps.append({"phase": "reporting", "action": "report"})
     order = {p: i for i, p in enumerate(PHASES)}
     steps.sort(key=lambda s: order.get(s["phase"], 2))   # stable → methodology order
     spec = {
@@ -1192,6 +1294,8 @@ def build_playbook_spec(name, tools, description=None):
         "description": description or _describe_selection(tools),
         "steps": steps,
     }
+    if wireless:
+        spec["wireless"] = True
     return spec, None
 
 
@@ -1251,7 +1355,7 @@ def build_ai_prompt(name, tools, instruction):
         ("  " + ", ".join(tools)) if tools else "  (none selected — choose appropriate allowlisted tools)",
         "",
         "OUTPUT SCHEMA (exact):",
-        '  {"name": "<short title>", "description": "<1-2 sentences>", "steps": [ <step>, ... ]}',
+        '  {"name": "<short title>", "description": "<1-2 sentences>", "wireless": <bool, optional>, "steps": [ <step>, ... ]}',
         '  step = {"phase": <phase>, "action": <action>, "params": {...}, "active": <bool, optional>}',
         "",
         "PHASES (NIST SP 800-115 order — order your steps this way):",
@@ -1265,10 +1369,14 @@ def build_ai_prompt(name, tools, instruction):
         "these, do NOT hardcode targets): " + " ".join(cat["placeholders"]),
         "  Use {host} with \"per_host\": true to iterate discovered hosts, and {web_urls}",
         "  with \"per_target\": true to iterate discovered web URLs.",
+        "  WIRELESS engagements (Wi-Fi tools: " + ", ".join(sorted(_WIRELESS_TOOLS)) + ")",
+        "  have NO IP scope: set top-level \"wireless\": true, DO NOT add nmap/posture,",
+        "  and use {iface} (monitor interface), {bssid} and {channel} instead of {scope}/{host}.",
         "",
         "HARD RULES (a playbook that breaks these is rejected):",
-        "  1. Start with an nmap discovery step so {host}/{web_urls}/{ports} resolve,",
-        "     unless the goal is purely wireless/offline.",
+        "  1. For an IP engagement, start with an nmap discovery step so",
+        "     {host}/{web_urls}/{ports} resolve. For a wireless engagement, set",
+        "     \"wireless\": true and omit nmap (there is no IP to scan).",
         "  2. \"command\" steps run as an argv list, NEVER through a shell. Each arg is a",
         "     string. These characters are FORBIDDEN in any arg:  ; & | < > $ ` \\ \" '  and newlines.",
         "     No pipes, redirects, command chaining, globbing or sub-shells.",

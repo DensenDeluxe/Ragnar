@@ -29157,6 +29157,9 @@ function ulfPlaybookDesc() {
     if (!sel || !desc) return;
     const p = ulfPlaybooks.find(x => x.id === sel.value);
     if (!p) { desc.textContent = ''; return; }
+    // Wireless playbooks take a monitor interface, not an IP scope — toggle the inputs.
+    const sw = document.getElementById('ulf-scope-wrap'), ww = document.getElementById('ulf-wireless-wrap');
+    if (sw && ww) { sw.classList.toggle('hidden', !!p.wireless); ww.classList.toggle('hidden', !p.wireless); }
     const steps = (p.steps || []).map(s => s.phase + '/' + s.action + (s.active ? '*' : '')).join('  →  ');
     desc.innerHTML = _esc(p.description || '') + '<br><span class="text-gray-600">' + _esc(steps) +
         (p.active_steps ? '   ·   * = active step (runs when active assessment is on)' : '') + '</span>';
@@ -29249,7 +29252,20 @@ function ulfStartRun() {
     const active = (document.getElementById('ulf-active') || {}).checked;
     const msg = document.getElementById('ulf-run-msg');
     const body = { playbook: pb, enable_active: active };
-    if (ulfScopeTargets && ulfScopeTargets.length) {
+    const sel = ulfPlaybooks.find(x => x.id === pb);
+    if (sel && sel.wireless) {
+        // Wireless engagement — monitor interface instead of an IP scope.
+        const iface = ((document.getElementById('ulf-iface') || {}).value || '').trim();
+        if (!iface) {
+            if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a monitor interface (e.g. wlan1mon).'; }
+            return;
+        }
+        body.iface = iface;
+        const bssid = ((document.getElementById('ulf-bssid') || {}).value || '').trim();
+        const channel = ((document.getElementById('ulf-channel') || {}).value || '').trim();
+        if (bssid) body.bssid = bssid;
+        if (channel) body.channel = channel;
+    } else if (ulfScopeTargets && ulfScopeTargets.length) {
         body.targets = ulfScopeTargets;
     } else if (scope) {
         body.scope = scope;

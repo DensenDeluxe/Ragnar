@@ -62,6 +62,19 @@ to a client — and something a student can be graded on.
 | **Web Application Assessment** | Web ports → posture → `whatweb` fingerprint → (gated) nuclei + Nikto per web target → report. |
 | **Full-Port Host & Service Audit** | All 65 535 TCP ports with version + safe default NSE scripts → posture → report. Passive. |
 | **SMB / Active Directory Recon** | SMB/LDAP/Kerberos sweep → posture → (gated) `enum4linux-ng` per host → report. |
+| **Wireless WPA/WPS Audit** | **Wireless** (no IP scope): survey networks on the monitor interface → (gated) `wifite` against WPA/WPS → report. |
+
+### Wireless engagements
+
+Wi‑Fi tools work off the airwaves, not an IP scope. A playbook flagged
+`"wireless": true` (the **Wireless WPA/WPS Audit** built‑in, or any Arsenal
+playbook built from only Wi‑Fi tools — wifite, airodump‑ng, aircrack‑ng, reaver,
+bully, kismet, hcxdumptool) runs with **no nmap/posture**: the run form asks for
+a **monitor‑mode interface** (e.g. `wlan1mon`) plus an optional **BSSID** and
+**channel** instead of a scope, and the steps use the `{iface}` / `{bssid}` /
+`{channel}` placeholders. You need an adapter in monitor mode first
+(`sudo airmon-ng start wlan1` → `wlan1mon`). "Generate with AI" and the Arsenal
+builder produce wireless playbooks automatically when the goal/tools are Wi‑Fi.
 
 ### Playbooks are data — author and upload your own
 

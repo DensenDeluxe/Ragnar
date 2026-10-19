@@ -4,6 +4,13 @@
 
 ### 2026-10-19
 
+#### [#998](https://github.com/PierreGode/Ragnar/pull/998) — fix(ulfberht): posture TLS + ANSI fixes, and first-class wireless engagements
+*branch `fix/posture-tls-and-ansi`*
+
+- **No more false "Unencrypted web service (HTTP)" on HTTPS ports.** The posture pass flagged any service nmap named `http`, even an HTTPS one (nmap reports it as `http` with `tunnel="ssl"`), so a TLS site on 443 showed up as cleartext. The nmap parse now captures the `tunnel` attribute and the posture skips the finding when the service is TLS-wrapped (`tunnel="ssl"` / service `https`/`ssl/http`). A genuinely plaintext HTTP service on any port (incl. a misconfigured 443) is still flagged.
+- **Clean tool output in reports.** `command`-step output is now stripped of ANSI/VT100 escape sequences before it becomes a finding, so coloured tools (wifite, aircrack-ng, …) read as plain text instead of raw `\x1b[32m…` garbage.
+- **Wireless engagements are now first-class.** Wi-Fi tools don't take an IP scope — a playbook flagged `"wireless": true` runs with **no nmap/posture** and uses a **monitor interface** (`{iface}`) + optional **BSSID**/**channel** (`{bssid}`/`{channel}`) instead. The run form shows interface/BSSID/channel fields for a wireless playbook; a new **Wireless WPA/WPS Audit** built-in ships; the Arsenal builds a wireless playbook when the selection is all Wi-Fi tools; and "Generate with AI" is told to emit `"wireless": true` (no nmap) for Wi-Fi goals. Wireless tools no longer get pointed at an IP.
+
 #### [#997](https://github.com/PierreGode/Ragnar/pull/997) — feat(ulfberht): live run log in the Engagements run panel
 *branch `feature/ulfberht-run-live-log`*
 
