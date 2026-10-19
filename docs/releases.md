@@ -2,6 +2,15 @@
 
 ## Releases
 
+### 2026-10-19
+
+#### [#992](https://github.com/PierreGode/Ragnar/pull/992) — fix: Wi-Fi no longer reboots on a failed connect; web-terminal self-heal; engagement-playbooks upload button
+*branch `fix/user-reported-batch`*
+
+- **Wi-Fi: a failed connect from the dashboard no longer reboots the box.** The AP→client onboarding handoff legitimately reboots (single-radio recovery), but that reboot was firing for **any** failed join — so configuring Wi-Fi from a normally-reachable session (dashboard over ethernet / existing Wi-Fi) looked like "it saves the SSID and reboots instead of connecting". The reboot is now gated to the captive-portal / AP-mode flow only (`was_in_ap_mode or is_ap_client_request()`); otherwise the profile is still saved and a clear error is returned so you can fix the password / check range and retry.
+- **Web terminal self-heal on web updates.** The `/terminal` Socket.IO namespace won't connect on the apt build of `flask-socketio` (5.6.0) on Flask 3.1+ — fresh-install and the CLI updater already force `>= 5.6.1`, but the **web updater** (`scripts/post_update.sh`) didn't, so web-updated / freshly-imaged boxes (Kali, WSL) kept the broken build. It now ensures `flask-socketio >= 5.6.1` on every web update (cheap no-op when present), mirroring the installer/CLI guard.
+- **Files: "⬆ Upload here" button for the `engagement_playbooks` folder**, same as the Device Console scripts and Rubber Ducky payload folders (the backend already accepted uploads there; only the button was missing).
+
 ### 2026-10-18
 
 #### [#987](https://github.com/PierreGode/Ragnar/pull/987) — feat(ulfberht): persisted engagement history + pro HTML/PDF report with remediation

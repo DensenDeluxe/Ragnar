@@ -25825,7 +25825,8 @@ function isWritablePath(p) {
 function isUploadablePath(p) {
     return isWritablePath(p) ||
            p === '/console_scripts' || p.startsWith('/console_scripts/') ||
-           p === '/rubber-ducky' || p.startsWith('/rubber-ducky/');
+           p === '/rubber-ducky' || p.startsWith('/rubber-ducky/') ||
+           p === '/engagement_playbooks' || p.startsWith('/engagement_playbooks/');
 }
 
 // ── File-explorer navigation (Back = history, Up = parent folder) ────────────
