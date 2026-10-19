@@ -4,6 +4,12 @@
 
 ### 2026-10-19
 
+#### [#998](https://github.com/PierreGode/Ragnar/pull/998) — fix(ulfberht): don't flag HTTPS as "unencrypted HTTP"; strip ANSI from tool output
+*branch `fix/posture-tls-and-ansi`*
+
+- **No more false "Unencrypted web service (HTTP)" on HTTPS ports.** The posture pass flagged any service nmap named `http`, even an HTTPS one (nmap reports it as `http` with `tunnel="ssl"`), so a TLS site on 443 showed up as cleartext. The nmap parse now captures the `tunnel` attribute and the posture skips the finding when the service is TLS-wrapped (`tunnel="ssl"` / service `https`/`ssl/http`). A genuinely plaintext HTTP service on any port (incl. a misconfigured 443) is still flagged.
+- **Clean tool output in reports.** `command`-step output is now stripped of ANSI/VT100 escape sequences before it becomes a finding, so coloured tools (wifite, aircrack-ng, …) read as plain text instead of raw `\x1b[32m…` garbage.
+
 #### [#997](https://github.com/PierreGode/Ragnar/pull/997) — feat(ulfberht): live run log in the Engagements run panel
 *branch `feature/ulfberht-run-live-log`*
 

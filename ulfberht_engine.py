@@ -129,6 +129,10 @@ _merge_edition_tools()
 # even though we never use a shell. Also blocks path traversal of the binary.
 _ARG_BAD = re.compile(r"[;&|<>$`\n\r\\\"']")
 
+# Strip ANSI/VT100 escape sequences from tool output (wifite, aircrack etc. emit
+# coloured text) so the report shows clean text, not raw "\x1b[32m…" garbage.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
 # Cleartext / high-risk services we flag in the diagnostics posture pass.
 # (service-name or port) -> (severity, title, reference)
 _RISK_SERVICES = {
@@ -688,6 +692,9 @@ def _parse_nmap_xml(xml_text):
                 "service": (svc.get("name") if svc is not None else "") or "",
                 "product": (svc.get("product") if svc is not None else "") or "",
                 "version": (svc.get("version") if svc is not None else "") or "",
+                # nmap sets tunnel="ssl" for TLS-wrapped services (https etc.), so
+                # we don't flag an HTTPS service as "unencrypted HTTP".
+                "tunnel": (svc.get("tunnel") if svc is not None else "") or "",
             })
         if addr:
             hosts.append({"ip": addr, "name": name, "ports": ports})
@@ -706,6 +713,11 @@ def _act_posture(run, params):
     for h in get_run(run["id"])["hosts"]:
         for p in h["ports"]:
             key = p["service"] or _RISK_PORTS.get(p["port"], "")
+            # A TLS-wrapped web service (nmap: service "http" + tunnel "ssl", i.e.
+            # HTTPS) is NOT cleartext — don't raise the "Unencrypted HTTP" finding.
+            if key == "http" and (p.get("tunnel") == "ssl"
+                                  or p["service"] in ("https", "ssl/http")):
+                continue
             risk = _RISK_SERVICES.get(key) or custom_map.get(key) or custom_map.get(str(p["port"]))
             if risk:
                 sev, title, ref = risk
@@ -795,7 +807,7 @@ def _act_command(run, params):
         try:
             proc = subprocess.run([binpath] + argv, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, timeout=tmo)
-            out = proc.stdout.decode("utf-8", "replace")
+            out = _ANSI.sub("", proc.stdout.decode("utf-8", "replace"))
             lines = [l for l in out.splitlines() if l.strip()]
             tail = "\n".join(lines[-40:]) if lines else "(no output)"
             host = tgt or run["scope"]
