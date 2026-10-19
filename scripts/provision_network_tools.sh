@@ -157,4 +157,15 @@ LLDPEOF
     echo -e "  ${GREEN}✓${NC} lldpd configured for switch discovery"
 fi
 
+# ---------------------------------------------------------------------------
+# 4. Raspberry Pi Connect (backup remote access — Mesh tab)
+# ---------------------------------------------------------------------------
+# Install the rpi-connect binary so Ragnar's Mesh tab can sign in / report it.
+# Idempotent + ARM-only + never fails the run (see install_pi_connect.sh).
+_pc="$(dirname "$0")/install_pi_connect.sh"
+if [ -f "$_pc" ]; then
+    echo -e "Ensuring Raspberry Pi Connect..."
+    bash "$_pc" || true
+fi
+
 exit 0

@@ -2,6 +2,14 @@
 
 ## Releases
 
+### 2026-10-19
+
+#### [#993](https://github.com/PierreGode/Ragnar/pull/993) — feat(mesh): auto-install Raspberry Pi Connect (works on the Kali/Ulfberht base)
+*branch `feature/pi-connect-install`*
+
+- Ragnar's Mesh tab integrates **Raspberry Pi Connect** (status + sign-in) but relied on the `rpi-connect` binary already being present — on the Kali/Ulfberht base it wasn't, so it always showed "not installed". New `scripts/install_pi_connect.sh` installs it, hooked into the installer (fresh images) and `provision_network_tools.sh` (so existing boxes get it on their next update).
+- **Why not just add the Pi apt repo:** on Kali, modern apt (`sqv`) **rejects** the Raspberry Pi archive's signing key (SHA1 binding signature, disallowed since 2026-02) — `apt update` fails "not signed" — and mixing a foreign repo into Kali risks later conflicts. Instead the script prefers apt where the package already exists (Raspberry Pi OS), else **downloads the `rpi-connect-lite` `.deb` directly from the archive over HTTPS and verifies its SHA256** before installing. Its only deps (`init-system-helpers`, `dbus-user-session`) are already present, so it resolves cleanly with no third-party repo. ARM-only; a no-op on x86. Idempotent — exits immediately once installed. *Validated live on Kali arm64: `rpi-connect 2.13.0` installs and is detected.*
+
 ### 2026-10-18
 
 #### [#987](https://github.com/PierreGode/Ragnar/pull/987) — feat(ulfberht): persisted engagement history + pro HTML/PDF report with remediation

@@ -961,6 +961,14 @@ EOF
         log "WARNING" "lldpd not available - switch discovery (Switch & L2 tab) will be limited"
     fi
 
+    # Raspberry Pi Connect (backup remote access, surfaced in the Mesh tab).
+    # Idempotent, ARM-only, never fails the install (see install_pi_connect.sh).
+    if [ -f "$ragnar_PATH/scripts/install_pi_connect.sh" ]; then
+        log "INFO" "Installing Raspberry Pi Connect (rpi-connect)..."
+        bash "$ragnar_PATH/scripts/install_pi_connect.sh" || \
+            log "WARNING" "Raspberry Pi Connect install reported a problem (optional feature)"
+    fi
+
     # The speedtest diagnostic probes `speedtest-cli` first, then a bare
     # `speedtest`. The apt speedtest-cli package usually ships both, but on
     # distros where it only provides speedtest-cli, guarantee a `speedtest`
