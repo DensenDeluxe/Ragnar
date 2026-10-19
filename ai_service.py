@@ -214,6 +214,19 @@ class AIService:
 
         return success
 
+    def complete(self, user_msg: str, system_msg: Optional[str] = None) -> Optional[str]:
+        """One-shot completion returning the model's raw text (or None).
+
+        Public entry over the unified `_ask` call, used by callers that need the
+        AI to emit a structured artifact rather than a cached 'analysis' — e.g.
+        the Ulfberht playbook generator. Routes OpenAI vs self-hosted the same
+        way every other call does. Returns None when AI is disabled/unavailable.
+        """
+        if system_msg is None:
+            system_msg = ("You are a security automation assistant. Output exactly one "
+                          "JSON object and nothing else — no prose, no markdown fences.")
+        return self._ask(system_msg, user_msg)
+
 
 
     # ===================================================================

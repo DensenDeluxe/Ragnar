@@ -28934,6 +28934,51 @@ function ulfArsenalSaveEdited() {
 // Generate with AI: ask the server to build a copy-paste prompt (schema +
 // selected tools + the operator's instruction). No AI call here — the operator
 // pastes it into their own AI and pastes the JSON reply into the editor to Save.
+// Primary path: Ragnar calls the configured AI (Settings -> AI) and returns a
+// finished, validated playbook ready to Save. Falls back to the copy-paste
+// prompt only when no AI endpoint is configured.
+function ulfArsenalAiGenerate() {
+    const msg = document.getElementById('ulf-arsenal-ai-msg');
+    const btn = document.getElementById('ulf-arsenal-ai-gen-btn');
+    const instr = ((document.getElementById('ulf-arsenal-ai-instr') || {}).value || '').trim();
+    const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    if (!instr && !ulfArsenalSel.size) {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Describe what you want, or select at least one tool.'; }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Generating with AI… (a local model can take a while)'; }
+    const done = () => { if (btn) { btn.disabled = false; btn.style.opacity = ''; } };
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ai_generate: true, name: name, tools: [...ulfArsenalSel], instruction: instr }) })
+        .then(r => r.json()).then(d => {
+            done();
+            const ed = document.getElementById('ulf-arsenal-editor');
+            const ew = document.getElementById('ulf-arsenal-editor-wrap');
+            const lbl = document.getElementById('ulf-arsenal-editor-label');
+            if (d.success && d.spec) {
+                if (ed) ed.value = JSON.stringify(d.spec, null, 2);
+                if (lbl) lbl.innerHTML = '<b>AI-generated playbook</b> — review, then Save to Engagements (or Cancel):';
+                if (ew) ew.classList.remove('hidden');
+                const w = document.getElementById('ulf-arsenal-ai-wrap'); if (w) w.classList.add('hidden');
+                if (msg) { msg.style.color = '#4ade80'; msg.textContent = 'Generated “' + _esc(d.spec.name || '') + '” (' + (d.spec.steps || []).length + ' steps). Save it below.'; }
+                if (ed) ed.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } else if (d.no_ai && d.prompt) {
+                // No AI configured — fall back to the copy-paste prompt.
+                const box = document.getElementById('ulf-arsenal-ai-prompt'); if (box) box.value = d.prompt;
+                const w = document.getElementById('ulf-arsenal-ai-wrap'); if (w) w.classList.remove('hidden');
+                if (ed && !ed.value.trim() && ew) { ew.classList.remove('hidden'); }
+                if (msg) { msg.style.color = '#fbbf24'; msg.textContent = 'No AI configured in Settings → AI — copy this prompt into your own AI, paste the JSON below, Save.'; }
+            } else if (d.raw) {
+                // AI replied but it wasn't a valid playbook — show it so it can be fixed.
+                if (ed) ed.value = d.raw;
+                if (lbl) lbl.textContent = "The AI's reply wasn't valid — fix the JSON and Save:";
+                if (ew) ew.classList.remove('hidden');
+                if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Invalid AI reply'; }
+            } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Generation failed'; }
+        }).catch(e => { done(); if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
 function ulfArsenalAiPrompt() {
     const msg = document.getElementById('ulf-arsenal-ai-msg');
     const instr = ((document.getElementById('ulf-arsenal-ai-instr') || {}).value || '').trim();

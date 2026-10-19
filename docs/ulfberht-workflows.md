@@ -83,15 +83,21 @@ invocation), an nmap discovery sweep + a posture pass are prepended, a report is
 appended, and the description is category-aware and flags any step that needs
 you to supply input first (a hash file, a capture, an interface).
 
-**Or let your own AI write it.** Still in the Arsenal, describe the engagement
-in plain language under **Generate with AI** and click **Generate AI prompt**.
-Ragnar assembles a complete, copy-pasteable prompt — the exact playbook schema,
-the action catalog, the tool allowlist, the argv/no-shell safety rules, your
-selected tools and your instruction, plus a worked example — that you paste into
-**your own AI** (Claude, ChatGPT, a local model). Paste the AI's JSON reply back
-into the editor and **Save**. No AI runs on the device and no API key is needed,
-so it works on an offline/airgapped box; the prompt is built so a well-formed
-reply validates and runs as-is.
+**Or let AI write it.** Still in the Arsenal, describe the engagement in plain
+language under **Generate with AI** and click **Generate with AI**. Ragnar calls
+the AI you configured in **Settings → AI** — the OpenAI cloud or a self-hosted
+OpenAI-compatible endpoint (Ollama, LocalAI, vLLM, LM Studio) on your LAN/mesh —
+sending it the exact playbook schema, the action catalog, the tool allowlist, the
+argv/no-shell safety rules, your selected tools and your instruction, plus a
+worked example. The reply is parsed and **validated the same way an uploaded
+playbook is** (tolerant of code fences / stray prose; a non-allowlisted tool or
+malformed step is rejected with the reason), then shown ready to **Save to
+Engagements** — no copy-paste.
+
+No AI endpoint configured? The button falls back to giving you that same prompt
+to **copy into your own AI** (Claude, ChatGPT, a local model) and paste the JSON
+reply back — so an offline/airgapped box still works. (The small *"copy a prompt
+for an external AI"* link does this on demand too.)
 
 ```json
 {

@@ -1290,6 +1290,32 @@ def build_ai_prompt(name, tools, instruction):
     return prompt, None
 
 
+def parse_ai_playbook(text):
+    """Extract and validate a playbook JSON object from an AI's raw reply.
+
+    Returns (normalized_spec, error). Tolerant of what models actually emit:
+    ```json fences, a stray sentence before/after the object, trailing commas-ish
+    noise. The spec is run through the same `_validate_playbook` as an upload, so
+    a bad reply is rejected with a clear reason instead of saving junk."""
+    if not text or not str(text).strip():
+        return None, "the AI returned an empty response."
+    s = str(text).strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)   # strip code fences
+    if m:
+        s = m.group(1).strip()
+    i, j = s.find("{"), s.rfind("}")
+    if i == -1 or j == -1 or j < i:
+        return None, "no JSON object found in the AI's reply."
+    try:
+        spec = json.loads(s[i:j + 1])
+    except Exception as e:
+        return None, f"the AI's reply was not valid JSON ({e})."
+    norm, err = _validate_playbook(spec)
+    if err:
+        return None, err
+    return norm, None
+
+
 def delete_playbook(playbook_id):
     for pub in _load_user_playbooks():
         if pub["id"] == playbook_id or pub.get("file") == playbook_id:
