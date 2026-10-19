@@ -4,6 +4,13 @@
 
 ### 2026-10-19
 
+#### [#995](https://github.com/PierreGode/Ragnar/pull/995) — fix(kiosk): rotation resets to landscape + single-output (no more half-screen)
+*branch `fix/kiosk-rotation-and-span`*
+
+- **Rotation can get back to landscape.** `ragnar_kiosk_run.sh` only applied `xrandr`/`wlr-randr` for 90/180/270 and **skipped 0°/normal** — so after rotating, selecting landscape (0°) no-op'd and the screen stayed portrait (symptom: "everything is portrait, only portrait-left/right change anything"). Rotation is now applied **unconditionally, including normal**, in both the session (autostart) and own-Xorg (service) paths, so 0° actually resets to landscape.
+- **No more half-screen.** Nothing collapsed a two-output span, so X spanned both HDMI panels and Chromium `--kiosk` filled the union — the page showed on only one panel ("left half, rest black"). The kiosk now **turns off any non-primary connected output and sets the primary to its preferred mode** before launching, so it drives a single screen. No-op on a normal single-display board.
+- Ships via the installer and the CLI updater's kiosk re-provision (both redeploy the wrapper); re-run `sudo bash scripts/install_kiosk.sh` on an already-deployed box to pick it up.
+
 #### [#994](https://github.com/PierreGode/Ragnar/pull/994) — Ulfberht Arsenal AI + user-reported fixes (Wi-Fi, terminal, uploads, Pi Connect)
 *branch `fix/consolidated-batch`*
 

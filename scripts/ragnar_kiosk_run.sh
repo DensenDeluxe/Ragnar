@@ -272,31 +272,36 @@ done
 if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
     echo "[kiosk-run] running inside existing session — launching chromium directly"
 
-    # Apply rotation via wlr-randr (labwc/wlroots) or xrandr (X session).
-    case "$KIOSK_ROTATION" in
-        90|180|270)
-            if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
-                # wlr-randr's --transform takes: normal|90|180|270|flipped|flipped-90|...
-                OUTPUT="$(wlr-randr 2>/dev/null | awk '/^[^ ]/ {print $1; exit}')"
-                if [[ -n "$OUTPUT" ]]; then
-                    echo "[kiosk-run] wlr-randr: rotating $OUTPUT to $KIOSK_ROTATION"
-                    wlr-randr --output "$OUTPUT" --transform "$KIOSK_ROTATION" 2>&1 || true
-                fi
-            elif [[ -n "${DISPLAY:-}" ]] && command -v xrandr >/dev/null 2>&1; then
-                case "$KIOSK_ROTATION" in
-                    90) XROT=left ;; 180) XROT=inverted ;; 270) XROT=right ;;
-                esac
-                PRIMARY="$(xrandr --query 2>/dev/null | awk '/ connected/ {print $1; exit}')"
-                if [[ -n "$PRIMARY" ]]; then
-                    echo "[kiosk-run] xrandr: rotating $PRIMARY to $XROT"
-                    xrandr --output "$PRIMARY" --rotate "$XROT" 2>&1 || true
-                fi
-            else
-                echo "[kiosk-run] WARN: rotation requested but neither wlr-randr nor xrandr available"
-            fi
-            ;;
-        *) : ;;  # 0 = no rotation
-    esac
+    # Normalise the display before launching chromium: drive a SINGLE output at
+    # its preferred mode and apply the configured rotation. Done unconditionally
+    # — including 0° — so (a) selecting landscape after a rotation actually
+    # resets the screen instead of leaving it portrait, and (b) a two-output
+    # span can't leave the page filling only one panel ("left half, rest black").
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
+        # wlr-randr's --transform takes: normal|90|180|270|flipped|...
+        case "$KIOSK_ROTATION" in 90|180|270) WROT="$KIOSK_ROTATION" ;; *) WROT=normal ;; esac
+        OUTPUT="$(wlr-randr 2>/dev/null | awk '/^[^ ]/ {print $1; exit}')"
+        if [[ -n "$OUTPUT" ]]; then
+            echo "[kiosk-run] wlr-randr: $OUTPUT -> transform $WROT"
+            wlr-randr --output "$OUTPUT" --transform "$WROT" 2>&1 || true
+        fi
+    elif [[ -n "${DISPLAY:-}" ]] && command -v xrandr >/dev/null 2>&1; then
+        case "$KIOSK_ROTATION" in
+            90) XROT=left ;; 180) XROT=inverted ;; 270) XROT=right ;; *) XROT=normal ;;
+        esac
+        PRIMARY="$(xrandr --query 2>/dev/null | awk '/ connected/ {print $1; exit}')"
+        if [[ -n "$PRIMARY" ]]; then
+            # Turn off any OTHER connected output so X isn't spanning two panels.
+            for o in $(xrandr --query 2>/dev/null | awk '/ connected/ {print $1}'); do
+                [[ "$o" != "$PRIMARY" ]] && xrandr --output "$o" --off 2>/dev/null || true
+            done
+            echo "[kiosk-run] xrandr: $PRIMARY -> auto + rotate $XROT (other outputs off)"
+            xrandr --output "$PRIMARY" --auto --primary 2>/dev/null || true
+            xrandr --output "$PRIMARY" --rotate "$XROT" 2>/dev/null || true
+        fi
+    else
+        echo "[kiosk-run] WARN: no wlr-randr/xrandr — cannot set output/rotation"
+    fi
 
     if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then launch_osk wayland; else launch_osk x; fi
     launch_exit_hatch
@@ -371,8 +376,15 @@ case "$KIOSK_ROTATION" in
     *)   ROT=normal ;;
 esac
 PRIMARY="\$(xrandr --query 2>/dev/null | awk '/ connected/ {print \$1; exit}')"
-if [[ -n "\$PRIMARY" && "\$ROT" != "normal" ]]; then
-    xrandr --output "\$PRIMARY" --rotate "\$ROT" || true
+if [[ -n "\$PRIMARY" ]]; then
+    # Single output at its preferred mode (so a two-panel span can't leave the
+    # page on half the screen), then apply rotation — always, including normal,
+    # so switching back to landscape actually resets the orientation.
+    for o in \$(xrandr --query 2>/dev/null | awk '/ connected/ {print \$1}'); do
+        [[ "\$o" != "\$PRIMARY" ]] && xrandr --output "\$o" --off 2>/dev/null || true
+    done
+    xrandr --output "\$PRIMARY" --auto --primary 2>/dev/null || true
+    xrandr --output "\$PRIMARY" --rotate "\$ROT" 2>/dev/null || true
 fi
 
 # Plain openbox, deliberately not openbox-session. A kiosk wants a window
