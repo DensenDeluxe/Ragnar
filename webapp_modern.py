@@ -27258,6 +27258,42 @@ def ulfberht_playbooks_api():
             return jsonify({"enabled": False, "playbooks": []})
         if request.method == 'POST':
             data = request.get_json(silent=True) or {}
+            # Generate-with-AI: Ragnar calls the AI configured in Settings -> AI
+            # (OpenAI or a self-hosted/Ollama endpoint), gets a playbook back,
+            # validates it, and returns the spec ready to Save. Nothing is saved
+            # here. Checked before the `tools` builder branch (the body carries
+            # `tools` too). Falls back to a copy-paste prompt when no AI is set up.
+            if data.get('ai_generate'):
+                prompt, err = ulfberht_engine.build_ai_prompt(
+                    data.get('name'), data.get('tools') or [], data.get('instruction') or '')
+                if err:
+                    return jsonify({"success": False, "error": err}), 400
+                ai = getattr(shared_data, 'ai_service', None)
+                if not ai:
+                    try:
+                        shared_data.initialize_ai_service()
+                        ai = getattr(shared_data, 'ai_service', None)
+                    except Exception:
+                        ai = None
+                if not ai or not ai.is_enabled():
+                    return jsonify({
+                        "success": False, "no_ai": True, "prompt": prompt,
+                        "error": "No AI is configured. Set an OpenAI token or a self-hosted "
+                                 "endpoint in Settings → AI, or copy the prompt into your own AI."}), 200
+                try:
+                    text = ai.complete(prompt)
+                except Exception as e:
+                    logger.warning(f"Ulfberht AI generation call failed: {e}")
+                    return jsonify({"success": False, "prompt": prompt,
+                                    "error": f"The AI call failed: {e}"}), 502
+                if not text or not str(text).strip():
+                    return jsonify({"success": False, "prompt": prompt,
+                                    "error": "The AI returned nothing — check the model/endpoint in Settings → AI."}), 502
+                spec, perr = ulfberht_engine.parse_ai_playbook(text)
+                if perr:
+                    return jsonify({"success": False, "raw": str(text)[:4000],
+                                    "error": f"The AI's reply wasn't a valid playbook: {perr}"}), 200
+                return jsonify({"success": True, "spec": spec})
             # AI prompt generator: build a copy-paste prompt for the operator's own
             # AI (no AI runs here, nothing is saved). Checked first because the body
             # also carries `tools`, which would otherwise hit the builder branch.

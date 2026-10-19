@@ -4,6 +4,13 @@
 
 ### 2026-10-19
 
+#### [#996](https://github.com/PierreGode/Ragnar/pull/996) — feat(ulfberht): "Generate with AI" actually generates the playbook (on-device)
+*branch `feature/ulfberht-ai-generate`*
+
+- **"Generate with AI" now calls the AI and returns the finished playbook — not a prompt to copy.** Describe the engagement → Ragnar sends the schema + action catalog + tool allowlist + argv/no-shell rules + your tools + instruction to the AI configured in **Settings → AI** (OpenAI cloud **or** a self-hosted/Ollama endpoint on the LAN/mesh), gets a playbook back, **validates it the same way an uploaded playbook is** (tolerant of code fences / stray prose; a non-allowlisted tool or malformed step is rejected), and shows it ready to **Save to Engagements**. No copy-paste step.
+- Engine `parse_ai_playbook()` extracts + validates the JSON from the model's raw reply; `AIService.complete()` is the one-shot call; `POST /api/ulfberht/playbooks {ai_generate:true,…}` → `{spec}` (or `{no_ai, prompt}` / `{raw, error}`).
+- **Offline fallback kept:** with no AI endpoint configured, the button hands you the same prompt to paste into your own AI (and a small "copy a prompt for an external AI" link does it on demand), so an airgapped box still works.
+
 #### [#995](https://github.com/PierreGode/Ragnar/pull/995) — fix(kiosk): rotation resets to landscape + single-output (no more half-screen)
 *branch `fix/kiosk-rotation-and-span`*
 
