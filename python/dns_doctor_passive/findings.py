@@ -25,6 +25,8 @@ Code ranges by detector class:
   050-059  protocol abuse (SVCB alias fan-out, EDNS options, duplicate RRs, TKEY)
   060-069  zone transfer integrity (TSIG coverage across multi-message XFR)
   070-079  mDNS (RFC 6762 / DNS-SD): Matter+Thread census, scope violations
+  080-089  DDNS (RFC 2136 opcode 5): dynamic-update posture
+  090-099  rDNS (PTR): private reverse leak, ip6.arpa tree enumeration
 
 CONFIDENCE is separate from SEVERITY on purpose (LESSON T): severity
 says how bad it would be if real, confidence says how sure the wire
@@ -155,6 +157,12 @@ FINDINGS = {
         "desc": "One response carries both NSEC and NSEC3 denial records for the same zone while RRSIGs cover only one of the two types -- the unsigned half is attacker-substitutable",
     },
 
+    "DNSD-044": {
+        "name": "SIG_RDATA_ALLOC_WRAP", "severity": "critical", "confidence": "high",
+        "cve": "CVE-2020-1350", "klass": "dnssec-integrity", "stateful": False,
+        "desc": "A SIG or RRSIG record's uncompressed signer-name length plus 0x14 plus its signature length reaches 65536 or more -- SIGRed: Windows DNS truncates that sum to 16 bits, allocates the wrapped value and then memcpy's the full data into it",
+    },
+
     # --- protocol abuse (050-059) ---------------------------------
     "DNSD-050": {
         "name": "SVCB_ALIASMODE_ABUSE", "severity": "warning", "confidence": "medium",
@@ -173,8 +181,14 @@ FINDINGS = {
     },
     "DNSD-053": {
         "name": "TKEY_QUERY_ANOMALY", "severity": "warning", "confidence": "medium",
-        "cve": "CVE-2026-76163", "klass": "protocol-abuse", "stateful": False,
-        "desc": "A query of QTYPE TKEY was observed. TKEY is legitimate for GSS-TSIG, so this reports an attack ATTEMPT against the BIND assertion failure, not a vulnerable resolver -- correlate with your own BIND version before acting",
+        "cve": "CVE-2026-76163, CVE-2020-8625, CVE-2021-25216", "klass": "protocol-abuse", "stateful": False,
+        "desc": "A TKEY query was observed, or a TKEY record carries a structurally impossible SPNEGO token (a DER length claiming more bytes than the token holds) -- the second shape is the precondition for the BIND GSSAPI buffer overflow. Both are ATTEMPTS: neither the named.conf options block nor tkey-gssapi-keytab is visible from the wire, so correlate with your own BIND version and config",
+    },
+
+    "DNSD-054": {
+        "name": "TSIG_RDATA_MALFORMED", "severity": "warning", "confidence": "high",
+        "cve": "CVE-2020-8622", "klass": "protocol-abuse", "stateful": False,
+        "desc": "A TSIG record's internal length fields contradict its rdlength (MAC size or other-data overruns, or trailing bytes remain) -- BIND asserts and exits while verifying a TSIG it could not fully read. No correct signer emits this shape",
     },
 
     # --- zone transfer integrity (060-069) ------------------------
@@ -229,6 +243,44 @@ FINDINGS = {
         "cve": "CVE-2015-2809, CVE-2017-6520, CVE-2015-1892", "klass": "mdns", "stateful": False,
         "desc": "An mDNS responder answered to an off-link unicast destination (CERT VU#550620) -- it is an open reflector: DDoS amplification fuel and an information leak of every service it advertises",
     },
+
+    # --- DDNS tier (080-089) --------------------------------------
+    # RFC 2136 UPDATE, opcode 5. Both posture codes report an OUTCOME
+    # read off the server's own answer, not an attempt: "someone tried
+    # an unsigned update" is noise, "the server accepted one" is a
+    # vulnerable zone. That is why both are high confidence.
+    #
+    # OPCODE ROUTING: an UPDATE reuses all four section counts with
+    # different meanings, so UPDATE messages are routed away from the
+    # QUERY detectors exactly as mDNS is routed away by port. See
+    # engine.handle_frame.
+    "DNSD-080": {
+        "name": "DDNS_UNSIGNED_UPDATE_ACCEPTED", "severity": "critical", "confidence": "high",
+        "cve": None, "klass": "ddns", "stateful": True,
+        "desc": "An RFC 2136 UPDATE carrying no TSIG and no SIG(0) was answered NOERROR, so the zone accepts unauthenticated dynamic updates. An IP-address ACL produces exactly this and is itself the finding: a UDP source address is forgeable, so the zone is writable by anyone who can spoof one",
+    },
+    "DNSD-081": {
+        "name": "DDNS_TSIG_BYPASS_ACCEPTED", "severity": "critical", "confidence": "high",
+        "cve": "CVE-2017-3143", "klass": "ddns", "stateful": True,
+        "desc": "A dynamic update was answered NOERROR while the TSIG in the exchange reports BADSIG/BADKEY/BADTIME, or carries an empty or illegally truncated MAC -- signature verification did not succeed and the update was applied anyway. A completed authentication bypass, not an attempt",
+    },
+    "DNSD-082": {
+        "name": "DDNS_UPDATE_FROM_UNEXPECTED_SOURCE", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "ddns", "stateful": False,
+        "desc": "A dynamic update arrived from a source outside the operator-supplied list of permitted updater prefixes. Requires that configuration and is silent without it -- a learned allowlist would arm itself from whatever the sensor happened to see first",
+    },
+
+    # --- rDNS tier (090-099) --------------------------------------
+    "DNSD-090": {
+        "name": "PTR_PRIVATE_LEAK", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "rdns", "stateful": False,
+        "desc": "A reverse lookup for RFC 1918, CGNAT 100.64/10, link-local, ULA fd00::/8 or fe80::/10 space was addressed to a resolver outside the configured internal prefixes -- internal topology leaking to the public DNS (and to the AS112 sinks that answer it)",
+    },
+    "DNSD-091": {
+        "name": "IP6_ARPA_WALK", "severity": "warning", "confidence": "medium",
+        "cve": None, "klass": "rdns", "stateful": True,
+        "desc": "One source issued many distinct ip6.arpa queries sharing a long leading nibble prefix inside one window -- reverse-tree enumeration, which turns RFC 8020's NXDOMAIN-versus-empty-non-terminal distinction into an IPv6 host-discovery oracle. The common-prefix requirement is what separates it from bulk reverse lookups",
+    },
 }
 
 # Codes whose detector needs a LEARNED per-zone baseline before it can
@@ -245,7 +297,19 @@ CENSUS_CODES = {"DNSD-070", "DNSD-071", "DNSD-072", "DNSD-073"}
 # The two scope codes that cannot run without operator-supplied local
 # prefixes. Named here so the engine can report them as disabled
 # rather than silently never firing.
-PREFIX_DEPENDENT = {"DNSD-075", "DNSD-076"}
+PREFIX_DEPENDENT = {"DNSD-075", "DNSD-076", "DNSD-082", "DNSD-090"}
+
+# Which config key each prefix-dependent code waits on. They are NOT
+# the same key: an mDNS local prefix is "this link", a DDNS updater
+# prefix is "hosts allowed to write my zones", and an rDNS internal
+# prefix is "my organisation's resolvers". Collapsing them into one
+# list would make each check wrong in the other two's terms.
+PREFIX_CONFIG_KEY = {
+    "DNSD-075": "mdns_local_prefixes",
+    "DNSD-076": "mdns_local_prefixes",
+    "DNSD-082": "ddns_allowed_updater_prefixes",
+    "DNSD-090": "rdns_internal_prefixes",
+}
 
 
 def _validate():
@@ -264,8 +328,13 @@ def _validate():
         assert m["name"] not in seen_names, f"{code}: duplicate name {m['name']}"
         seen_names.add(m["name"])
         assert m["klass"] in ("structural", "posture", "behavioural", "integrity",
-                              "dnssec-integrity", "protocol-abuse", "transfer", "mdns")
+                              "dnssec-integrity", "protocol-abuse", "transfer", "mdns",
+                              "ddns", "rdns")
     assert BASELINE_DEPENDENT <= set(FINDINGS), "BASELINE_DEPENDENT names an unknown code"
+    assert PREFIX_DEPENDENT <= set(FINDINGS), "PREFIX_DEPENDENT names an unknown code"
+    assert set(PREFIX_CONFIG_KEY) == PREFIX_DEPENDENT, (
+        "every prefix-dependent code must name the config key it waits on, "
+        "or the engine cannot report it as disabled rather than silently dead")
 
 
 _validate()
