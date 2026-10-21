@@ -476,6 +476,23 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   are not truncated.
   Plus `DNSD-007` a malformed/truncated response (TuDoor class) and `DNSD-011` an unsupported
   DNSSEC algorithm.
+- **mDNS tier (v6, UDP/5353)** — mDNS and unicast DNS share a wire format but not a rule set,
+  so the mDNS detectors run **only** on 5353 and the unicast detectors **only** on 53 (every
+  `.local` name is out of bailiwick for any zone, so cross-running them would false-fire). A
+  **Matter/Thread census**, informational and once per instance — `DNSD-070` a Matter
+  operational node (`_matter._tcp`), `DNSD-071` a commissionable device (`_matterc._udp`, open
+  to pairing right now), `DNSD-072` a commissioner (`_matterd._udp`), `DNSD-073` a Thread
+  border router (`_meshcop._udp`) — the only plane that names those fabrics on the IP side,
+  never an alarm. And the RFC 6762 / CERT **VU#550620** scope family — `DNSD-074` an mDNS
+  packet whose IP TTL / hop-limit is not 255 (it crossed a router or was not link-local;
+  config-free), `DNSD-075` an mDNS source outside the capture interface's own subnets (off-link),
+  and `DNSD-076` an mDNS responder answering an off-link **unicast** destination — an open
+  reflector: DDoS amplification fuel and a service-inventory leak (`CVE-2015-2809` Avahi,
+  `CVE-2017-6520` eCos, `CVE-2015-1892` OS X). `DNSD-075/076` arm from the interface's subnets
+  and stay silent without them. This tier never judges mDNS name *poisoning* (LLMNR/NBT-NS/mDNS
+  spoofing stays with [SMB Watch](#smb-watch)); the three remote Avahi crafted-packet bugs
+  (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002) are named only to document why they are out
+  of scope (~5.0 CVSS v2, under the bar, not in CISA KEV).
 
 The stateless detectors (KeyTrap, NSEC3 iteration, bailiwick, algorithm) fire on a single
 response; the **baseline-gated** ones (DNSBomb, NXNS burst, NSEC3-encloser, water-torture,

@@ -129,7 +129,11 @@ ND_PREFIXES = [
 CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897',
                 # cfmwatch: Huawei Y.1731 DoS (trigger never published, screening row only)
                 # and a Cisco IOS XR CFM bug rejected below the bar; both only named.
-                'CVE-2014-3223', 'CVE-2023-20233'}
+                'CVE-2014-3223', 'CVE-2023-20233',
+                # dns_doctor_passive mdns.py "why the Avahi CVEs are absent" note: the
+                # remote crafted-packet bugs are 2006-2011, ~5.0 CVSS v2 (under the 6.5
+                # floor), not in CISA KEV -- named only to document the deliberate gap.
+                'CVE-2008-5081', 'CVE-2010-2244', 'CVE-2011-1002'}
 # Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
 # (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
 IGNORED_CVES = {'CVE-2024-99999',

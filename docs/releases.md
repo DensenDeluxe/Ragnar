@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-10-21
+
+#### [#999](https://github.com/PierreGode/Ragnar/pull/999) — feat(net): DNS Watch v6 — mDNS tier (Matter/Thread census + RFC 6762 / VU#550620 scope)
+*branch `feature/dns-poison-v6`*
+
+- **DNS Watch v6** refreshes the vendored `python/dns_doctor_passive/` engine with a new **mDNS tier** on UDP/5353 (new `mdns.py`; `do_dns_watch`'s capture filter gains `udp port 5353`). mDNS and unicast DNS share a wire format but not a rule set, so the mDNS detectors run **only** on 5353 and the unicast ones **only** on 53 (every `.local` name is out of bailiwick, so cross-running them would false-fire).
+  - **Matter/Thread census (`DNSD-070..073`)** — informational, once per instance, never an alarm: a Matter operational node (`_matter._tcp`), a commissionable device in its pairing window (`_matterc._udp`), a commissioner (`_matterd._udp`), and a Thread border router (`_meshcop._udp`). This is the only plane that names those fabrics on the IP side, so Ragnar otherwise has no visibility they exist.
+  - **RFC 6762 / CERT VU#550620 scope (`DNSD-074..076`)** — `DNSD-074` an mDNS packet with IP TTL / hop-limit ≠ 255 (crossed a router or not link-local; config-free), `DNSD-075` an off-link mDNS source, and `DNSD-076` an mDNS responder answering an off-link **unicast** destination — an open reflector (DDoS amplification + service-inventory leak). `DNSD-075/076` are armed from the **capture interface's own subnets** (derived in the adapter) and stay silent without them, by design.
+- **CVE index +6 named / +3 detected → 405 named / 342 detected.** Detected: `CVE-2015-2809` (Avahi), `CVE-2017-6520` (eCos), `CVE-2015-1892` (OS X) on `DNSD-075/076`. The three remote Avahi crafted-packet bugs (`CVE-2008-5081` / `CVE-2010-2244` / `CVE-2011-1002`) are added as **context only** (named in-engine to document the deliberate gap — ~5.0 CVSS v2, under the bar, not in CISA KEV) via `gen_cve_list`'s `CONTEXT_CVES`. DNS Watch is now 32 CVEs. CREDITS.md / README.md counts synced. The census codes carry no CVE. mDNS name *poisoning* (LLMNR/NBT-NS/mDNS spoofing) stays with SMB Watch — this tier never judges it.
+- **Self-test:** the vendored `dns_passive` suite grows **29 → 38** scenarios (census once-per-instance, commissionable/commissioner, Matter census both stacks, Thread border router, TTL-violation both stacks, off-link unicast reflector, on-link QU reply is legitimate, and mDNS never trips a unicast DNS code). Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token, so no JS/cache-bust change (card prose only).
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
 ### 2026-10-19
 
 #### [#998](https://github.com/PierreGode/Ragnar/pull/998) — fix(ulfberht): posture TLS + ANSI fixes, and first-class wireless engagements

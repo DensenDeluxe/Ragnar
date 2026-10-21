@@ -45,7 +45,8 @@ class Config:
                  "port_entropy_min_samples", "port_entropy_min_distinct_ratio",
                  "ring_size", "inflight_max", "inflight_ttl_seconds",
                  "svcb_max_servicemode", "duplicate_rr_threshold",
-                 "xfr_max_streams", "xfr_ttl_seconds")
+                 "xfr_max_streams", "xfr_ttl_seconds",
+                 "mdns_enabled", "mdns_local_prefixes", "mdns_census_max")
 
     def __init__(self, **kw):
         # LRU cap. MEASURED per-zone cost after lazy ring allocation:
@@ -105,6 +106,15 @@ class Config:
         self.duplicate_rr_threshold = 8
         self.xfr_max_streams = 512
         self.xfr_ttl_seconds = 300.0
+
+        # --- mDNS tier ---------------------------------------------
+        self.mdns_enabled = True
+        # Operator-supplied CIDRs for THIS link. The two off-link
+        # scope detectors stay silent without them -- see mdns.py for
+        # why the obvious "public address means off-link" shortcut is
+        # wrong on a carrier-neutral colo or ISP LAN.
+        self.mdns_local_prefixes = ()
+        self.mdns_census_max = 2048
 
         for k, v in kw.items():
             if not hasattr(self, k):
@@ -379,3 +389,39 @@ class XferTable:
         for k in dead:
             del self.streams[k]
         return len(dead)
+
+
+class CensusTable:
+    """
+    Bounded first-sighting set for the mDNS census.
+
+    mDNS hosts re-announce continuously, so the census MUST emit once
+    per (service, instance) rather than per packet -- otherwise the
+    informational leg would bury the scope leg it shares a tier with.
+
+    Eviction here is pure hygiene and carries no detection meaning: an
+    evicted key simply gets reported again on its next announcement,
+    which is noisier but never silent. That is the opposite of
+    ndpwatch's neighbour table, where eviction was a detection bypass,
+    and the asymmetry is why a plain LRU is correct here.
+    """
+    __slots__ = ("cap", "seen", "evictions")
+
+    def __init__(self, cap=2048):
+        self.cap = cap
+        self.seen = OrderedDict()
+        self.evictions = 0
+
+    def first_sighting(self, key, now):
+        if key in self.seen:
+            self.seen.move_to_end(key)
+            self.seen[key] = now
+            return False
+        if len(self.seen) >= self.cap:
+            self.seen.popitem(last=False)
+            self.evictions += 1
+        self.seen[key] = now
+        return True
+
+    def __len__(self):
+        return len(self.seen)

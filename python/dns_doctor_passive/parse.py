@@ -42,6 +42,24 @@ ETH_P_VLAN = 0x8100
 T_A, T_NS, T_CNAME, T_SOA, T_AAAA = 1, 2, 5, 6, 28
 T_DS, T_RRSIG, T_NSEC, T_DNSKEY, T_NSEC3 = 43, 46, 47, 48, 50
 T_OPT, T_DNAME, T_SVCB, T_HTTPS, T_TKEY, T_TSIG = 41, 39, 64, 65, 249, 250
+T_PTR, T_SRV, T_TXT = 12, 33, 16
+
+# mDNS (RFC 6762). Same wire format as DNS, different transport rules.
+MDNS_PORT = 5353
+MDNS_V4_GROUP = bytes([224, 0, 0, 251])
+MDNS_V6_GROUP = bytes.fromhex("ff0200000000000000000000000000fb")
+# RFC 6762 s11: every mDNS message MUST be sent with IP TTL / hop limit
+# 255, and a receiver SHOULD check it. A value other than 255 means the
+# packet either crossed a router or was not generated as link-local --
+# which is the whole premise of the VU#550620 scope-violation family.
+MDNS_REQUIRED_TTL = 255
+# Top bit of the question qclass = QU (unicast response requested,
+# RFC 6762 s5.4). Top bit of an RR's class = cache-flush (s10.2).
+# Both MUST be masked off before comparing a class to IN(1), or every
+# mDNS record reads as class 32769 and nothing matches.
+MDNS_CLASS_MASK = 0x7FFF
+MDNS_UNICAST_BIT = 0x8000
+MDNS_CACHE_FLUSH_BIT = 0x8000
 QT_IXFR, QT_AXFR, QT_TKEY = 251, 252, 249
 
 # EDNS0 option codes that RFC permits AT MOST ONCE in one OPT record.
@@ -138,10 +156,17 @@ class DNSMessage:
 
 def parse_l3_l4(frame):
     """
-    Dual-stack. Returns (src_ip, dst_ip, sport, dport, proto, payload)
+    Dual-stack. Returns
+    (src_ip, dst_ip, sport, dport, proto, payload, ttl)
     or None if this frame isn't DNS-shaped. src/dst are returned as
     raw bytes -- formatting them costs CPU on the hot path and only
     matters when a finding actually fires.
+
+    `ttl` is the IPv4 TTL or the IPv6 hop limit, read from the SAME
+    position in meaning if not in offset. It is carried because RFC
+    6762 s11 makes 255 a protocol requirement for mDNS, so the field
+    is detection input here rather than plumbing. Appended last so
+    existing positional unpacking of the first six stays valid.
     """
     if len(frame) < ETH_HDR:
         return None
@@ -167,6 +192,7 @@ def parse_l3_l4(frame):
         ihl = (vihl & 0x0F) * 4
         if ihl < 20 or len(frame) < off + ihl:
             return None
+        ip_ttl = frame[off + 8]
         proto = frame[off + 9]
         # A fragmented datagram cannot be parsed as DNS from one frame.
         frag = int.from_bytes(frame[off + 6:off + 8], "big")
@@ -179,6 +205,7 @@ def parse_l3_l4(frame):
             return None
         if (frame[off] >> 4) != 6:
             return None
+        ip_ttl = frame[off + 7]          # hop limit
         proto = frame[off + 6]
         src, dst = frame[off + 8:off + 24], frame[off + 24:off + 40]
         l4 = off + 40
@@ -205,7 +232,7 @@ def parse_l3_l4(frame):
             return None
         sport = int.from_bytes(frame[l4:l4 + 2], "big")
         dport = int.from_bytes(frame[l4 + 2:l4 + 4], "big")
-        return (src, dst, sport, dport, "udp", frame[l4 + 8:])
+        return (src, dst, sport, dport, "udp", frame[l4 + 8:], ip_ttl)
     if proto == 6:  # TCP
         if len(frame) < l4 + 20:
             return None
@@ -218,7 +245,7 @@ def parse_l3_l4(frame):
         # DNS over TCP prefixes a 2-byte length.
         if len(payload) < 2:
             return None
-        return (src, dst, sport, dport, "tcp", payload[2:])
+        return (src, dst, sport, dport, "tcp", payload[2:], ip_ttl)
     return None
 
 
@@ -360,9 +387,20 @@ def _parse_rdata(rr, buf, rdoff, ptr_sink=None):
         elif rr.rtype == T_NS:
             target, _ = parse_name(buf, rdoff, ptr_sink=ptr_sink)
             rr.parsed = {"target": target}
-        elif rr.rtype in (T_CNAME, T_DNAME):
+        elif rr.rtype in (T_CNAME, T_DNAME, T_PTR):
+            # PTR matters as much as CNAME here: in DNS-SD the PTR
+            # rdata IS the service instance name, so without decoding
+            # it the mDNS census can see that a service type exists
+            # but never which device is advertising it.
             target, _ = parse_name(buf, rdoff, ptr_sink=ptr_sink)
             rr.parsed = {"target": target}
+        elif rr.rtype == T_SRV and rr.rdlength >= 7:
+            rr.parsed = {
+                "priority": _u16(buf, rdoff),
+                "weight": _u16(buf, rdoff + 2),
+                "port": _u16(buf, rdoff + 4),
+                "target": parse_name(buf, rdoff + 6)[0],
+            }
         elif rr.rtype == T_NSEC and rr.rdlength >= 1:
             # RFC 4034 s4.1.1: next-domain is NOT compressible.
             nxt, after = parse_name(buf, rdoff)
@@ -490,3 +528,68 @@ def parse_dns(payload):
             if msg.pointer_anomaly:
                 break
     return msg
+
+
+# ---------------------------------------------------------------------
+# mDNS helpers (RFC 6762 / RFC 6763 DNS-SD)
+# ---------------------------------------------------------------------
+
+def mdns_class(raw_class):
+    """Strip the QU / cache-flush bit before comparing to a class."""
+    return raw_class & MDNS_CLASS_MASK
+
+
+def mdns_unicast_requested(raw_qclass):
+    """RFC 6762 s5.4 QU bit: the querier asked for a unicast reply.
+    A unicast mDNS response is therefore NOT inherently a violation --
+    only an OFF-LINK one is. Without this distinction the scope
+    detector would fire on ordinary QU exchanges."""
+    return bool(raw_qclass & MDNS_UNICAST_BIT)
+
+
+def mdns_cache_flush(raw_rclass):
+    return bool(raw_rclass & MDNS_CACHE_FLUSH_BIT)
+
+
+def is_mdns_group(addr):
+    return addr == MDNS_V4_GROUP or addr == MDNS_V6_GROUP
+
+
+def service_type_of(name):
+    """
+    Extract the DNS-SD service type from a name, per RFC 6763 s4.1.
+
+    Handles both shapes that appear on the wire:
+      <service>.<proto>.local.                      (a PTR query/answer)
+      <instance>.<service>.<proto>.local.           (an SRV/TXT owner)
+
+    Returns a lowercase "_svc._proto" string, or None if the name is
+    not service-shaped. Matching on this rather than on the full
+    instance name is what keeps the census keyed to the SERVICE while
+    the instance stays available separately.
+    """
+    labels = [l.lower() for l in name.lower_labels()] if hasattr(name, "lower_labels") else []
+    if len(labels) < 2:
+        return None
+    for i in range(len(labels) - 1):
+        a, b = labels[i], labels[i + 1]
+        if a.startswith(b"_") and b in (b"_tcp", b"_udp"):
+            return (a + b"." + b).decode("ascii", "replace")
+    return None
+
+
+def instance_of(name):
+    """
+    The instance label preceding a service type, if any.
+
+    Reads the ORIGINAL labels, not the lowercased ones: DNS-SD
+    instance names are UTF-8 human-readable strings ("Living Room
+    Lamp") and are case-PRESERVING even though matching is
+    case-insensitive. Folding them to lowercase for display would
+    quietly mangle every device name in the census.
+    """
+    orig = getattr(name, "labels", [])
+    for i in range(1, len(orig) - 1):
+        if orig[i].lower().startswith(b"_") and orig[i + 1].lower() in (b"_tcp", b"_udp"):
+            return orig[i - 1].decode("utf-8", "replace")
+    return None

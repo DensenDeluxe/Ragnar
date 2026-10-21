@@ -24,6 +24,7 @@ Code ranges by detector class:
   040-049  DNSSEC structural integrity (RRSIG labels, NSEC/NSEC3 chain)
   050-059  protocol abuse (SVCB alias fan-out, EDNS options, duplicate RRs, TKEY)
   060-069  zone transfer integrity (TSIG coverage across multi-message XFR)
+  070-079  mDNS (RFC 6762 / DNS-SD): Matter+Thread census, scope violations
 
 CONFIDENCE is separate from SEVERITY on purpose (LESSON T): severity
 says how bad it would be if real, confidence says how sure the wire
@@ -182,12 +183,69 @@ FINDINGS = {
         "cve": "CVE-2026-19033", "klass": "transfer", "stateful": True,
         "desc": "A multi-message TCP zone transfer completed with unsigned intermediate messages and no final TSIG -- a secondary applying this has already served unrolled-back data (RFC 8945). Detects the COMPLETED attack, not an attempt",
     },
+
+    # --- mDNS tier (070-079) --------------------------------------
+    # Two legs, deliberately separate concerns:
+    #   census   (070-073) -- what Matter/Thread exists on this LAN
+    #   scope    (074-076) -- RFC 6762 transport-rule violations
+    #
+    # BOUNDARY WITH smbwatch: smbwatch already owns LLMNR/NBT-NS/mDNS
+    # name POISONING (Responder/Inveigh). This tier never judges
+    # whether an mDNS answer is legitimate -- only whether it is
+    # in scope, and what services exist. Both modules see the same
+    # packets; only one reports spoofing, so there is no double report.
+    "DNSD-070": {
+        "name": "MDNS_MATTER_NODE", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Matter operational node is present on this LAN (DNS-SD _matter._tcp). Census only -- never an alarm; Ragnar otherwise has no visibility that Matter exists at all",
+    },
+    "DNSD-071": {
+        "name": "MDNS_MATTER_COMMISSIONABLE", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Matter device is advertising itself as commissionable (_matterc._udp) -- it is in setup mode and open to pairing right now, which is a transient window rather than a steady state",
+    },
+    "DNSD-072": {
+        "name": "MDNS_MATTER_COMMISSIONER", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Matter commissioner (_matterd._udp) is present -- a controller or hub capable of onboarding devices onto the fabric",
+    },
+    "DNSD-073": {
+        "name": "MDNS_THREAD_BORDER_ROUTER", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Thread border router is advertising _meshcop._udp -- wired evidence of a Thread mesh behind it, visible on the IP side without any 802.15.4 radio",
+    },
+    "DNSD-074": {
+        "name": "MDNS_TTL_SCOPE_VIOLATION", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": False,
+        "desc": "An mDNS packet arrived with IP TTL / hop limit other than 255, which RFC 6762 s11 forbids -- it either crossed a router or was not generated as link-local traffic. The config-free leg of the VU#550620 scope-violation family",
+    },
+    "DNSD-075": {
+        "name": "MDNS_OFF_LINK_SOURCE", "severity": "warning", "confidence": "high",
+        "cve": "CVE-2015-2809, CVE-2017-6520, CVE-2015-1892", "klass": "mdns", "stateful": False,
+        "desc": "An mDNS packet arrived from a source outside the configured local prefixes -- mDNS is link-local by definition, so an off-link source means the service is reachable beyond its intended scope",
+    },
+    "DNSD-076": {
+        "name": "MDNS_OFF_LINK_UNICAST_RESPONSE", "severity": "critical", "confidence": "high",
+        "cve": "CVE-2015-2809, CVE-2017-6520, CVE-2015-1892", "klass": "mdns", "stateful": False,
+        "desc": "An mDNS responder answered to an off-link unicast destination (CERT VU#550620) -- it is an open reflector: DDoS amplification fuel and an information leak of every service it advertises",
+    },
 }
 
 # Codes whose detector needs a LEARNED per-zone baseline before it can
 # say anything. Gated at runtime (see state.py / detect.py) because
 # Ragnar's grab-and-go deployment model cannot assume warmup time.
 BASELINE_DEPENDENT = {"DNSD-020", "DNSD-021", "DNSD-022"}
+
+# Census codes report the EXISTENCE of something, so they are emitted
+# once per (service, instance) and then suppressed. mDNS hosts
+# re-announce constantly -- without this the census would emit on
+# every announcement packet and drown the feed it is meant to inform.
+CENSUS_CODES = {"DNSD-070", "DNSD-071", "DNSD-072", "DNSD-073"}
+
+# The two scope codes that cannot run without operator-supplied local
+# prefixes. Named here so the engine can report them as disabled
+# rather than silently never firing.
+PREFIX_DEPENDENT = {"DNSD-075", "DNSD-076"}
 
 
 def _validate():
@@ -206,7 +264,7 @@ def _validate():
         assert m["name"] not in seen_names, f"{code}: duplicate name {m['name']}"
         seen_names.add(m["name"])
         assert m["klass"] in ("structural", "posture", "behavioural", "integrity",
-                              "dnssec-integrity", "protocol-abuse", "transfer")
+                              "dnssec-integrity", "protocol-abuse", "transfer", "mdns")
     assert BASELINE_DEPENDENT <= set(FINDINGS), "BASELINE_DEPENDENT names an unknown code"
 
 

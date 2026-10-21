@@ -26358,20 +26358,45 @@ def _ipsec_selftest():
 # cache-poisoning (CVE-2021-25220) and SAD DNS (CVE-2020-25705). v5 adds malformed-record
 # parser CVEs (compression-pointer loops, malformed DNSKEY, RRSIG label overrun, NSEC/NSEC3
 # chain escape and coexistence), protocol abuse (SVCB AliasMode fan-out, duplicate EDNS
-# options, duplicate-RR floods, TKEY queries) and unsigned multi-message XFR. Dual-stack; the engine
-# never transmits (AST-enforced in its conformance). Complements the ACTIVE do_dns_doctor.
+# options, duplicate-RR floods, TKEY queries) and unsigned multi-message XFR. v6 adds the mDNS
+# tier on UDP/5353 (DNSD-070..076): a Matter/Thread census (informational, once per instance)
+# and RFC 6762 scope checks — a TTL != 255 hop-limit violation, and the CERT VU#550620 off-link
+# source / open-reflector pair (CVE-2015-2809 / CVE-2017-6520 / CVE-2015-1892), the latter armed
+# from the capture interface's own subnets. Dual-stack; the engine never transmits (AST-enforced
+# in its conformance). Complements the ACTIVE do_dns_doctor.
 _DNS_PASSIVE_PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'python', 'dns_doctor_passive')
 
 
-def _dns_passive_engine():
+def _dns_passive_engine(local_prefixes=None):
     """Import the vendored dns_doctor_passive engine (its dir must be on sys.path so the
-    bare cross-imports resolve). Returns a fresh Engine with default Config."""
+    bare cross-imports resolve). Returns a fresh Engine with default Config. `local_prefixes`
+    (CIDR strings for the capture interface) arm the mDNS scope detectors DNSD-075/076, which
+    stay silent on an empty prefix list by design — see mdns.py."""
     if _DNS_PASSIVE_PKG_DIR not in sys.path:
         sys.path.insert(0, _DNS_PASSIVE_PKG_DIR)
     import engine as _e
     from state import Config as _Config
-    return _e.Engine(_Config())
+    cfg = _Config()
+    if local_prefixes:
+        cfg.mdns_local_prefixes = tuple(local_prefixes)
+    return _e.Engine(cfg)
+
+
+def _dns_passive_local_prefixes(iface):
+    """Capture-interface subnets as CIDR strings, for the mDNS scope detectors. mDNS is
+    link-local, so a source outside the interface's own prefixes is off-link (DNSD-075/076)."""
+    prefixes = []
+    try:
+        v4, v6 = _iface_addrs(iface)
+        for a in list(v4) + list(v6):
+            try:
+                prefixes.append(str(ipaddress.ip_interface(a).network))
+            except ValueError:
+                continue
+    except Exception:
+        return []
+    return sorted(set(prefixes))
 
 
 def _iter_pcap_frames(path):
@@ -26425,11 +26450,12 @@ def _dns_passive_verdict(findings):
 
 
 def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
-    """Passive DNS-response threat detector on port 53 (detection-only, never transmits).
-    Flags DNSSEC-CVE signatures (KeyTrap CVE-2023-50387, NSEC3 CVE-2023-50868) and over-DNS
-    attacks (NXNSAttack, MaginotDNS cache-poisoning, DNSBomb, SAD DNS) in the observed DNS
-    record structure. Dual-stack; adapts the vendored dns_doctor_passive engine over a
-    bounded capture."""
+    """Passive DNS-response threat detector on port 53 + mDNS on 5353 (detection-only, never
+    transmits). Flags DNSSEC-CVE signatures (KeyTrap CVE-2023-50387, NSEC3 CVE-2023-50868) and
+    over-DNS attacks (NXNSAttack, MaginotDNS cache-poisoning, DNSBomb, SAD DNS) in the observed
+    DNS record structure, plus the v6 mDNS tier (Matter/Thread census and RFC 6762 scope / CERT
+    VU#550620 off-link reflector). Dual-stack; adapts the vendored dns_doctor_passive engine
+    over a bounded capture."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -26442,8 +26468,10 @@ def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
     fd, pcap = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
     # Large snaplen: DNSSEC responses (DNSKEY/RRSIG bundles) are big and must not truncate.
+    # Port 5353 joins the filter for the v6 mDNS tier (matches the engine's own BPF).
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
-                '-s', '65535', '-c', '20000', '-w', pcap, 'udp port 53 or tcp port 53'],
+                '-s', '65535', '-c', '20000', '-w', pcap,
+                'udp port 53 or tcp port 53 or udp port 5353'],
                timeout=seconds + 8)
     if (os.path.getsize(pcap) <= 24 and res['err'] and any(
             k in res['err'].lower() for k in ('permission', "couldn't",
@@ -26455,7 +26483,7 @@ def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
         return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
     findings, frames = [], 0
     try:
-        eng = _dns_passive_engine()
+        eng = _dns_passive_engine(local_prefixes=_dns_passive_local_prefixes(iface))
         for frame in _iter_pcap_frames(pcap):
             frames += 1
             try:

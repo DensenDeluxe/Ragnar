@@ -18,6 +18,7 @@ import unittest
 from scapy.all import Ether, IP, IPv6, UDP, raw
 from scapy.layers.dns import (DNS, DNSQR, DNSRR, DNSRRDNSKEY, DNSRRRSIG,
                               DNSRRNSEC3, DNSRRSOA, DNSRRNSEC, DNSRROPT, EDNS0TLV)
+from scapy.all import Ether, UDP
 
 import parse
 from state import Config
@@ -296,6 +297,98 @@ class TestNewCveCodes(unittest.TestCase, DualStackMixin):
             f = raw(Ether() / l3 / UDP(sport=53, dport=33333)) + payload
             out = codes(eng.handle_frame(f))
             self.assertIn("DNSD-008", out)
+
+
+class TestMdnsTier(unittest.TestCase):
+    """
+    The mDNS tier, over both stacks. Matter is IPv6-first, so the v6
+    path carries most of the real signal and is tested first-class
+    rather than as an afterthought.
+    """
+
+    @staticmethod
+    def _frame(l3, records, qr=True, sport=5353, dport=5353):
+        an = None
+        for rr in records:
+            an = rr if an is None else an / rr
+        dns = DNS(qr=1 if qr else 0, an=an, ancount=len(records))
+        return raw(Ether() / l3 / UDP(sport=sport, dport=dport) / dns)
+
+    @staticmethod
+    def _ptr(service, instance="Hall Light"):
+        return DNSRR(rrname=f"{service}.local.", type="PTR", ttl=4500,
+                     rdata=f"{instance}.{service}.local.")
+
+    def _v4(self, ttl=255):
+        return IP(src="192.168.1.50", dst="224.0.0.251", ttl=ttl)
+
+    def _v6(self, hlim=255):
+        p = IPv6(src="2001:db8:1::50", dst="ff02::fb")
+        p.hlim = hlim
+        return p
+
+    def test_matter_census_both_stacks(self):
+        for label, l3 in (("IPv4", self._v4()), ("IPv6", self._v6())):
+            eng = Engine(Config())
+            got = codes(eng.handle_frame(self._frame(l3, [self._ptr("_matter._tcp")])))
+            self.assertIn("DNSD-070", got, f"{label}: {got}")
+
+    def test_thread_border_router_census(self):
+        eng = Engine(Config())
+        got = codes(eng.handle_frame(
+            self._frame(self._v6(), [self._ptr("_meshcop._udp", "Border Router")])))
+        self.assertIn("DNSD-073", got, got)
+
+    def test_commissionable_and_commissioner(self):
+        for svc, code in (("_matterc._udp", "DNSD-071"), ("_matterd._udp", "DNSD-072")):
+            eng = Engine(Config())
+            got = codes(eng.handle_frame(self._frame(self._v4(), [self._ptr(svc)])))
+            self.assertIn(code, got, f"{svc}: {got}")
+
+    def test_census_reports_once_per_instance(self):
+        eng = Engine(Config())
+        f = self._frame(self._v4(), [self._ptr("_matter._tcp", "Lamp A")])
+        self.assertIn("DNSD-070", codes(eng.handle_frame(f)))
+        self.assertNotIn("DNSD-070", codes(eng.handle_frame(f)),
+                         "re-announcement must be suppressed")
+
+    def test_ttl_violation_both_stacks(self):
+        for label, l3 in (("IPv4 TTL", self._v4(ttl=64)), ("IPv6 hop limit", self._v6(hlim=64))):
+            eng = Engine(Config())
+            got = codes(eng.handle_frame(self._frame(l3, [self._ptr("_matter._tcp")])))
+            self.assertIn("DNSD-074", got, f"{label}: {got}")
+
+    def test_compliant_ttl_is_silent(self):
+        for l3 in (self._v4(), self._v6()):
+            eng = Engine(Config())
+            got = codes(eng.handle_frame(self._frame(l3, [self._ptr("_matter._tcp")])))
+            self.assertNotIn("DNSD-074", got, got)
+
+    def test_off_link_unicast_reflector(self):
+        cfg = Config(mdns_local_prefixes=("192.168.1.0/24",))
+        eng = Engine(cfg)
+        l3 = IP(src="192.168.1.50", dst="203.0.113.77", ttl=255)
+        got = codes(eng.handle_frame(self._frame(l3, [self._ptr("_matter._tcp")])))
+        self.assertIn("DNSD-076", got, got)
+
+    def test_on_link_unicast_is_a_legitimate_qu_reply(self):
+        cfg = Config(mdns_local_prefixes=("192.168.1.0/24",))
+        eng = Engine(cfg)
+        l3 = IP(src="192.168.1.50", dst="192.168.1.77", ttl=255)
+        got = codes(eng.handle_frame(self._frame(l3, [self._ptr("_matter._tcp")])))
+        self.assertNotIn("DNSD-076", got, got)
+
+    def test_mdns_never_triggers_unicast_dns_codes(self):
+        """Port routing. Every mDNS name ends in .local, so without
+        the split the bailiwick detector alone would fire on nearly
+        every announcement on the network."""
+        from findings import FINDINGS as _F
+        dns_codes = {c for c, m in _F.items() if m["klass"] != "mdns"}
+        eng = Engine(Config(mdns_local_prefixes=("192.168.1.0/24",)))
+        got = set(codes(eng.handle_frame(
+            self._frame(self._v4(), [self._ptr("_matter._tcp"),
+                                     self._ptr("_meshcop._udp", "BR")]))))
+        self.assertFalse(got & dns_codes, f"leaked unicast-DNS codes: {got & dns_codes}")
 
 
 class TestMalformed(unittest.TestCase):
