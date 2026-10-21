@@ -239,6 +239,15 @@ if [[ "$MODE" == "service" ]]; then
         echo "[kiosk-install] no X detected — adding minimal X stack"
         PKGS_TO_INSTALL+=(xserver-xorg xinit x11-xserver-utils openbox)
     fi
+    # openbox is the window manager chromium --kiosk needs to go full-screen. It
+    # is bundled with the "no X" stack above, but a distro that ALREADY ships X
+    # (e.g. Kali — HAS_X=1) can lack openbox specifically. Without a WM, chromium
+    # stays at its default ~945x1060 window and the dashboard fills only part of
+    # the screen. So ensure openbox on its own, regardless of the X-stack check.
+    if ! command -v openbox >/dev/null 2>&1; then
+        echo "[kiosk-install] openbox (WM) missing — adding it (kiosk needs a WM to fill the screen)"
+        PKGS_TO_INSTALL+=(openbox)
+    fi
     # xserver-xorg-legacy provides the suid Xorg.wrap that lets a non-root user
     # start X (our needs_root_rights=yes + allowed_users=anybody below). On Pi OS
     # Bookworm — the default on Pi 5 — X is rootless by default and this package

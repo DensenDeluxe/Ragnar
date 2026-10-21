@@ -969,6 +969,26 @@ EOF
             log "WARNING" "Raspberry Pi Connect install reported a problem (optional feature)"
     fi
 
+    # Bake the on-screen kiosk packages into the IMAGE so a capable board (>2 GiB
+    # RAM) can enable the kiosk on first boot (ragnar-firstboot.sh) with NO
+    # network. We only install the packages here; the kiosk is enabled at first
+    # boot, RAM-gated. (On a normal install the kiosk pulls these when enabled,
+    # so this bake is image-build-only.) openbox is the WM chromium --kiosk needs
+    # to go full-screen; without it the dashboard fills only part of the screen.
+    if [ "$IMAGE_BUILD" = true ]; then
+        log "INFO" "Baking on-screen kiosk packages (openbox + Xorg + Chromium) for first-boot enable..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            openbox xserver-xorg xinit x11-xserver-utils xserver-xorg-legacy xauth kbd \
+            matchbox-keyboard unclutter >/dev/null 2>&1 \
+            || log "WARNING" "Kiosk package bake incomplete (first-boot kiosk may need network)"
+        # Chromium package name differs: 'chromium' (Debian 13/trixie, Kali),
+        # 'chromium-browser' (older Raspberry Pi OS).
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium >/dev/null 2>&1 \
+            || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium-browser >/dev/null 2>&1 \
+            || log "WARNING" "Chromium not baked (first-boot kiosk may need network)"
+        log "SUCCESS" "Kiosk packages baked (enabled at first boot on boards with >2 GiB RAM)"
+    fi
+
     # The speedtest diagnostic probes `speedtest-cli` first, then a bare
     # `speedtest`. The apt speedtest-cli package usually ships both, but on
     # distros where it only provides speedtest-cli, guarantee a `speedtest`

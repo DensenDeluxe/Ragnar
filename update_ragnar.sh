@@ -730,6 +730,15 @@ KIOSK_WRAPPER_SRC="$ragnar_PATH/scripts/ragnar_kiosk_run.sh"
 if [ -f /usr/local/bin/ragnar-kiosk-run ] && [ -f "$KIOSK_WRAPPER_SRC" ]; then
     install -m 0755 "$KIOSK_WRAPPER_SRC" /usr/local/bin/ragnar-kiosk-run
     echo -e "  ${GREEN}✓${NC} Kiosk wrapper refreshed from repo"
+    # The kiosk needs a window manager (openbox) for chromium --kiosk to go
+    # full-screen. A distro that ships X but not openbox (Kali) left it missing,
+    # so the kiosk filled only part of the screen. Ensure it on existing
+    # service-mode kiosks so update-only boxes get the fix too. Idempotent.
+    if [ -f /etc/systemd/system/ragnar-kiosk.service ] && ! command -v openbox >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openbox >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed openbox (kiosk window manager — fixes half-screen)" \
+            || echo -e "  ${YELLOW}⚠${NC} Could not install openbox (kiosk may not fill the screen)"
+    fi
     # Seed the on-screen keyboard so touchscreen typing works on existing kiosk
     # installs too (not just fresh installs). Best-effort, guarded, idempotent:
     # squeekboard for the Wayland/autostart path, matchbox-keyboard for the X

@@ -165,6 +165,46 @@ if [ -n "$CONF_DISPLAY" ]; then
     fi
 fi
 
+# ── 3c. HDMI kiosk on by default for capable boards ─────────────────────────
+# On a board with more than ~2 GiB RAM, bring up the on-screen kiosk (Chromium
+# full-screen on HDMI) in landscape by default, so flashing the image and
+# plugging in a monitor "just works". Small boards (Pi Zero / 1–2 GB) stay
+# headless. Skipped when the operator chose an SPI/GPIO display driver above
+# (that's a different screen). The kiosk packages are baked into the image, so
+# this needs no network. A 2 GB board reports MemTotal < 2 GiB (firmware/GPU
+# reservation), so the >2 GiB test correctly admits only 4 GB+ boards.
+MEM_KB="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+case "$MEM_KB" in ''|*[!0-9]*) MEM_KB=0 ;; esac
+if [ -z "$CONF_DISPLAY" ] && [ "$MEM_KB" -gt 2097152 ]; then
+    log "Capable board (${MEM_KB} kB RAM) — enabling the HDMI kiosk (landscape) by default"
+    CFG="$RAGNAR_PATH/config/shared_config.json"
+    # Firstboot runs before ragnar.service, so a plain file edit is safe (nothing
+    # has the config open). load_config() merges file keys over defaults, so
+    # writing just these two is enough; existing keys are preserved.
+    python3 - "$CFG" <<'PY' 2>/dev/null || log "could not write kiosk default config"
+import json, os, sys
+p = sys.argv[1]
+d = {}
+if os.path.exists(p):
+    try:
+        with open(p) as f: d = json.load(f)
+    except Exception:
+        d = {}
+d["kiosk_enabled"] = True
+d["kiosk_rotation"] = 0
+os.makedirs(os.path.dirname(p), exist_ok=True)
+with open(p, "w") as f:
+    json.dump(d, f, indent=4)
+PY
+    chown -R "$RAGNAR_USER":"$RAGNAR_USER" "$RAGNAR_PATH/config" 2>/dev/null || true
+    # Set up the kiosk (wrapper + Xorg config + service unit). Packages are baked
+    # at image build, so install_kiosk.sh does no apt and works offline.
+    if [ -f "$RAGNAR_PATH/scripts/install_kiosk.sh" ]; then
+        bash "$RAGNAR_PATH/scripts/install_kiosk.sh" >/dev/null 2>&1 || log "install_kiosk.sh reported a problem"
+    fi
+    systemctl enable ragnar-kiosk.service >/dev/null 2>&1 || log "could not enable ragnar-kiosk.service"
+fi
+
 # ── 4. Mesh (Tailscale) first-boot provisioning ─────────────────────────────
 # If the operator dropped a mesh config onto the boot partition, join now — this
 # is the real device with real network and a real identity, which the chroot
