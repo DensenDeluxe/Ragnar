@@ -375,17 +375,46 @@ case "$KIOSK_ROTATION" in
     270) ROT=right ;;
     *)   ROT=normal ;;
 esac
-PRIMARY="\$(xrandr --query 2>/dev/null | awk '/ connected/ {print \$1; exit}')"
-if [[ -n "\$PRIMARY" ]]; then
-    # Single output at its preferred mode (so a two-panel span can't leave the
-    # page on half the screen), then apply rotation — always, including normal,
-    # so switching back to landscape actually resets the orientation.
+# Drive a single connected output at its preferred mode (so a two-panel span
+# can't leave the page on half the screen), then apply rotation — always, incl.
+# normal, so switching back to landscape actually resets the orientation.
+# Factored into a function so the hotplug watcher below re-runs it verbatim.
+_kiosk_apply_output() {
+    local primary o
+    primary="\$(xrandr --query 2>/dev/null | awk '/ connected/ {print \$1; exit}')"
+    [[ -z "\$primary" ]] && return 0
     for o in \$(xrandr --query 2>/dev/null | awk '/ connected/ {print \$1}'); do
-        [[ "\$o" != "\$PRIMARY" ]] && xrandr --output "\$o" --off 2>/dev/null || true
+        [[ "\$o" != "\$primary" ]] && xrandr --output "\$o" --off 2>/dev/null || true
     done
-    xrandr --output "\$PRIMARY" --auto --primary 2>/dev/null || true
-    xrandr --output "\$PRIMARY" --rotate "\$ROT" 2>/dev/null || true
-fi
+    xrandr --output "\$primary" --auto --primary 2>/dev/null || true
+    xrandr --output "\$primary" --rotate "\$ROT" 2>/dev/null || true
+}
+_kiosk_apply_output
+
+# Re-detect the display on hotplug. The call above configures the output ONCE, at
+# start. If the kiosk starts with no monitor attached (enabled headless, screen
+# plugged in later) that connector is never modeset and stays dark until the
+# kiosk is toggled off/on — exactly the "plug it in, no picture" report. A bare
+# service Xorg (no desktop / display-manager) does not light a hot-plugged output
+# on its own. So watch the DRM connector state and re-run the setup when a
+# monitor appears, or whenever an output is connected but nothing is driving it
+# (which also recovers the dark screen if Xorg re-probes a fraction late). The
+# poll keeps this self-contained (no udev rule, no root) and ends with the X
+# server, since the guard xrandr call starts failing once X is gone.
+_kiosk_drm_state()     { cat /sys/class/drm/card*-*/status 2>/dev/null | tr '\n' ','; }
+_kiosk_has_connected() { xrandr --query 2>/dev/null | grep -q ' connected'; }
+_kiosk_has_active()    { xrandr --query 2>/dev/null | grep -qE ' connected.*[0-9]+x[0-9]+\+[0-9]+\+[0-9]+'; }
+(
+    last="\$(_kiosk_drm_state)"
+    while xrandr --query >/dev/null 2>&1; do
+        sleep 4
+        now="\$(_kiosk_drm_state)"
+        if [[ "\$now" != "\$last" ]] || { _kiosk_has_connected && ! _kiosk_has_active; }; then
+            last="\$now"
+            _kiosk_apply_output
+        fi
+    done
+) &
 
 # Plain openbox, deliberately not openbox-session. A kiosk wants a window
 # manager, not a desktop: openbox-session additionally runs every XDG autostart
