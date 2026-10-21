@@ -29,11 +29,16 @@ import time
 
 import parse
 import detect
+import mdns as mdns_tier
 from bailiwick import zone_of_query
-from state import Config, ZoneTable, InFlight, XferTable
+from state import Config, ZoneTable, InFlight, XferTable, CensusTable
 from findings import FINDINGS, BASELINE_DEPENDENT
 
-BPF_FILTER = "(udp or tcp) and port 53"
+# Port 5353 joins the filter for the mDNS tier. Kept as ONE filter
+# rather than two captures so there is a single capture path to reason
+# about, with the port split done in software immediately after parse.
+BPF_FILTER = "(udp or tcp) and (port 53 or port 5353)"
+MDNS_PORT = 5353
 
 
 class Stats:
@@ -58,6 +63,10 @@ class Engine:
         self.zones = ZoneTable(self.cfg)
         self.inflight = InFlight(self.cfg)
         self.xfers = XferTable(self.cfg)
+        self.census = CensusTable(self.cfg.mdns_census_max)
+        self.mdns_local_nets, bad = mdns_tier.parse_local_prefixes(
+            self.cfg.mdns_local_prefixes)
+        self.mdns_bad_prefixes = bad
         self.stats = Stats()
         self._emit = emit or (lambda f: None)
         self._last_sweep = 0.0
@@ -71,8 +80,31 @@ class Engine:
         if r is None:
             self.stats.not_dns += 1
             return []
-        src, dst, sport, dport, proto, payload = r
+        src, dst, sport, dport, proto, payload, ip_ttl = r
         is_tcp = proto == "tcp"
+
+        # PORT ROUTING. mDNS and unicast DNS share a wire format but
+        # not a rule set, and crossing them is a false-positive
+        # generator in both directions. Every mDNS name ends in
+        # .local and is out of bailiwick for any queried zone, so
+        # MaginotDNS (DNSD-006) alone would fire on essentially every
+        # mDNS announcement on the network. The unicast detectors
+        # therefore run ONLY on port 53 and the mDNS tier ONLY on
+        # 5353; neither ever sees the other's traffic.
+        is_mdns = (sport == MDNS_PORT or dport == MDNS_PORT)
+        if is_mdns:
+            if not self.cfg.mdns_enabled:
+                return []
+            msg = parse.parse_dns(payload)
+            self.stats.parsed += 1
+            if msg.malformed:
+                self.stats.malformed += 1
+            out = mdns_tier.handle_mdns(msg, self.cfg, self.census,
+                                        src, dst, ip_ttl, self.mdns_local_nets, now)
+            for f in out:
+                self.stats.findings += 1
+                self._emit(f)
+            return out
 
         msg = parse.parse_dns(payload)
         self.stats.parsed += 1

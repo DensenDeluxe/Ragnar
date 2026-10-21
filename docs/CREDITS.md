@@ -14,15 +14,17 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **339 CVEs detected from the wire.** 399 distinct CVE IDs are named across Ragnar's
-  code; 339 of them a passive detector actually identifies. The rest are named, not detected:
-  51 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **342 CVEs detected from the wire.** 405 distinct CVE IDs are named across Ragnar's
+  code; 342 of them a passive detector actually identifies. The rest are named, not detected:
+  54 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
-  names only to say it does not apply to APC, CFM Watch's two screened-out CFM CVEs, and
-  **RADIUS Watch's ten triaged/deferred CVEs** — the FreeRADIUS DHCP-decoder set, the EAP-pwd
-  side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage),
+  names only to say it does not apply to APC, CFM Watch's two screened-out CFM CVEs, DNS
+  Watch's three Avahi mDNS crafted-packet bugs (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002),
+  named only to document the deliberate gap — ~5.0 CVSS v2, under the bar, not in CISA KEV —
+  and **RADIUS Watch's ten triaged/deferred CVEs** — the FreeRADIUS DHCP-decoder set, the
+  EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage),
   3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
@@ -61,7 +63,11 @@ behind them is Solarflere's work.
   floods (CVE-2026-75029) and TKEY queries (CVE-2026-76163); an unsigned multi-message zone
   transfer (CVE-2026-19033); and three CVEs named on existing detections — excessive key-tag
   matching (CVE-2026-19668), unsolicited-RR acceptance (CVE-2025-40778) and the weak
-  source-port/query-ID PRNG (CVE-2025-40780).
+  source-port/query-ID PRNG (CVE-2025-40780). **DNS Watch v6** adds an **mDNS tier** on
+  UDP/5353: a Matter/Thread service census (informational — the only plane that names those
+  fabrics on the wire) and the RFC 6762 / CERT **VU#550620** scope family — a hop-limit ≠ 255
+  violation, and off-link mDNS source / open-reflector detection (**CVE-2015-2809** Avahi,
+  **CVE-2017-6520** eCos, **CVE-2015-1892** OS X), armed from the capture interface's own subnets.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

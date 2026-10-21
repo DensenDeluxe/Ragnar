@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **399** distinct CVE IDs
-- **339** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **51** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **405** distinct CVE IDs
+- **342** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **54** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-102019**
@@ -25,14 +25,15 @@ detector works is in [nettools.md](nettools.md).
 | 2005 | 2 |
 | 2006 | 3 |
 | 2007 | 1 |
-| 2008 | 2 |
-| 2011 | 2 |
+| 2008 | 3 |
+| 2010 | 1 |
+| 2011 | 3 |
 | 2012 | 1 |
 | 2013 | 6 |
 | 2014 | 8 |
-| 2015 | 11 |
+| 2015 | 13 |
 | 2016 | 6 |
-| 2017 | 16 |
+| 2017 | 17 |
 | 2018 | 13 |
 | 2019 | 20 |
 | 2020 | 30 |
@@ -61,7 +62,7 @@ detector works is in [nettools.md](nettools.md).
 | Dell Guard | 2 |
 | DHCP Guardian | 2 |
 | DNS Doctor (active) | 2 |
-| DNS Watch | 26 |
+| DNS Watch | 32 |
 | EIGRP Watch | 3 |
 | FTP Watch | 3 |
 | ICMP Watch | 3 |
@@ -111,6 +112,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2007-0882](https://nvd.nist.gov/vuln/detail/CVE-2007-0882) | Solaris in.telnetd -f auth bypass | detected | Telnet Watch | — |
 | [CVE-2008-0960](https://nvd.nist.gov/vuln/detail/CVE-2008-0960) | SNMPv3 USM HMAC truncation | detected | SNMP Watch | — |
 | [CVE-2008-4109](https://nvd.nist.gov/vuln/detail/CVE-2008-4109) |  | detected | SSH Watch | — |
+| [CVE-2008-5081](https://nvd.nist.gov/vuln/detail/CVE-2008-5081) |  | context only | DNS Watch | — |
+| [CVE-2010-2244](https://nvd.nist.gov/vuln/detail/CVE-2010-2244) |  | context only | DNS Watch | — |
+| [CVE-2011-1002](https://nvd.nist.gov/vuln/detail/CVE-2011-1002) |  | context only | DNS Watch | — |
 | [CVE-2011-3323](https://nvd.nist.gov/vuln/detail/CVE-2011-3323) | Quagga ospf6d IPv6 prefix DoS | context only | OSPF Watch | — |
 | [CVE-2011-4862](https://nvd.nist.gov/vuln/detail/CVE-2011-4862) | telnetd encrypt_keyid overflow | detected | Telnet Watch | — |
 | [CVE-2012-4091](https://nvd.nist.gov/vuln/detail/CVE-2012-4091) |  | detected | RIP Watch | — |
@@ -128,7 +132,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2014-9298](https://nvd.nist.gov/vuln/detail/CVE-2014-9298) |  | detected | NTP Watch | — |
 | [CVE-2014-9750](https://nvd.nist.gov/vuln/detail/CVE-2014-9750) |  | detected | NTP Watch | — |
 | [CVE-2014-9751](https://nvd.nist.gov/vuln/detail/CVE-2014-9751) |  | detected | NTP Watch | — |
+| [CVE-2015-1892](https://nvd.nist.gov/vuln/detail/CVE-2015-1892) |  | detected | DNS Watch | — |
 | [CVE-2015-2808](https://nvd.nist.gov/vuln/detail/CVE-2015-2808) | Bar Mitzvah (RC4) | detected | TLS Watch | — |
+| [CVE-2015-2809](https://nvd.nist.gov/vuln/detail/CVE-2015-2809) |  | detected | DNS Watch | — |
 | [CVE-2015-3306](https://nvd.nist.gov/vuln/detail/CVE-2015-3306) | ProFTPD mod_copy pre-auth copy | detected | FTP Watch | — |
 | [CVE-2015-4000](https://nvd.nist.gov/vuln/detail/CVE-2015-4000) | Logjam | detected | IPsec / IKE Watch | — |
 | [CVE-2015-5434](https://nvd.nist.gov/vuln/detail/CVE-2015-5434) | MPLS VRF hopping (Comware) | detected | Comware Guard | SR-MPLS Watch, SSH Watch |
@@ -149,6 +155,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2017-0781](https://nvd.nist.gov/vuln/detail/CVE-2017-0781) | BlueBorne | active check | BLE Pentest (active) | — |
 | [CVE-2017-0782](https://nvd.nist.gov/vuln/detail/CVE-2017-0782) | BlueBorne | active check | BLE Pentest (active) | — |
 | [CVE-2017-3731](https://nvd.nist.gov/vuln/detail/CVE-2017-3731) |  | detected | TLS Watch | — |
+| [CVE-2017-6520](https://nvd.nist.gov/vuln/detail/CVE-2017-6520) |  | detected | DNS Watch | — |
 | [CVE-2017-6736](https://nvd.nist.gov/vuln/detail/CVE-2017-6736) |  | detected | SNMP Watch | — |
 | [CVE-2017-10978](https://nvd.nist.gov/vuln/detail/CVE-2017-10978) |  | detected | RADIUS Watch | — |
 | [CVE-2017-10979](https://nvd.nist.gov/vuln/detail/CVE-2017-10979) |  | detected | RADIUS Watch | — |
