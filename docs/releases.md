@@ -4,7 +4,11 @@
 
 ### 2026-10-21
 
-#### [#999](https://github.com/PierreGode/Ragnar/pull/999) — feat(net): DNS Watch v6 — mDNS tier (Matter/Thread census + RFC 6762 / VU#550620 scope)
+#### [#1000](https://github.com/PierreGode/Ragnar/pull/1000) — fix(kiosk): install openbox on Kali too (kiosk filled only half the screen)
+*branch `fix/kiosk-chromium-window-size`*
+
+- On the Kali/Ulfberht image the on-screen kiosk filled only part of the display — chromium `--kiosk` sat at its default ~945×1060 window with the rest of the screen black. Cause: **openbox (the window manager chromium needs to go full-screen) wasn't installed.** `install_kiosk.sh` only added openbox bundled with the "no X detected" stack, and Kali already ships Xorg/xinit (`HAS_X=1`) so that branch — and openbox with it — was skipped. Raspberry Pi OS Lite has no X, hits the branch, and gets openbox — hence "works in Raspbian, not Kali".
+- Fix: `install_kiosk.sh` now ensures **openbox** on its own, independent of the X-stack check. The wrapper also falls back to `matchbox-window-manager` and logs a loud warning if no WM is present (so this never fails silently again). Ships via the installer + the CLI updater's kiosk re-provision. *Verified live on Kali arm64 (`.150`): installing openbox took the chromium window from 945×1060 → full 1920×1080.*
 *branch `feature/dns-poison-v6`*
 
 - **DNS Watch v6** refreshes the vendored `python/dns_doctor_passive/` engine with a new **mDNS tier** on UDP/5353 (new `mdns.py`; `do_dns_watch`'s capture filter gains `udp port 5353`). mDNS and unicast DNS share a wire format but not a rule set, so the mDNS detectors run **only** on 5353 and the unicast ones **only** on 53 (every `.local` name is out of bailiwick, so cross-running them would false-fire).

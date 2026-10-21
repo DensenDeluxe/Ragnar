@@ -397,6 +397,13 @@ if command -v openbox >/dev/null 2>&1; then
     openbox &
 elif command -v openbox-session >/dev/null 2>&1; then
     openbox-session &
+elif command -v matchbox-window-manager >/dev/null 2>&1; then
+    matchbox-window-manager -use_titlebar no &   # lightweight fallback WM
+else
+    # No window manager → chromium --kiosk cannot go full-screen and sits at its
+    # default ~945x1060 window (the dashboard fills only part of the display).
+    # install_kiosk.sh installs openbox; warn loudly so this is obvious in the log.
+    echo "[kiosk-run] WARN: no window manager found (openbox) — the kiosk cannot fill the screen. Run: sudo apt-get install -y openbox (install_kiosk.sh now does this)."
 fi
 
 if [[ "$KIOSK_HIDE_CURSOR" == "true" ]] && command -v unclutter >/dev/null 2>&1; then
