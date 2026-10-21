@@ -138,6 +138,20 @@ if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.v
     pip3 install $PIP_ARGS --ignore-installed "flask-socketio>=5.6.1" || fail "could not ensure flask-socketio >= 5.6.1 (web terminal may not connect)"
 fi
 
+# --- kiosk self-heal (web update) -------------------------------------------
+# Refresh the deployed kiosk wrapper and ensure openbox: chromium --kiosk needs
+# a window manager to go full-screen, and a distro shipping X but not openbox
+# (Kali) left it missing → the kiosk filled only part of the screen. The CLI
+# updater does this in its Step 6.7; mirror it for the in-app/web updater.
+if [ -f /usr/local/bin/ragnar-kiosk-run ] && [ -f "$REPO/scripts/ragnar_kiosk_run.sh" ]; then
+    step "kiosk wrapper + window manager"
+    install -m 0755 "$REPO/scripts/ragnar_kiosk_run.sh" /usr/local/bin/ragnar-kiosk-run || fail "could not refresh kiosk wrapper"
+    if [ -f /etc/systemd/system/ragnar-kiosk.service ] && ! command -v openbox >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openbox \
+            || fail "could not install openbox (kiosk may not fill the screen)"
+    fi
+fi
+
 # --- data files -------------------------------------------------------------
 if [ -f "$REPO/init_data_files.sh" ]; then
     step "data file templates"
