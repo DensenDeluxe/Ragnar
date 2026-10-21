@@ -4,6 +4,12 @@
 
 ### 2026-10-21
 
+#### [#1001](https://github.com/PierreGode/Ragnar/pull/1001) — feat(pages): Ragnar OS download subpage at /os
+*branch `feature/os-download-page`*
+
+- New **download page** for the Ragnar OS images, served as a GitHub Pages **subpage at [`/os/`](https://pierregode.github.io/Ragnar/os/)** alongside the RuSense flasher (which stays untouched at the Pages root). It mirrors the primary download site at **https://ragnar.life/** (one.com-hosted, resumable HTTP 206 downloads). The images themselves stay on `ragnar.life` — the page's buttons link to `https://ragnar.life/images/RagnarOS-arm64.img.xz` / `…Ulfberht….img.xz` (absolute URLs), so nothing large lands on Pages (1 GB cap) and the page is byte-identical on both hosts.
+- `web/os/index.html` is a self-contained dark Norse-themed page (both editions, copyable SHA-256, flash steps, mobile-first). `build-rusense-flasher.yml` gains a `web/os/**` path trigger and one step that copies the page into the existing single Pages artifact at `site/os/` before upload — a second Pages workflow would clobber the first, so it folds into the one that already deploys Pages.
+
 #### [#1000](https://github.com/PierreGode/Ragnar/pull/1000) — fix(kiosk): openbox on Kali + update self-heal + default-on first boot + hot-plug display re-detect
 *branch `fix/kiosk-chromium-window-size`*
 
