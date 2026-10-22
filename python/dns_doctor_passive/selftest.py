@@ -428,5 +428,278 @@ class TestNotDns(unittest.TestCase):
         self.assertEqual(eng.handle_frame(raw(Ether(type=0x0806) / (b"\x00" * 28))), [])
 
 
+
+# ======================================================================
+# DDNS / rDNS tiers
+# ======================================================================
+
+def ddns_frame(payload, l3=None, sport=33333, dport=53):
+    l3 = V4 if l3 is None else l3
+    return raw(Ether() / l3 / UDP(sport=sport, dport=dport) / payload)
+
+
+def update_wire(zone="example.com.", adds=(("host1", "A", "192.0.2.10"),),
+                keyname=None, prereq_only=False):
+    """UPDATE built by dnspython, an INDEPENDENT implementation.
+
+    The detectors read a hand-rolled parser; if the fixtures came from
+    a hand-rolled serializer too, a shared misreading of RFC 2136's
+    section semantics would be invisible here (LESSON A).
+    """
+    import base64
+    import dns.update, dns.tsigkeyring, dns.name
+    kw = {}
+    if keyname:
+        kw = {"keyring": dns.tsigkeyring.from_text(
+                  {keyname: base64.b64encode(b"0" * 32).decode()}),
+              "keyname": keyname,
+              "keyalgorithm": dns.name.from_text("hmac-sha256.")}
+    u = dns.update.Update(zone, **kw)
+    if prereq_only:
+        u.present("host9")
+        return u.to_wire()
+    for n, t, v in adds:
+        u.add(n, 300, t, v)
+    return u.to_wire()
+
+
+def update_response(request_wire, rcode=0, tsig=None):
+    import struct
+    txid = int.from_bytes(request_wire[0:2], "big")
+    flags = 0x8000 | (5 << 11) | rcode
+    hdr = struct.pack("!HHHHHH", txid, flags, 1, 0, 0, 1 if tsig else 0)
+    off = 12
+    while request_wire[off] != 0:
+        off += 1 + request_wire[off]
+    zone_sec = request_wire[12:off + 1] + request_wire[off + 1:off + 5]
+    return hdr + zone_sec + (tsig or b"")
+
+
+def tsig_bytes(mac_size=32, mac=None, err=0, algo=b"\x0bhmac-sha256\x00"):
+    import struct
+    mac = mac if mac is not None else b"\x22" * 32
+    rd = (algo + (0).to_bytes(6, "big") + struct.pack("!HH", 300, mac_size) + mac
+          + struct.pack("!HHH", 0x1234, err, 0))
+    return b"\x01k\x00" + struct.pack("!HHIH", parse.T_TSIG, 255, 0, len(rd)) + rd
+
+
+# Matched client/server L3 pairs per family, so a response is keyed on
+# the same conversation as its request.
+PAIRS = (
+    ("IPv4", IP(src="10.0.0.5", dst="10.0.0.1"), IP(src="10.0.0.1", dst="10.0.0.5")),
+    ("IPv6", IPv6(src="fd00::5", dst="fd00::1"), IPv6(src="fd00::1", dst="fd00::5")),
+)
+
+
+class TestDdnsTier(unittest.TestCase):
+    """Every DDNS scenario on BOTH stacks, with identical verdicts
+    asserted -- the prime directive is that parity is tested, not
+    assumed."""
+
+    def _exchange(self, cfg, req, cli, srv, rcode=0, tsig=None, now=1.0):
+        eng = Engine(cfg)
+        first = eng.handle_frame(ddns_frame(req, cli, 33333, 53), now=now)
+        second = eng.handle_frame(
+            ddns_frame(update_response(req, rcode, tsig), srv, 53, 33333), now=now + 0.01)
+        return eng, codes(first), codes(second)
+
+    def test_unsigned_update_accepted_both_stacks(self):
+        got = {}
+        for label, cli, srv in PAIRS:
+            _, c1, c2 = self._exchange(Config(), update_wire(), cli, srv)
+            self.assertEqual(c1, [], f"{label}: the request alone must report nothing")
+            self.assertIn("DNSD-080", c2, f"{label}: got {c2}")
+            got[label] = c2
+        self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
+
+    def test_rejected_update_is_silent_both_stacks(self):
+        for label, cli, srv in PAIRS:
+            for rcode in (5, 9, 6, 8):
+                _, _, c2 = self._exchange(Config(), update_wire(), cli, srv, rcode=rcode)
+                self.assertEqual(c2, [], f"{label}: rcode {rcode} must be silent, got {c2}")
+
+    def test_prereq_only_update_is_silent_both_stacks(self):
+        """An UPDATE with an empty update section mutates nothing, so a
+        NOERROR says only that the prerequisite held. RFC 4703 DHCP
+        clients send this on every renewal."""
+        for label, cli, srv in PAIRS:
+            _, _, c2 = self._exchange(Config(), update_wire(prereq_only=True), cli, srv)
+            self.assertEqual(c2, [], f"{label}: got {c2}")
+
+    def test_tsig_bypass_both_stacks(self):
+        got = {}
+        for label, cli, srv in PAIRS:
+            _, _, c2 = self._exchange(Config(), update_wire(keyname="k."), cli, srv,
+                                      rcode=0, tsig=tsig_bytes(err=16))
+            self.assertIn("DNSD-081", c2, f"{label}: got {c2}")
+            self.assertNotIn("DNSD-080", c2,
+                             f"{label}: a signed update is never an unsigned one")
+            got[label] = c2
+        self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
+
+    def test_notauth_with_badsig_is_correct_behaviour(self):
+        for label, cli, srv in PAIRS:
+            _, _, c2 = self._exchange(Config(), update_wire(keyname="k."), cli, srv,
+                                      rcode=9, tsig=tsig_bytes(err=16))
+            self.assertEqual(c2, [], f"{label}: got {c2}")
+
+    def test_clean_signed_update_is_silent(self):
+        for label, cli, srv in PAIRS:
+            _, _, c2 = self._exchange(Config(), update_wire(keyname="k."), cli, srv,
+                                      rcode=0, tsig=tsig_bytes(err=0))
+            self.assertEqual(c2, [], f"{label}: got {c2}")
+
+    def test_unexpected_source_needs_config(self):
+        out_cidr = {"IPv4": IP(src="203.0.113.9", dst="10.0.0.1"),
+                    "IPv6": IPv6(src="2001:db8:bad::9", dst="fd00::1")}
+        allow = ("10.0.0.0/24", "fd00::/64")
+        for label, cli, _srv in PAIRS:
+            eng = Engine(Config(ddns_allowed_updater_prefixes=allow))
+            got = codes(eng.handle_frame(ddns_frame(update_wire(), out_cidr[label]), now=1.0))
+            self.assertIn("DNSD-082", got, f"{label}: got {got}")
+            eng = Engine(Config(ddns_allowed_updater_prefixes=allow))
+            self.assertEqual(
+                codes(eng.handle_frame(ddns_frame(update_wire(), cli), now=1.0)), [],
+                f"{label}: an in-allowlist source must be silent")
+            eng = Engine(Config())
+            self.assertEqual(
+                codes(eng.handle_frame(ddns_frame(update_wire(), out_cidr[label]), now=1.0)), [],
+                f"{label}: unconfigured means silent, never 'everything is unexpected'")
+
+
+class TestRdnsTier(unittest.TestCase):
+
+    @staticmethod
+    def _q(name, qtype="PTR"):
+        import dns.message
+        return dns.message.make_query(name, qtype).to_wire()
+
+    INT = ("10.0.0.0/8", "fd00::/8")
+    ULA = ("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0."
+           "0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa.")
+
+    def test_private_leak_both_families_and_both_transports(self):
+        cases = (
+            ("v4 private over v4", "1.0.0.10.in-addr.arpa.",
+             IP(src="10.0.0.5", dst="8.8.8.8")),
+            ("v6 ULA over v4", self.ULA, IP(src="10.0.0.5", dst="9.9.9.9")),
+            ("v4 private over v6", "1.0.0.10.in-addr.arpa.",
+             IPv6(src="fd00::5", dst="2001:4860:4860::8888")),
+            ("v6 ULA over v6", self.ULA, IPv6(src="fd00::5", dst="2001:4860:4860::8888")),
+        )
+        for label, name, l3 in cases:
+            eng = Engine(Config(rdns_internal_prefixes=self.INT))
+            got = codes(eng.handle_frame(ddns_frame(self._q(name), l3), now=1.0))
+            self.assertIn("DNSD-090", got, f"{label}: got {got}")
+
+    def test_internal_destination_is_ordinary_business(self):
+        for l3 in (IP(src="10.0.0.5", dst="10.0.0.1"), IPv6(src="fd00::5", dst="fd00::1")):
+            eng = Engine(Config(rdns_internal_prefixes=self.INT))
+            self.assertEqual(
+                codes(eng.handle_frame(ddns_frame(self._q("1.0.0.10.in-addr.arpa."), l3),
+                                       now=1.0)), [])
+
+    def test_doc_range_is_not_private(self):
+        """RFC 5737 203.0.113/24 is documentation space, not private
+        addressing -- Python's ipaddress disagrees, and that
+        disagreement is what let a mutation survive the mDNS suite."""
+        eng = Engine(Config(rdns_internal_prefixes=self.INT))
+        self.assertEqual(
+            codes(eng.handle_frame(ddns_frame(self._q("5.113.0.203.in-addr.arpa."),
+                                              IP(src="10.0.0.5", dst="8.8.8.8")), now=1.0)), [])
+
+    def test_unconfigured_is_silent(self):
+        eng = Engine(Config())
+        self.assertEqual(
+            codes(eng.handle_frame(ddns_frame(self._q("1.0.0.10.in-addr.arpa."),
+                                              IP(src="10.0.0.5", dst="8.8.8.8")), now=1.0)), [])
+
+    def test_ip6_walk_both_transports(self):
+        prefix = "20010db800000000"
+        names = [".".join(reversed(prefix + f"{i:016x}")) + ".ip6.arpa." for i in range(80)]
+        got = {}
+        for label, l3 in (("IPv4", IP(src="198.51.100.9", dst="10.0.0.1")),
+                          ("IPv6", IPv6(src="2001:db8::9", dst="fd00::1"))):
+            eng = Engine(Config())
+            out = []
+            for i, nm in enumerate(names):
+                out += eng.handle_frame(ddns_frame(self._q(nm), l3, sport=40000 + i * 7),
+                                        now=1.0 + i * 0.1)
+            got[label] = codes(out)
+            self.assertIn("DNSD-091", got[label], f"{label}: got {got[label]}")
+            self.assertEqual(got[label].count("DNSD-091"), 1,
+                             f"{label}: once per window, not once per query")
+        self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
+
+    def test_scattered_lookups_do_not_fire(self):
+        """The mail-server shape: many distinct ip6.arpa names with no
+        shared delegation. Count and distinctness alone would fire."""
+        import random
+        random.seed(3)
+        eng = Engine(Config())
+        out = []
+        for i in range(200):
+            full = "".join(random.choice("0123456789abcdef") for _ in range(32))
+            nm = ".".join(reversed(full)) + ".ip6.arpa."
+            out += eng.handle_frame(
+                ddns_frame(self._q(nm), IP(src="198.51.100.9", dst="10.0.0.1"),
+                           sport=40000 + i * 7), now=1.0 + i * 0.1)
+        self.assertEqual(codes(out), [], f"got {codes(out)}")
+
+
+class TestSigredAndTsig(unittest.TestCase):
+
+    @staticmethod
+    def _sigred(rtype=parse.T_RRSIG, sig_len=65260):
+        import struct
+        hdr = struct.pack("!HHHHHH", 0x5151, 0x8180, 1, 1, 0, 0)
+        question = b"\x00" + struct.pack("!HH", 1, 1)
+        owner = b"\xc0\x0c"
+        sig_fixed = struct.pack("!HBBIIIH", 1, 8, 2, 3600, 1800000000, 1700000000, 0x003f)
+        rdata = sig_fixed + struct.pack("!H", 0xC000 | 46) + b"\x3f" * sig_len
+        rr = owner + struct.pack("!HHIH", rtype, 1, 3600, len(rdata)) + rdata
+        return hdr + question + rr
+
+    def _tcp(self, payload, l3, sport=53, dport=33333):
+        from scapy.all import TCP
+        return raw(Ether() / l3 / TCP(sport=sport, dport=dport)
+                   / (len(payload).to_bytes(2, "big") + payload))
+
+    def test_sigred_both_types_both_stacks(self):
+        for rtype, label in ((parse.T_RRSIG, "RRSIG"), (parse.T_SIG, "SIG")):
+            got = {}
+            for fam, l3 in (("IPv4", IP(src="10.0.0.1", dst="10.0.0.5")),
+                            ("IPv6", IPv6(src="fd00::1", dst="fd00::5"))):
+                eng = Engine(Config())
+                out = eng.handle_frame(self._tcp(self._sigred(rtype), l3), now=1.0)
+                got[fam] = codes(out)
+                self.assertIn("DNSD-044", got[fam], f"{label}/{fam}: got {got[fam]}")
+            self.assertEqual(got["IPv4"], got["IPv6"],
+                             f"{label}: dual-stack divergence {got}")
+
+    def test_near_miss_is_silent(self):
+        eng = Engine(Config())
+        out = eng.handle_frame(self._tcp(self._sigred(sig_len=60000),
+                                         IP(src="10.0.0.1", dst="10.0.0.5")), now=1.0)
+        self.assertNotIn("DNSD-044", codes(out))
+
+    def test_tsig_structure_both_stacks(self):
+        import struct
+        hdr = struct.pack("!HHHHHH", 0x4242, 0x8000, 1, 0, 0, 1)
+        body = b"\x07example\x03com\x00" + struct.pack("!HH", 1, 1)
+        bad = hdr + body + tsig_bytes(mac_size=200, mac=b"\x11" * 32)
+        good = hdr + body + tsig_bytes()
+        got = {}
+        for fam, l3 in (("IPv4", IP(src="10.0.0.1", dst="10.0.0.5")),
+                        ("IPv6", IPv6(src="fd00::1", dst="fd00::5"))):
+            eng = Engine(Config())
+            got[fam] = codes(eng.handle_frame(ddns_frame(bad, l3, 53, 33333), now=1.0))
+            self.assertIn("DNSD-054", got[fam], f"{fam}: got {got[fam]}")
+            eng = Engine(Config())
+            self.assertEqual(codes(eng.handle_frame(ddns_frame(good, l3, 53, 33333), now=1.0)),
+                             [], f"{fam}: a well-formed TSIG must be silent")
+        self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

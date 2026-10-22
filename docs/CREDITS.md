@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **342 CVEs detected from the wire.** 405 distinct CVE IDs are named across Ragnar's
-  code; 342 of them a passive detector actually identifies. The rest are named, not detected:
+- **347 CVEs detected from the wire.** 410 distinct CVE IDs are named across Ragnar's
+  code; 347 of them a passive detector actually identifies. The rest are named, not detected:
   54 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -68,6 +68,13 @@ behind them is Solarflere's work.
   fabrics on the wire) and the RFC 6762 / CERT **VU#550620** scope family — a hop-limit ≠ 255
   violation, and off-link mDNS source / open-reflector detection (**CVE-2015-2809** Avahi,
   **CVE-2017-6520** eCos, **CVE-2015-1892** OS X), armed from the capture interface's own subnets.
+  **DNS Watch v7** adds five more: **SIGRed** (**CVE-2020-1350**, CVSS 10.0, CISA KEV — the
+  oversized SIG/KEY record Windows DNS mis-sizes); a **DDNS** (RFC 2136 dynamic-update) posture
+  tier that catches an unsigned or TSIG-**bypassed** update the zone *accepted* — a completed
+  authentication bypass, not an attempt (**CVE-2017-3143**) — and folds the BIND GSS-TSIG SPNEGO
+  overflows (**CVE-2020-8622** / **CVE-2020-8625** / **CVE-2021-25216**) into the TSIG/TKEY
+  decode; and an **rDNS** posture tier (PTR reverse-lookups for private space leaking to a public
+  resolver, and `ip6.arpa` reverse-tree enumeration) that carries no CVE.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

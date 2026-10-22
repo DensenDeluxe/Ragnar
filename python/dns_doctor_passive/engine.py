@@ -29,16 +29,35 @@ import time
 
 import parse
 import detect
+import netscope
 import mdns as mdns_tier
+import ddns as ddns_tier
+import rdns as rdns_tier
 from bailiwick import zone_of_query
-from state import Config, ZoneTable, InFlight, XferTable, CensusTable
-from findings import FINDINGS, BASELINE_DEPENDENT
+from state import (Config, ZoneTable, InFlight, XferTable, CensusTable,
+                   UpdatePending, WalkTable)
+from findings import (FINDINGS, BASELINE_DEPENDENT, PREFIX_DEPENDENT,
+                      PREFIX_CONFIG_KEY)
 
 # Port 5353 joins the filter for the mDNS tier. Kept as ONE filter
 # rather than two captures so there is a single capture path to reason
 # about, with the port split done in software immediately after parse.
 BPF_FILTER = "(udp or tcp) and (port 53 or port 5353)"
 MDNS_PORT = 5353
+
+# The CLI flag that arms each prefix-dependent code. This map exists
+# instead of deriving the flag from the config key, because the two are
+# NOT the same string -- and the first version of --print-codes did
+# derive it, which printed "[needs --mdns-local-prefixes]" for a flag
+# actually spelled --mdns-prefix. A gate label that names a flag the
+# parser does not accept is worse than no label: it tells an operator
+# the check is armable and then fails them at the shell.
+# conformance.py asserts every flag here is one argparse really takes.
+PREFIX_CLI_FLAG = {
+    "mdns_local_prefixes": "--mdns-prefix",
+    "ddns_allowed_updater_prefixes": "--ddns-updater-prefix",
+    "rdns_internal_prefixes": "--rdns-internal-prefix",
+}
 
 
 class Stats:
@@ -64,9 +83,27 @@ class Engine:
         self.inflight = InFlight(self.cfg)
         self.xfers = XferTable(self.cfg)
         self.census = CensusTable(self.cfg.mdns_census_max)
-        self.mdns_local_nets, bad = mdns_tier.parse_local_prefixes(
+        self.mdns_local_nets, bad = netscope.parse_prefixes(
             self.cfg.mdns_local_prefixes)
         self.mdns_bad_prefixes = bad
+
+        # DDNS: pending requests awaiting a verdict, plus a
+        # first-sighting set so a steady-state posture fact is not
+        # re-reported on every update a DHCP server sends.
+        self.pending = UpdatePending(self.cfg)
+        self.ddns_allowed_nets, bad_d = netscope.parse_prefixes(
+            self.cfg.ddns_allowed_updater_prefixes)
+        self.ddns_bad_prefixes = bad_d
+        self.ddns_seen = CensusTable(self.cfg.mdns_census_max)
+
+        # rDNS: per-source walk windows, and a first-sighting set keyed
+        # on (destination, leaked network) -- a misconfigured resolver
+        # leaks the same prefix thousands of times a day.
+        self.walks = WalkTable(self.cfg)
+        self.rdns_internal_nets, bad_r = netscope.parse_prefixes(
+            self.cfg.rdns_internal_prefixes)
+        self.rdns_bad_prefixes = bad_r
+        self.rdns_seen = CensusTable(self.cfg.mdns_census_max)
         self.stats = Stats()
         self._emit = emit or (lambda f: None)
         self._last_sweep = 0.0
@@ -112,11 +149,21 @@ class Engine:
             self.stats.malformed += 1
 
         q = msg.questions[0] if msg.questions else None
-        zone = zone_of_query(q["name"]) if q else "."
-        zstate = self.zones.get(zone, now)
         cfg = self.cfg
+        is_update = ddns_tier.is_update(msg)
+        if is_update:
+            # RFC 2136 names the zone outright in the ZONE section;
+            # deriving it by bailiwick would only add a way to be wrong.
+            zone = ddns_tier._zone_of_update(msg)
+        else:
+            zone = zone_of_query(q["name"]) if q else "."
+        zstate = self.zones.get(zone, now)
         out = []
 
+        # ---- OPCODE-INDEPENDENT STRUCTURAL LAYER -------------------
+        # These four judge the WIRE ENCODING, which an opcode cannot
+        # change, so they run on QUERY and UPDATE alike.
+        #
         # TuDoor first: a malformed message may still have partial
         # sections worth looking at, but the malformation is itself
         # the finding and should be reported even if nothing else is.
@@ -125,6 +172,33 @@ class Engine:
         # DNSD-007: a pointer anomaly is a memory-safety primitive and
         # must not be buried under the generic malformed-packet notice.
         out += detect.detect_pointer_anomaly(msg, cfg, zone)
+        # TSIG and SIG structure. Both appear in queries, responses,
+        # transfers and updates; neither assertion cares which.
+        out += detect.detect_tsig_malformed(msg, cfg, zone)
+        out += detect.detect_sigred(msg, cfg, zone, is_tcp)
+
+        # ---- OPCODE ROUTING ----------------------------------------
+        # An UPDATE reuses all four section counts with different
+        # meanings (ZONE / PREREQUISITE / UPDATE / ADDITIONAL), so
+        # handing one to the QUERY detectors produces a quiet drip of
+        # plausible-looking findings -- a prerequisite failure is a
+        # perfectly ordinary NXDOMAIN, an updater's source port is not
+        # a resolver's, and a bulk update legitimately repeats records.
+        # This is the same hazard the mDNS port split exists for, and
+        # it is handled the same way: one hard fork, no overlap.
+        if is_update:
+            out += ddns_tier.handle_ddns(msg, cfg, self.pending, self.ddns_seen,
+                                         src, dst, sport, dport,
+                                         self.ddns_allowed_nets, now)
+            if now - self._last_sweep > 5.0:
+                self.inflight.sweep(now)
+                self.xfers.sweep(now)
+                self.pending.sweep(now)
+                self._last_sweep = now
+            for f in out:
+                self.stats.findings += 1
+                self._emit(f)
+            return out
 
         if msg.qr:
             # ---- response path ----
@@ -163,10 +237,15 @@ class Engine:
                 self.inflight.note_query(key, now)
                 zstate.push("query_times", now, cfg.ring_size)
                 out += detect.detect_source_port_entropy(cfg, zone, zstate, sport, now)
+            # rDNS leg. Query-side only: both checks are about what a
+            # client ASKS FOR and who it asks, neither about answers.
+            out += rdns_tier.handle_rdns(msg, cfg, self.walks, self.rdns_seen,
+                                         src, dst, self.rdns_internal_nets, now)
 
         if now - self._last_sweep > 5.0:
             self.inflight.sweep(now)
             self.xfers.sweep(now)
+            self.pending.sweep(now)
             self._last_sweep = now
 
         for f in out:
@@ -302,6 +381,24 @@ def main():
     p.add_argument("--exclude-zone", action="append", default=[],
                    help="zone to suppress behavioural findings for (repeatable)")
     p.add_argument("--max-zones", type=int, default=None)
+    p.add_argument("--mdns-prefix", action="append", default=[],
+                   dest="mdns_prefixes", metavar="CIDR",
+                   help="CIDR belonging to THIS link; enables DNSD-075/076 "
+                        "(repeatable). Without it both stay silent, because "
+                        "guessing off-link from address class is wrong on a "
+                        "publicly-addressed LAN.")
+    p.add_argument("--ddns-updater-prefix", action="append", default=[],
+                   dest="ddns_prefixes", metavar="CIDR",
+                   help="CIDR permitted to send dynamic updates; enables "
+                        "DNSD-082 (repeatable).")
+    p.add_argument("--rdns-internal-prefix", action="append", default=[],
+                   dest="rdns_prefixes", metavar="CIDR",
+                   help="CIDR of your own resolvers/networks; enables DNSD-090 "
+                        "(repeatable).")
+    p.add_argument("--no-ddns", action="store_true",
+                   help="disable the DDNS tier (RFC 2136 opcode 5)")
+    p.add_argument("--no-rdns", action="store_true",
+                   help="disable the rDNS tier (PTR)")
     p.add_argument("--print-codes", action="store_true",
                    help="print the finding-code registry and exit")
     args = p.parse_args()
@@ -309,7 +406,15 @@ def main():
     if args.print_codes:
         for code in sorted(FINDINGS):
             m = FINDINGS[code]
-            gate = "  [baseline-gated]" if code in BASELINE_DEPENDENT else ""
+            if code in BASELINE_DEPENDENT:
+                gate = "  [baseline-gated]"
+            elif code in PREFIX_DEPENDENT:
+                # Named rather than left to fire never: a check that is
+                # silent for want of config is indistinguishable from a
+                # check that is broken, unless something says so.
+                gate = f"  [needs {PREFIX_CLI_FLAG[PREFIX_CONFIG_KEY[code]]}]"
+            else:
+                gate = ""
             print(f"{code}  {m['name']:34s} {m['severity']:8s} {m['confidence']:6s}{gate}")
         return 0
 
@@ -321,6 +426,11 @@ def main():
     cfg.excluded_zones = set(args.exclude_zone)
     if args.max_zones:
         cfg.max_zones = args.max_zones
+    cfg.mdns_local_prefixes = tuple(args.mdns_prefixes)
+    cfg.ddns_allowed_updater_prefixes = tuple(args.ddns_prefixes)
+    cfg.rdns_internal_prefixes = tuple(args.rdns_prefixes)
+    cfg.ddns_enabled = not args.no_ddns
+    cfg.rdns_enabled = not args.no_rdns
 
     stats = run(args.iface, cfg, timeout=args.timeout)
     print(f"frames={stats.frames} parsed={stats.parsed} findings={stats.findings} "

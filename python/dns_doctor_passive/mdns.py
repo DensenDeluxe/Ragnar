@@ -34,6 +34,8 @@ on the wire at all, so not passively detectable by construction.
 """
 import ipaddress
 
+import netscope
+
 import parse
 from findings import finding
 
@@ -55,30 +57,12 @@ def _addr_text(raw):
         return raw.hex()
 
 
-def _in_any_prefix(raw_addr, networks):
-    if not networks:
-        return None          # undecidable: no prefixes configured
-    try:
-        ip = ipaddress.ip_address(raw_addr)
-    except ValueError:
-        return None
-    for net in networks:
-        if ip.version == net.version and ip in net:
-            return True
-    return False
-
-
-def parse_local_prefixes(values):
-    """Turn operator-supplied CIDR strings into network objects once,
-    at load, rather than per packet. Bad entries are dropped loudly
-    instead of silently disabling a detector."""
-    nets, bad = [], []
-    for v in values or ():
-        try:
-            nets.append(ipaddress.ip_network(v, strict=False))
-        except ValueError:
-            bad.append(v)
-    return nets, bad
+# Both predicates now live in netscope.py, shared with the DDNS and
+# rDNS tiers. Re-exported under their original names so this tier's
+# existing call sites and tests keep working unchanged -- one
+# implementation, three callers.
+_in_any_prefix = netscope.in_any_prefix
+parse_local_prefixes = netscope.parse_prefixes
 
 
 # ======================================================================

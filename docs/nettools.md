@@ -464,12 +464,16 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   (`CVE-2026-11721` BIND, `CVE-2026-52688` PowerDNS Recursor); `DNSD-041` an NSEC next-name
   outside its zone (`CVE-2026-13321`); `DNSD-042` an NSEC3 owner outside the queried zone —
   parent apex-hash impersonation (`CVE-2026-10723`); `DNSD-043` NSEC and NSEC3 for one zone in
-  one response with only one half signed (`CVE-2026-13204`).
+  one response with only one half signed (`CVE-2026-13204`); `DNSD-044` a **SIG/KEY record whose
+  rdata length overflows the 16-bit size Windows DNS allocates** — **SIGRed** (`CVE-2020-1350`,
+  CVSS 10.0, CISA KEV).
 - **Protocol abuse** — `DNSD-050` an SVCB/HTTPS AliasMode fanning out to many ServiceMode
   records (`CVE-2026-81563` / `CVE-2026-81736`); `DNSD-051` a repeated single-instance EDNS
   option (`CVE-2026-42944`); `DNSD-052` identical SOA/CNAME/DNAME records repeated
   (`CVE-2026-75029`); `DNSD-053` a TKEY query — an attack *attempt*, not a vulnerable
-  resolver (`CVE-2026-76163`).
+  resolver (`CVE-2026-76163`), also a TKEY whose SPNEGO/ASN.1 lengths are self-contradictory —
+  the BIND GSS-TSIG overflow (`CVE-2020-8625` / `CVE-2021-25216`); `DNSD-054` a TSIG response
+  assertion that answered NOERROR with a failed/empty MAC (`CVE-2020-8622`).
 - **Zone transfer** — `DNSD-060` a multi-message TCP AXFR/IXFR that completed with unsigned
   intermediate messages and no final TSIG (`CVE-2026-19033`). TCP is parsed per segment (no
   stream reassembly); the capture uses a full 65535-byte snaplen so large transfer segments
@@ -493,6 +497,22 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   spoofing stays with [SMB Watch](#smb-watch)); the three remote Avahi crafted-packet bugs
   (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002) are named only to document why they are out
   of scope (~5.0 CVSS v2, under the bar, not in CISA KEV).
+- **DDNS tier (v7, RFC 2136 opcode 5)** — a dynamic UPDATE forks to its own rule set (a writer is
+  not a resolver, so the unicast detectors never run on it). `DNSD-080` an UPDATE carrying no TSIG
+  and no SIG(0) that was answered **NOERROR** — the zone accepts unauthenticated writes (a UDP
+  source-IP ACL is exactly this and is itself the finding, a spoofable source being the whole
+  problem); `DNSD-081` an UPDATE answered NOERROR while its TSIG reports BADSIG/BADKEY/BADTIME or
+  carries an empty/truncated MAC — a **completed** authentication bypass, not an attempt
+  (`CVE-2017-3143`); `DNSD-082` an UPDATE from outside an operator-supplied permitted-updater list
+  (silent without that config — a learned allowlist would arm itself from whatever it saw first,
+  so it is deliberately not learned, and the in-app watcher leaves it unset).
+- **rDNS tier (v7, reverse DNS)** — no CVE, posture only. `DNSD-090` a reverse lookup for RFC 1918
+  / CGNAT / link-local / ULA space addressed to a resolver **outside private space** — internal
+  topology leaking to the public DNS (armed in the in-app watcher with the private-address table
+  itself, so a private PTR to a public resolver fires while an on-net resolver stays silent);
+  `DNSD-091` one source issuing many `ip6.arpa` queries that share a long leading nibble prefix in
+  one window — IPv6 reverse-tree enumeration (needs no baseline; the common-prefix rule is what
+  separates it from bulk reverse lookups).
 
 The stateless detectors (KeyTrap, NSEC3 iteration, bailiwick, algorithm) fire on a single
 response; the **baseline-gated** ones (DNSBomb, NXNS burst, NSEC3-encloser, water-torture,

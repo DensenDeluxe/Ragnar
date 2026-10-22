@@ -1,5 +1,5 @@
 """
-The fourteen detectors, grouped by class.
+The detectors, grouped by class.
 
 Every detector is a PURE function of (message, context) -> list of
 findings. No I/O, no sockets, no clock reads except the `now` passed
@@ -895,19 +895,55 @@ def detect_tkey_query(msg, cfg, zone):
     resolver, not a vulnerable resolver. The operator correlates with
     their own BIND version.
     """
+    out = []
+
+    # --- LEG 2: a TKEY record whose SPNEGO token is impossible -------
+    # CVE-2020-8625 / CVE-2021-25216, folded in here rather than given
+    # a code of their own because the ceiling on what the wire can say
+    # is identical: BIND's SPNEGO decoder is only reachable when
+    # tkey-gssapi-keytab or tkey-gssapi-credential is set, and no
+    # packet reveals whether it is. Same evidence ceiling, same code.
+    #
+    # Scanned in BOTH directions, unlike leg 1. The client->server
+    # token is the documented vector, but a malicious server's
+    # response token reaches a client-side GSS stack through the same
+    # decoder, and restricting this to queries would have made that
+    # invisible for no gain.
+    for rr in msg.all_rrs():
+        if rr.rtype != parse.T_TKEY:
+            continue
+        p = rr.parsed or {}
+        reason = p.get("struct_error") or p.get("spnego_error")
+        if not reason:
+            continue
+        out.append(finding(
+            "DNSD-053", zone,
+            f"TKEY record for {rr.name.text()} in the {rr.section} section carries an "
+            f"impossible structure: {reason}. A malformed SPNEGO/ASN.1 length is the "
+            f"precondition for the BIND GSSAPI buffer overflow -- an attempt, since "
+            f"tkey-gssapi-keytab is not visible from the wire",
+            {"qname": rr.name.text(), "section": rr.section,
+             "tkey_mode": p.get("mode"), "gssapi": p.get("gssapi"),
+             "key_size": p.get("key_size"), "reason": reason,
+             "affected": "BIND 9.5.0-9.11.27, 9.12.0-9.16.11, 9.17.0-9.17.18 "
+                         "(CVE-2020-8625/CVE-2021-25216)"},
+        ))
+
+    # --- LEG 1: a bare TKEY query ------------------------------------
     if msg.qr:
-        return []          # queries only
+        return out
     q = _question(msg)
     if q is None or q["qtype"] != parse.QT_TKEY:
-        return []
-    return [finding(
+        return out
+    out.append(finding(
         "DNSD-053", zone,
         f"QTYPE TKEY query for {q['name'].text()} -- trips a BIND assertion failure where "
         f"named.conf has no global options block. TKEY is legitimate for GSS-TSIG, so this "
         f"is an attempt reaching the resolver, not proof it is vulnerable",
         {"qname": q["name"].text(), "qtype": q["qtype"],
          "affected": "BIND 9.20.0-9.20.27, 9.21.0-9.21.25 (+ -S1)"},
-    )]
+    ))
+    return out
 
 
 # ======================================================================
@@ -974,3 +1010,123 @@ def detect_xfr_tsig_absent(msg, cfg, zone, xstream, now, is_tcp):
          "final_message_signed": xstream.last_signed,
          "soa_records_seen": xstream.soa_count, "qname": _qname_text(msg)},
     )]
+
+
+# ======================================================================
+# SIGRed + TSIG STRUCTURAL
+# ======================================================================
+
+def detect_sigred(msg, cfg, zone, is_tcp=False):
+    """
+    CVE-2020-1350 (SIGRed, CVSS 10.0, CISA KEV). Windows DNS sizes its
+    record buffer as
+
+        uncompressed_signer_name_length + 0x14 + signature_length
+
+    and RR_AllocateEx then uses only the low 16 bits of that sum. A
+    total of 65536 or more wraps to a tiny allocation, and the
+    following memcpy writes the full data into it.
+
+    THE DETECTOR RECOMPUTES THAT SUM IN FULL PRECISION. Doing the
+    arithmetic in 16 bits here would reproduce the bug rather than
+    detect it, which is why parse._sigred_geometry uses Python ints.
+
+    BOTH SIG(24) AND RRSIG(46). Windows parses them through one
+    function, SigWireRead, and both type numbers reach it -- a
+    detector watching only RRSIG would miss half the attack surface
+    for no reason other than that RRSIG is the type people think of.
+
+    WHY THE SIGNER-NAME TERM MATTERS. The two terms are not equally
+    obvious: the signature length is capped by the 16-bit rdlength and
+    by what fits in a 64 KB TCP message, so on its own it cannot quite
+    reach the wrap. The name closes the gap, because a COMPRESSION
+    POINTER costs two bytes on the wire while contributing its full
+    uncompressed length -- up to 255 -- to the sum. That is also why
+    this is not already covered by DNSD-008: the pointer here is
+    perfectly legal, backwards, and need not land in any RDATA.
+
+    NOT GATED ON TCP. SIGRed needs TCP in practice, because no UDP
+    datagram carries a 64 KB record. But the gate is the ARITHMETIC,
+    which is unreachable over UDP anyway, so adding a transport
+    condition could only ever subtract a detection -- transport goes
+    in the evidence instead.
+
+    NEAR MISSES ARE DELIBERATELY SILENT. An allocation that lands at
+    65400 is a failed attempt that harmed nothing, and reporting it
+    would mean inventing a threshold. The wrap is an exact condition
+    with no legitimate counterpart: the largest real signature in use
+    is a few hundred bytes.
+    """
+    out = []
+    for rr in msg.all_rrs():
+        if rr.rtype not in (parse.T_SIG, parse.T_RRSIG):
+            continue
+        p = rr.parsed or {}
+        if not p.get("sigred_wraps"):
+            continue
+        if not cfg.sigred_report_near_miss and p["sigred_alloc"] < parse.SIGRED_ALLOC_WRAP:
+            continue
+        type_name = "SIG" if rr.rtype == parse.T_SIG else "RRSIG"
+        out.append(finding(
+            "DNSD-044", zone,
+            f"{type_name} record for {rr.name.text()} computes a Windows DNS allocation of "
+            f"{p['sigred_alloc']} bytes ({p['signer_uncompressed_len']} name + 0x14 + "
+            f"{p['signature_len']} signature), which truncates to "
+            f"{p['sigred_alloc'] & 0xFFFF} in 16 bits -- SIGRed heap overflow"
+            + (f". The signer name was reached through a compression pointer, "
+               f"contributing {p['signer_uncompressed_len']} bytes from "
+               f"{p['signer_wire_bytes']} on the wire"
+               if p.get("signer_compressed") else ""),
+            {"record_type": type_name, "owner": rr.name.text(),
+             "signer_uncompressed_len": p["signer_uncompressed_len"],
+             "signer_wire_bytes": p["signer_wire_bytes"],
+             "signer_compressed": p.get("signer_compressed"),
+             "signature_len": p["signature_len"],
+             "alloc": p["sigred_alloc"],
+             "alloc_truncated_16bit": p["sigred_alloc"] & 0xFFFF,
+             "rdlength": rr.rdlength, "transport": "tcp" if is_tcp else "udp",
+             "section": rr.section},
+        ))
+    return out
+
+
+def detect_tsig_malformed(msg, cfg, zone):
+    """
+    CVE-2020-8622 (CVSS 6.5). ISC: "Attempting to verify a truncated
+    response to a TSIG-signed request leads to an assertion failure."
+
+    WHAT THIS DOES NOT CHECK: the TC flag. That is the naive reading of
+    "truncated response" and it would be wrong in the worst way -- TC
+    is set on legitimate truncated responses constantly, above all on
+    the zone transfers that are the main users of TSIG, so a TC-based
+    version of this check would fire on normal operation and tell an
+    operator nothing. The actual condition is a TSIG the receiver could
+    not fully read, so the test is whether the record's own internal
+    length fields can coexist with its rdlength.
+
+    Near-zero false positive by construction: every field involved is
+    written by the signer from a known MAC length. There is no
+    legitimate path that emits a TSIG whose MAC size overruns its own
+    rdata.
+
+    RUNS ON EVERY MESSAGE, not just UPDATEs -- TSIG covers zone
+    transfers and NOTIFY too, and the assertion does not care which.
+    """
+    out = []
+    for rr in msg.all_rrs():
+        if rr.rtype != parse.T_TSIG:
+            continue
+        err = (rr.parsed or {}).get("struct_error")
+        if not err:
+            continue
+        out.append(finding(
+            "DNSD-054", zone,
+            f"TSIG record for {rr.name.text()} is internally impossible: {err}. A receiver "
+            f"verifying a TSIG it could not fully read asserts and exits",
+            {"owner": rr.name.text(), "section": rr.section,
+             "algorithm": (rr.parsed or {}).get("algorithm"),
+             "mac_size": (rr.parsed or {}).get("mac_size"),
+             "rdlength": rr.rdlength, "reason": err,
+             "affected": "BIND 9.0.0-9.11.21, 9.12.0-9.16.5, 9.17.0-9.17.3"},
+        ))
+    return out

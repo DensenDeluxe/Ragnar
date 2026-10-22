@@ -46,7 +46,14 @@ class Config:
                  "ring_size", "inflight_max", "inflight_ttl_seconds",
                  "svcb_max_servicemode", "duplicate_rr_threshold",
                  "xfr_max_streams", "xfr_ttl_seconds",
-                 "mdns_enabled", "mdns_local_prefixes", "mdns_census_max")
+                 "mdns_enabled", "mdns_local_prefixes", "mdns_census_max",
+                 "ddns_enabled", "ddns_allowed_updater_prefixes",
+                 "ddns_max_pending", "ddns_pending_ttl_seconds",
+                 "rdns_enabled", "rdns_internal_prefixes",
+                 "ip6_walk_enabled", "ip6_walk_window_seconds",
+                 "ip6_walk_min_queries", "ip6_walk_min_distinct_ratio",
+                 "ip6_walk_min_common_nibbles", "walk_max_sources",
+                 "sigred_report_near_miss")
 
     def __init__(self, **kw):
         # LRU cap. MEASURED per-zone cost after lazy ring allocation:
@@ -115,6 +122,54 @@ class Config:
         # wrong on a carrier-neutral colo or ISP LAN.
         self.mdns_local_prefixes = ()
         self.mdns_census_max = 2048
+
+        # --- DDNS tier (RFC 2136 opcode 5) -------------------------
+        self.ddns_enabled = True
+        # Operator-supplied CIDRs of hosts PERMITTED to send dynamic
+        # updates. DNSD-082 stays silent without them.
+        #
+        # WHY CONFIG AND NOT A LEARNED ALLOWLIST: a learned allowlist
+        # would arm itself from whatever it happened to see first,
+        # which means the finding's meaning depends on when the sensor
+        # was plugged in. On a grab-and-go deployment that is not a
+        # detector, it is a coin flip -- and a newly-promoted DC or a
+        # second DHCP server would read as an attack. An operator who
+        # cannot name their updaters does not want this check on.
+        self.ddns_allowed_updater_prefixes = ()
+        # Pending UPDATE requests awaiting their response. Small and
+        # short-lived: an UPDATE is answered in milliseconds.
+        self.ddns_max_pending = 1024
+        self.ddns_pending_ttl_seconds = 10.0
+
+        # --- rDNS tier (PTR) ---------------------------------------
+        self.rdns_enabled = True
+        # CIDRs of THIS organisation's resolvers and networks. A
+        # private-zone PTR query addressed inside them is ordinary
+        # internal business; one addressed outside them is the leak.
+        # Silent without config, for the same reason as mDNS off-link.
+        self.rdns_internal_prefixes = ()
+
+        self.ip6_walk_enabled = True
+        self.ip6_walk_window_seconds = 60.0
+        # Fixed thresholds, NOT a learned baseline. A single source
+        # asking for scores of distinct ip6.arpa names inside a minute
+        # is anomalous on every network, so there is nothing a baseline
+        # would add except a warmup window this deployment cannot
+        # assume. That is why DNSD-091 ships ON by default while the
+        # three rate-baseline detectors ship off.
+        self.ip6_walk_min_queries = 64
+        self.ip6_walk_min_distinct_ratio = 0.9
+        # The discriminator that separates a WALK from ordinary bulk
+        # reverse lookups: a walk probes DOWN one delegation, so its
+        # queries share a long leading nibble run. A mail server doing
+        # rDNS on many v6 senders touches unrelated /32s and shares
+        # almost nothing. 8 nibbles = a /32 in common.
+        self.ip6_walk_min_common_nibbles = 8
+        self.walk_max_sources = 1024
+
+        # SIGRed reports only the arithmetic that actually wraps.
+        # See detect_sigred for why a near miss is deliberately silent.
+        self.sigred_report_near_miss = False
 
         for k, v in kw.items():
             if not hasattr(self, k):
@@ -425,3 +480,139 @@ class CensusTable:
 
     def __len__(self):
         return len(self.seen)
+
+
+class UpdatePending:
+    """
+    Dynamic-update requests awaiting their response, keyed by
+    (txid, client, server, client port).
+
+    WHY THIS TABLE EXISTS AT ALL: both DDNS posture findings are about
+    an OUTCOME, not a packet. "An unsigned UPDATE was sent" is an
+    attempt and worth nothing -- every scanner does it. "An unsigned
+    UPDATE was sent and the server answered NOERROR" is a vulnerable
+    zone, and that sentence needs two packets. So the request side is
+    remembered only long enough to read the verdict off the response.
+
+    Bounded and TTL-swept like InFlight. Eviction carries no detection
+    meaning beyond losing one correlation: an UPDATE is answered in
+    milliseconds, so an entry that survives to eviction was never
+    going to be answered.
+    """
+    __slots__ = ("cfg", "entries", "evictions")
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.entries = OrderedDict()
+        self.evictions = 0
+
+    def note_request(self, key, info, now):
+        if key in self.entries:
+            self.entries.move_to_end(key)
+        elif len(self.entries) >= self.cfg.ddns_max_pending:
+            self.entries.popitem(last=False)
+            self.evictions += 1
+        info = dict(info)
+        info["t"] = now
+        self.entries[key] = info
+
+    def take_response(self, key, now):
+        """Consume and return the matching request, or None. Consuming
+        rather than peeking is deliberate: one request yields at most
+        one verdict, so a retransmitted response cannot double-report."""
+        e = self.entries.get(key)
+        if e is None:
+            return None
+        del self.entries[key]
+        if now - e["t"] > self.cfg.ddns_pending_ttl_seconds:
+            return None
+        return e
+
+    def sweep(self, now):
+        dead = [k for k, e in self.entries.items()
+                if now - e["t"] > self.cfg.ddns_pending_ttl_seconds]
+        for k in dead:
+            del self.entries[k]
+        return len(dead)
+
+    def __len__(self):
+        return len(self.entries)
+
+
+class WalkState:
+    """
+    One source's reverse-tree enumeration window.
+
+    Constant-size state per source: a count, a window start, a bounded
+    distinct-name set, and the running COMMON NIBBLE PREFIX, which is
+    the piece that does the real work. It is intersected on every query
+    and can only shrink, so after a handful of scattered lookups it
+    collapses to nothing and the source can never trip the threshold.
+    That is what keeps a busy mail server -- which legitimately asks
+    for many distinct ip6.arpa names across unrelated networks -- from
+    looking like a walk, without any learning.
+    """
+    __slots__ = ("window_start", "count", "common", "distinct", "cap", "reported")
+
+    def __init__(self, now, cap):
+        self.window_start = now
+        self.count = 0
+        self.common = None
+        self.distinct = set()
+        self.cap = cap
+        self.reported = False
+
+    def reset(self, now):
+        self.window_start = now
+        self.count = 0
+        self.common = None
+        self.distinct = set()
+        self.reported = False
+
+    def observe(self, nibbles, now, window):
+        if now - self.window_start > window:
+            self.reset(now)
+        self.count += 1
+        if len(self.distinct) < self.cap:
+            self.distinct.add(hash(nibbles) & 0xFFFFFFFF)
+        if self.common is None:
+            self.common = nibbles
+        else:
+            n = 0
+            for a, b in zip(self.common, nibbles):
+                if a != b:
+                    break
+                n += 1
+            self.common = self.common[:n]
+
+    def distinct_ratio(self):
+        if self.count == 0:
+            return 0.0
+        return min(len(self.distinct), self.count) / float(self.count)
+
+
+class WalkTable:
+    """Bounded LRU of per-source WalkState. Eviction only delays a
+    report; the next window rebuilds from scratch."""
+    __slots__ = ("cfg", "entries", "evictions")
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.entries = OrderedDict()
+        self.evictions = 0
+
+    def get(self, src, now):
+        st = self.entries.get(src)
+        if st is not None:
+            self.entries.move_to_end(src)
+            return st
+        if len(self.entries) >= self.cfg.walk_max_sources:
+            self.entries.popitem(last=False)
+            self.evictions += 1
+        cap = max(self.cfg.ip6_walk_min_queries * 2, 256)
+        st = WalkState(now, cap)
+        self.entries[src] = st
+        return st
+
+    def __len__(self):
+        return len(self.entries)
