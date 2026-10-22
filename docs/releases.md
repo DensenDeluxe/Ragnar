@@ -2,9 +2,9 @@
 
 ## Releases
 
-### 2026-10-21
+### 2026-10-22
 
-#### [#1001](https://github.com/PierreGode/Ragnar/pull/1001) — feat(net): DNS Watch v7 — SIGRed + DDNS (RFC 2136) + rDNS tiers
+#### [#1002](https://github.com/PierreGode/Ragnar/pull/1002) — feat(net): DNS Watch v7 — SIGRed + DDNS (RFC 2136) + rDNS tiers
 *branch `feature/dns-poison-v7`*
 
 - **DNS Watch v7** refreshes the vendored `python/dns_doctor_passive/` engine with three new modules (`ddns.py`, `netscope.py`, `rdns.py`) and five new CVEs, all **detected** and config-free:
@@ -15,6 +15,14 @@
 - **CVE index +5 named / +5 detected → 410 named / 347 detected** (DNS Watch 32 → 37); all five attribute to DNS Watch, none deduped elsewhere. CREDITS.md / README.md counts synced. The DDNS/rDNS posture codes without a CVE carry none.
 - **Self-test:** the vendored `dns_passive` suite grows **38 → 54** scenarios (SIGRed oversize/boundary, DDNS opcode isolation both directions, unsigned/TSIG-bypass/allowlisted updates, rDNS private-leak vs on-net silence, ip6.arpa walk vs bulk reverse). Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token → card prose only, no JS/cache-bust.
 - **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
+### 2026-10-21
+
+#### [#1001](https://github.com/PierreGode/Ragnar/pull/1001) — feat(pages): Ragnar OS download subpage at /os
+*branch `feature/os-download-page`*
+
+- New **download page** for the Ragnar OS images, served as a GitHub Pages **subpage at [`/os/`](https://pierregode.github.io/Ragnar/os/)** alongside the RuSense flasher (which stays untouched at the Pages root). It mirrors the primary download site at **https://ragnar.life/** (one.com-hosted, resumable HTTP 206 downloads). The images themselves stay on `ragnar.life` — the page's buttons link to `https://ragnar.life/images/RagnarOS-arm64.img.xz` / `…Ulfberht….img.xz` (absolute URLs), so nothing large lands on Pages (1 GB cap) and the page is byte-identical on both hosts.
+- `web/os/index.html` is a self-contained dark Norse-themed page (both editions, copyable SHA-256, flash steps, mobile-first). `build-rusense-flasher.yml` gains a `web/os/**` path trigger and one step that copies the page into the existing single Pages artifact at `site/os/` before upload — a second Pages workflow would clobber the first, so it folds into the one that already deploys Pages.
 
 #### [#1000](https://github.com/PierreGode/Ragnar/pull/1000) — fix(kiosk): openbox on Kali + update self-heal + default-on first boot + hot-plug display re-detect
 *branch `fix/kiosk-chromium-window-size`*
