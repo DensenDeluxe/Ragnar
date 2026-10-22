@@ -62,6 +62,196 @@ MDNS_UNICAST_BIT = 0x8000
 MDNS_CACHE_FLUSH_BIT = 0x8000
 QT_IXFR, QT_AXFR, QT_TKEY = 251, 252, 249
 
+# --- LLMNR (RFC 4795) ----------------------------------------------
+# Same wire format as DNS, different transport rules and a different
+# deprecation story: Microsoft recommends disabling it outright, so
+# its PRESENCE is the posture finding rather than any one packet.
+LLMNR_PORT = 5355
+LLMNR_V4_GROUP = bytes([224, 0, 0, 252])
+LLMNR_V6_GROUP = bytes.fromhex("ff020000000000000000000000010003")
+
+# RFC 4795 s2.5 DOES NOT REQUIRE TTL 255, and this comment is here so
+# nobody transfers the mDNS rule across. mDNS (RFC 6762 s11) makes 255
+# a MUST and DNSD-074 reports any other value. LLMNR says the TTL
+# "MAY be set to any value" and merely RECOMMENDS 255 for
+# compatibility with early RFC 3927 implementations. A TTL check on
+# LLMNR would therefore fire on conforming traffic -- it is not a
+# scope violation, it is allowed. The scope rule LLMNR actually has is
+# about the DESTINATION: a query sent to any multicast address other
+# than the two groups above MUST be silently discarded.
+LLMNR_TTL_IS_UNCONSTRAINED = True
+
+# LLMNR header flags that DNS does not have (RFC 4795 s2.1.1).
+LLMNR_FLAG_C = 0x0400      # Conflict: sender saw multiple responses
+LLMNR_FLAG_T = 0x0200      # Tentative: responder has not verified uniqueness
+
+# --- NBNS / NBT-NS (RFC 1001/1002) ---------------------------------
+# NBNS is NOT DNS on the wire despite the shared 12-byte header
+# layout, and the two differences are both traps:
+#
+#   1. NAMES use a two-level encoding. The first level splits each of
+#      16 name bytes into two 4-bit nibbles and maps each to 'A'+nibble,
+#      producing 32 printable characters that then travel as ONE
+#      ordinary DNS label. A DNS parser reads that label fine and
+#      returns gibberish -- "EJFDEBFEEBFACACACACACACACACACAAA" rather
+#      than "WPAD".
+#   2. OPCODE 5 means NAME REGISTRATION here, while in DNS it means
+#      UPDATE (RFC 2136). So NBNS traffic reaching the opcode router
+#      would be read as a dynamic update, and a registration storm
+#      would be reported as unsigned dynamic updates being accepted.
+#      Port 137 is therefore forked BEFORE the opcode fork.
+NBNS_PORT = 137
+NBNS_NAME_LABEL_LEN = 32           # the first-level-encoded label
+NBNS_NAME_BYTES = 16               # 15 chars + 1 suffix byte
+T_NB, T_NBSTAT = 32, 33            # 0x0020, 0x0021
+NBNS_OPCODE_QUERY = 0
+NBNS_OPCODE_REGISTRATION = 5
+NBNS_OPCODE_RELEASE = 6
+NBNS_OPCODE_WACK = 7
+NBNS_OPCODE_REFRESH = 8
+NBNS_OPCODES = {
+    0: "QUERY", 5: "REGISTRATION", 6: "RELEASE", 7: "WACK", 8: "REFRESH",
+}
+# The suffix byte is the NetBIOS "type", and it is what distinguishes
+# a workstation record from a domain-master-browser record under the
+# same name.
+NBNS_SUFFIX = {
+    0x00: "workstation", 0x03: "messenger", 0x1B: "domain master browser",
+    0x1C: "domain controllers", 0x1D: "master browser",
+    0x1E: "browser elections", 0x20: "file server",
+}
+
+# --- Encrypted DNS transports --------------------------------------
+# Port 853 carries DoT over TCP (RFC 7858) and DoQ over UDP (RFC 9250).
+# Nothing inside either is parseable, and that stays true -- what is
+# detectable is the TRANSPORT, which is a DNS posture question: these
+# bypass the resolver whose logs, RPZ and filtering an operator runs.
+DOT_PORT = DOQ_PORT = 853
+# A QUIC long header has the high bit of the first byte set (RFC 9000
+# s17.2). Checked so that arbitrary UDP/853 is not reported as DoQ.
+QUIC_LONG_HEADER_BIT = 0x80
+QUIC_FIXED_BIT = 0x40
+
+# RFC 9462 DDR / RFC 9463 DNR: a client discovers encrypted-DNS
+# endpoints by querying SVCB for these names IN CLEARTEXT on port 53.
+# That makes the intent to leave for an encrypted transport visible to
+# this module without any TLS parsing at all.
+DDR_RESOLVER_ARPA = ("resolver", "arpa")
+DDR_UNDERSCORE_DNS = "_dns"
+
+# Hostnames of public DoH/DoT resolvers. A CLEARTEXT A/AAAA/HTTPS
+# query for one of these is the resolution step that precedes the
+# encrypted session, so it is DNS-native evidence of an impending
+# bypass -- no SNI parsing, no overlap with tlswatch.
+#
+# Deliberately a list of KNOWN providers rather than a heuristic: there
+# is no way to recognise a private DoH endpoint from a DNS query, and
+# pretending otherwise would mean guessing. The honest limitation is
+# stated rather than papered over.
+DOH_PROVIDER_HOSTS = frozenset({
+    "dns.google", "dns64.dns.google",
+    "cloudflare-dns.com", "one.one.one.one", "mozilla.cloudflare-dns.com",
+    "security.cloudflare-dns.com", "family.cloudflare-dns.com",
+    "dns.quad9.net", "dns9.quad9.net", "dns10.quad9.net", "dns11.quad9.net",
+    "doh.opendns.com", "doh.familyshield.opendns.com",
+    "dns.nextdns.io", "doh.cleanbrowsing.org",
+    "dns.adguard.com", "dns-unfiltered.adguard.com",
+    "doh.mullvad.net", "adblock.doh.mullvad.net",
+    "dns.sb", "doh.sb", "doh.dns.sb",
+    "dns.controld.com", "freedns.controld.com",
+    "odvr.nic.cz", "dnsforge.de", "doh.libredns.gr",
+})
+
+# --- DNS-SD meta-query (RFC 6763 s9) -------------------------------
+# A PTR query for _services._dns-sd._udp enumerates EVERY service type
+# in a zone or on a link.
+DNSSD_META = ("_services", "_dns-sd", "_udp")
+
+# --- TSIG posture --------------------------------------------------
+# RFC 8945 s5.2 deprecates these for new deployments.
+TSIG_WEAK_ALGOS = frozenset({"hmac-md5.sig-alg.reg.int.", "hmac-sha1."})
+# RFC 8945 s5.2.1 recommends 300 seconds. A larger fudge widens the
+# window in which a captured TSIG can be replayed.
+TSIG_RECOMMENDED_FUDGE = 300
+
+# SIG (24) is the OBSOLETE predecessor of RRSIG (46) with an identical
+# rdata layout. It matters because Windows DNS parses BOTH through one
+# function (SigWireRead) -- so SIGRed is reachable through either type
+# number and a detector that watches only RRSIG misses half of it.
+T_SIG = 24
+
+# --- RFC 2136 dynamic update (opcode 5) ----------------------------
+# An UPDATE message REUSES the four section counts with completely
+# different meanings, which is why it must never be fed to the
+# ordinary QUERY detectors:
+#   qdcount -> ZONE          (exactly one, ZTYPE=SOA)
+#   ancount -> PREREQUISITE
+#   nscount -> UPDATE        (the actual mutations)
+#   arcount -> ADDITIONAL    (where TSIG / SIG(0) live)
+OPCODE_QUERY = 0
+OPCODE_UPDATE = 5
+# Classes legal in an UPDATE section. NONE deletes one RR, ANY deletes
+# a whole RRset; IN adds. RFC 2136 s2.5.
+CLASS_IN, CLASS_NONE, CLASS_ANY = 1, 254, 255
+
+# TSIG error codes (RFC 8945 s4.3). A response whose TSIG reports one
+# of the failure values while the message rcode says the operation
+# SUCCEEDED is a self-contradiction no correct server emits.
+TSIG_ERR_NOERROR = 0
+TSIG_ERR_BADSIG, TSIG_ERR_BADKEY, TSIG_ERR_BADTIME, TSIG_ERR_BADTRUNC = 16, 17, 18, 22
+TSIG_FAILURE_CODES = {
+    TSIG_ERR_BADSIG: "BADSIG", TSIG_ERR_BADKEY: "BADKEY",
+    TSIG_ERR_BADTIME: "BADTIME", TSIG_ERR_BADTRUNC: "BADTRUNC",
+}
+
+# Full digest length per TSIG algorithm, for the truncation check in
+# RFC 8945 s5.2. gss-tsig is deliberately ABSENT: its MAC is a GSS
+# checksum of variable length, so length-checking it would be a
+# false-positive generator on every Windows AD exchange.
+TSIG_DIGEST_LEN = {
+    "hmac-md5.sig-alg.reg.int.": 16,
+    "hmac-sha1.": 20,
+    "hmac-sha224.": 28,
+    "hmac-sha256.": 32,
+    "hmac-sha384.": 48,
+    "hmac-sha512.": 64,
+}
+TSIG_GSS_ALGOS = {"gss-tsig.", "gss.microsoft.com."}
+
+# The gss exemption in _parse_tsig is BELT AND BRACES, and this
+# assertion is what makes that honest rather than sloppy. A mutation
+# that deleted the exemption changed no test result, because no GSS
+# algorithm appears in TSIG_DIGEST_LEN in the first place -- the elif
+# can never reach one (LESSON L: an escaped mutation is usually an
+# unexercised guard, not a detection gap).
+#
+# The guard still earns its place, because the plausible future edit
+# is someone adding a nominal gss length to the table above. If that
+# happens this assertion fires at import instead of the truncation
+# rule quietly firing on every Windows AD exchange on the tap.
+assert not (TSIG_GSS_ALGOS & set(TSIG_DIGEST_LEN)), (
+    "a GSS algorithm must not carry a fixed digest length: its MAC is a "
+    "variable-length GSS checksum, so the RFC 8945 s5.2 truncation rule "
+    "does not apply to it")
+
+# TKEY modes (RFC 2930 s2.5). Mode 3 is GSS-API, the only one that
+# carries a SPNEGO token and therefore the only one that can reach
+# the BIND SPNEGO overflow.
+TKEY_MODE_GSSAPI = 3
+# DER tag/length constants for the SPNEGO structural walk.
+DER_APPLICATION_0 = 0x60
+SPNEGO_OID = bytes([0x06, 0x06, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x02])
+
+# SIGRed (CVE-2020-1350). Windows computes its allocation as
+#   uncompressed_signer_name_length + 0x14 + signature_length
+# and then truncates the result to 16 bits inside RR_AllocateEx, so a
+# computed size at or above 65536 wraps to a far smaller buffer that a
+# memcpy then overruns. Both terms are attacker-controlled, and the
+# name term is the subtle one: a compression POINTER costs two bytes
+# on the wire while contributing its full uncompressed length here.
+SIGRED_ALLOC_OVERHEAD = 0x14
+SIGRED_ALLOC_WRAP = 0x10000
+
 # EDNS0 option codes that RFC permits AT MOST ONCE in one OPT record.
 # Repeating one is CVE-2026-42944's denial-of-service primitive.
 EDNS_SINGLETON_OPTIONS = {
@@ -82,6 +272,25 @@ DEPRECATED_ALGOS = {1, 3, 6, 12}
 
 class MalformedDNS(Exception):
     """Carried as a value, not raised past parse_dns()."""
+
+
+class NameTooLong(MalformedDNS):
+    """A name whose expansion passes 255 octets.
+
+    Carries the length reached and the labels decoded so far, because
+    for SIGRed that overflow IS the measurement. The real exploit aims
+    a compression pointer INTO the signature padding, where every byte
+    is the same value, so each "length byte" spawns a label of that
+    size and the name expands without bound from two wire bytes. A
+    parser that raised a bare error here would discard the one number
+    the detector needs and the attack would read as an ordinary
+    malformed packet.
+    """
+
+    def __init__(self, message, accumulated=0, labels=()):
+        super().__init__(message)
+        self.accumulated = accumulated
+        self.labels = tuple(labels)
 
 
 class PointerAnomaly(MalformedDNS):
@@ -308,7 +517,8 @@ def parse_name(buf, offset, _jumps=0, _min_ptr=None, ptr_sink=None):
 
         total += ln + 1
         if total > MAX_NAME_LEN:
-            raise MalformedDNS(f"name longer than {MAX_NAME_LEN}")
+            raise NameTooLong(f"name longer than {MAX_NAME_LEN}",
+                              accumulated=total, labels=labels)
         labels.append(buf[cur + 1:cur + 1 + ln])
         cur += 1 + ln
 
@@ -371,8 +581,14 @@ def _parse_rdata(rr, buf, rdoff, ptr_sink=None):
             # signer's name is NOT compressible inside RRSIG rdata per
             # RFC 4034 s3.1.7, so parse it standalone.
             try:
-                signer, _ = parse_name(buf, rdoff + 18)
+                signer, after = parse_name(buf, rdoff + 18, ptr_sink=ptr_sink)
                 rr.parsed["signer"] = signer
+                rr.parsed.update(_sigred_geometry(rr, signer, rdoff + 18, after))
+            except NameTooLong as e:
+                rr.parsed["signer"] = None
+                g = _sigred_geometry_overflow(rr, e, rdoff + 18, buf)
+                if g:
+                    rr.parsed.update(g)
             except MalformedDNS:
                 rr.parsed["signer"] = None
         elif rr.rtype == T_NSEC3 and rr.rdlength >= 5:
@@ -394,6 +610,10 @@ def _parse_rdata(rr, buf, rdoff, ptr_sink=None):
             # but never which device is advertising it.
             target, _ = parse_name(buf, rdoff, ptr_sink=ptr_sink)
             rr.parsed = {"target": target}
+        elif rr.rtype == T_TXT:
+            strings, err = txt_strings(rr.rdata)
+            rr.parsed = {"strings": strings, "txt_error": err,
+                         "pairs": txt_pairs(strings)}
         elif rr.rtype == T_SRV and rr.rdlength >= 7:
             rr.parsed = {
                 "priority": _u16(buf, rdoff),
@@ -421,6 +641,14 @@ def _parse_rdata(rr, buf, rdoff, ptr_sink=None):
                 opts.append((ocode, olen))
                 p += 4 + olen
             rr.parsed = {"options": opts}
+        elif rr.rtype in (T_RRSIG, T_SIG) and rr.rtype == T_SIG and rr.rdlength >= 18:
+            # SIG(24) shares RRSIG's layout. Decoded separately only so
+            # the existing RRSIG branch above keeps its exact shape.
+            rr.parsed = _parse_sig_like(buf, rdoff, rr, ptr_sink)
+        elif rr.rtype == T_TSIG:
+            rr.parsed = _parse_tsig(buf, rdoff, rr)
+        elif rr.rtype == T_TKEY:
+            rr.parsed = _parse_tkey(buf, rdoff, rr)
         elif rr.rtype == T_SOA:
             mname, o2 = parse_name(buf, rdoff)
             rname, _ = parse_name(buf, o2)
@@ -593,3 +821,546 @@ def instance_of(name):
         if orig[i].lower().startswith(b"_") and orig[i + 1].lower() in (b"_tcp", b"_udp"):
             return orig[i - 1].decode("utf-8", "replace")
     return None
+
+
+# =====================================================================
+# TSIG / TKEY / SIG rdata decoding
+#
+# These three are decoded TOGETHER because they share one property that
+# shapes the whole DDNS tier: each carries internal length fields that
+# a receiver must trust before it has validated anything. Every CVE in
+# this group is a receiver believing one of those lengths. So the
+# decoders below are written as VALIDATORS first and accessors second:
+# they never raise, and they record WHY a structure is impossible
+# rather than silently returning partial fields that a detector would
+# then read as if they were real.
+# =====================================================================
+
+def uncompressed_name_length(name):
+    """Wire length this name WOULD occupy with no compression: one
+    length byte per label plus the label bytes plus the root null.
+
+    This is the quantity Windows' Name_PacketNameToCountNameEx reports
+    and SIGRed abuses -- it is NOT the number of bytes the name took up
+    on the wire, and the gap between the two is the whole attack."""
+    if name is None:
+        return 1
+    if not name.labels:
+        return 1
+    return sum(len(l) + 1 for l in name.labels) + 1
+
+
+def _sigred_geometry(rr, signer, signer_off, after_off):
+    """Reconstruct the allocation arithmetic Windows DNS performs for a
+    SIG or RRSIG record (CVE-2020-1350).
+
+    sigred_alloc is computed with PYTHON ints, deliberately -- the
+    vulnerability IS the 16-bit truncation, so computing it in 16 bits
+    here would reproduce the bug instead of detecting it."""
+    wire = after_off - signer_off
+    sig_len = rr.rdlength - 18 - wire
+    if sig_len < 0:
+        sig_len = 0
+    unc = uncompressed_name_length(signer)
+    alloc = unc + SIGRED_ALLOC_OVERHEAD + sig_len
+    return {
+        "signer_wire_bytes": wire,
+        "signer_uncompressed_len": unc,
+        "signature_len": sig_len,
+        "sigred_alloc": alloc,
+        "sigred_wraps": alloc >= SIGRED_ALLOC_WRAP,
+        # A name that cost fewer wire bytes than its uncompressed length
+        # was reached through a compression pointer. Legitimate inside
+        # SIG(24); forbidden inside RRSIG by RFC 4034 s3.1.7, and the
+        # lever that lets 2 wire bytes contribute up to 255.
+        "signer_compressed": wire < unc,
+    }
+
+
+def _sigred_geometry_overflow(rr, exc, signer_off, buf):
+    """Geometry for a signer name that never terminated inside 255.
+
+    The wire cost is recovered from the pointer itself rather than from
+    a parse that did not finish: a two-byte pointer costs two bytes, and
+    anything else here means the name was being read inline and the
+    overflow is a malformed packet rather than the SIGRed lever.
+
+    The uncompressed length is reported as AT LEAST what was reached
+    before the cap. Windows applies no 255 cap in this path, so the real
+    figure is larger; using the floor keeps the arithmetic a lower
+    bound, and a lower bound that already wraps is proof enough.
+    """
+    ln = buf[signer_off] if signer_off < len(buf) else 0
+    wire = 2 if (ln & 0xC0) == 0xC0 else None
+    if wire is None:
+        return None
+    sig_len = rr.rdlength - 18 - wire
+    if sig_len < 0:
+        sig_len = 0
+    unc = max(exc.accumulated, MAX_NAME_LEN + 1)
+    alloc = unc + SIGRED_ALLOC_OVERHEAD + sig_len
+    return {
+        "signer_wire_bytes": wire,
+        "signer_uncompressed_len": unc,
+        "signer_uncompressed_is_floor": True,
+        "signature_len": sig_len,
+        "sigred_alloc": alloc,
+        "sigred_wraps": alloc >= SIGRED_ALLOC_WRAP,
+        "signer_compressed": True,
+        "signer_overflow": str(exc),
+    }
+
+
+def _parse_sig_like(buf, rdoff, rr, ptr_sink=None):
+    """SIG(24): identical layout to RRSIG(46)."""
+    out = {
+        "type_covered": _u16(buf, rdoff),
+        "algorithm": buf[rdoff + 2],
+        "labels": buf[rdoff + 3],
+        "original_ttl": _u32(buf, rdoff + 4),
+        "expiration": _u32(buf, rdoff + 8),
+        "inception": _u32(buf, rdoff + 12),
+        "key_tag": _u16(buf, rdoff + 16),
+        "obsolete_sig_type": True,
+    }
+    try:
+        signer, after = parse_name(buf, rdoff + 18, ptr_sink=ptr_sink)
+        out["signer"] = signer
+        out.update(_sigred_geometry(rr, signer, rdoff + 18, after))
+    except NameTooLong as e:
+        out["signer"] = None
+        out["rdata_error"] = str(e)
+        g = _sigred_geometry_overflow(rr, e, rdoff + 18, buf)
+        if g:
+            out.update(g)
+    except MalformedDNS as e:
+        out["signer"] = None
+        out["rdata_error"] = str(e)
+    return out
+
+
+def _parse_tsig(buf, rdoff, rr):
+    """
+    RFC 8945 s4.2 TSIG rdata:
+      algorithm name | time signed (48) | fudge (16) | MAC size (16)
+      | MAC | original ID (16) | error (16) | other len (16) | other data
+
+    Returns a dict that ALWAYS carries 'struct_error' (None when the
+    record is internally consistent). CVE-2020-8622 is a receiver
+    asserting while verifying a TSIG it could not fully read, so the
+    structural verdict is the finding -- not a side note.
+    """
+    end = rdoff + rr.rdlength
+    out = {"struct_error": None, "algorithm": None, "mac_size": None,
+           "error": None, "error_name": None, "mac_truncated": False,
+           "mac_empty": False, "gss": False}
+    try:
+        algo, p = parse_name(buf, rdoff)
+    except MalformedDNS as e:
+        out["struct_error"] = f"algorithm name unparseable: {e}"
+        return out
+    out["algorithm"] = algo.text().lower()
+    out["gss"] = out["algorithm"] in TSIG_GSS_ALGOS
+
+    if p + 10 > end:
+        out["struct_error"] = (
+            f"rdata ends after the algorithm name: {end - p} bytes left, "
+            f"10 needed for time-signed/fudge/MAC-size")
+        return out
+    out["time_signed"] = int.from_bytes(buf[p:p + 6], "big")
+    out["fudge"] = _u16(buf, p + 6)
+    mac_size = _u16(buf, p + 8)
+    out["mac_size"] = mac_size
+    mac_end = p + 10 + mac_size
+    if mac_end + 6 > end:
+        out["struct_error"] = (
+            f"MAC size {mac_size} plus the 6 trailing bytes overruns the "
+            f"rdata by {mac_end + 6 - end} bytes")
+        return out
+    out["original_id"] = _u16(buf, mac_end)
+    err = _u16(buf, mac_end + 2)
+    out["error"] = err
+    out["error_name"] = TSIG_FAILURE_CODES.get(err)
+    other_len = _u16(buf, mac_end + 4)
+    out["other_len"] = other_len
+    tail = mac_end + 6 + other_len
+    if tail > end:
+        out["struct_error"] = (
+            f"other-data length {other_len} overruns the rdata by {tail - end} bytes")
+        return out
+    if tail < end:
+        out["struct_error"] = (
+            f"{end - tail} trailing bytes after other-data; TSIG rdata must end exactly")
+        return out
+
+    # MAC truncation. RFC 8945 s5.2 permits truncation but never below
+    # half the digest length and never below 80 bits. gss-tsig is
+    # excluded: its MAC is a variable-length GSS checksum, so applying
+    # a digest-length rule to it would fire on every AD exchange.
+    full = TSIG_DIGEST_LEN.get(out["algorithm"])
+    if mac_size == 0:
+        out["mac_empty"] = True
+    elif full is not None and not out["gss"]:
+        floor = max(10, full // 2)
+        if mac_size < floor:
+            out["mac_truncated"] = True
+            out["mac_floor"] = floor
+            out["mac_full"] = full
+    return out
+
+
+def _der_len(buf, i, end):
+    """Read one DER length. Returns ((length, next_index), None) or
+    (None, reason). Rejects indefinite and non-minimal encodings, both
+    of which are illegal in DER and both of which appear in malformed
+    SPNEGO tokens."""
+    if i >= end:
+        return None, "length byte missing"
+    b = buf[i]
+    i += 1
+    if b < 0x80:
+        return (b, i), None
+    n = b & 0x7F
+    if n == 0:
+        return None, "indefinite-length encoding is illegal in DER"
+    if n > 4:
+        return None, f"length encoded in {n} bytes"
+    if i + n > end:
+        return None, "long-form length field is itself truncated"
+    v = int.from_bytes(buf[i:i + n], "big")
+    i += n
+    if v < 0x80:
+        return None, f"non-minimal long-form length ({v} in {n} bytes)"
+    return (v, i), None
+
+
+def _der_scan(buf, i, end, depth=0):
+    """
+    Bounded DER structural walk. Returns None when sound, else a reason.
+
+    This is the CVE-2020-8625 / CVE-2021-25216 check. The BIND SPNEGO
+    decoder trusted a DER length field and copied that many bytes, so
+    the wire-visible precondition is a TLV whose declared length
+    exceeds what the token actually contains. Nothing here interprets
+    SPNEGO SEMANTICS -- only whether its lengths are self-consistent,
+    which is the one question that can be answered from the bytes.
+    """
+    if depth > 12:
+        return "DER nesting deeper than 12 levels"
+    seen = 0
+    while i < end:
+        seen += 1
+        if seen > 256:
+            return "more than 256 TLVs in one SPNEGO token"
+        tag = buf[i]
+        i += 1
+        r, err = _der_len(buf, i, end)
+        if err:
+            return err
+        length, i = r
+        if i + length > end:
+            return (f"DER tag 0x{tag:02x} claims {length} bytes but only "
+                    f"{end - i} remain in the token")
+        if tag & 0x20:          # constructed -> descend
+            sub = _der_scan(buf, i, i + length, depth + 1)
+            if sub:
+                return sub
+        i += length
+    return None
+
+
+def spnego_struct_error(token):
+    """Structural verdict on a GSS/SPNEGO token from TKEY key data."""
+    if len(token) < 2:
+        return "token shorter than one DER TLV"
+    if token[0] != DER_APPLICATION_0:
+        # Continuation tokens are legitimately not APPLICATION 0, so
+        # this is not an error on its own -- scan what is there.
+        return _der_scan(token, 0, len(token))
+    r, err = _der_len(token, 1, len(token))
+    if err:
+        return f"outer GSS token: {err}"
+    length, body = r
+    if body + length > len(token):
+        return (f"outer GSS token claims {length} bytes but only "
+                f"{len(token) - body} follow")
+    if not token[body:body + len(SPNEGO_OID)] == SPNEGO_OID:
+        # Not SPNEGO (could be raw Kerberos). Still walk it.
+        return _der_scan(token, body, body + length, 1)
+    return _der_scan(token, body + len(SPNEGO_OID), body + length, 1)
+
+
+def _parse_tkey(buf, rdoff, rr):
+    """
+    RFC 2930 s2 TKEY rdata:
+      algorithm name | inception (32) | expiration (32) | mode (16)
+      | error (16) | key size (16) | key data | other size (16) | other data
+    """
+    end = rdoff + rr.rdlength
+    out = {"struct_error": None, "algorithm": None, "mode": None,
+           "key_size": None, "spnego_error": None, "gssapi": False}
+    try:
+        algo, p = parse_name(buf, rdoff)
+    except MalformedDNS as e:
+        out["struct_error"] = f"algorithm name unparseable: {e}"
+        return out
+    out["algorithm"] = algo.text().lower()
+    if p + 14 > end:
+        out["struct_error"] = (
+            f"rdata ends after the algorithm name: {end - p} bytes left, 14 needed")
+        return out
+    out["inception"] = _u32(buf, p)
+    out["expiration"] = _u32(buf, p + 4)
+    out["mode"] = _u16(buf, p + 8)
+    out["error"] = _u16(buf, p + 10)
+    key_size = _u16(buf, p + 12)
+    out["key_size"] = key_size
+    key_start = p + 14
+    key_end = key_start + key_size
+    if key_end + 2 > end:
+        out["struct_error"] = (
+            f"key size {key_size} plus the other-size field overruns the "
+            f"rdata by {key_end + 2 - end} bytes")
+        return out
+    other_size = _u16(buf, key_end)
+    out["other_size"] = other_size
+    if key_end + 2 + other_size > end:
+        out["struct_error"] = (
+            f"other-size {other_size} overruns the rdata by "
+            f"{key_end + 2 + other_size - end} bytes")
+        return out
+    out["gssapi"] = out["mode"] == TKEY_MODE_GSSAPI
+    if out["gssapi"] and key_size:
+        out["spnego_error"] = spnego_struct_error(buf[key_start:key_end])
+    return out
+
+
+# =====================================================================
+# DNS-SD TXT rdata (RFC 1035 s3.3.14 wire form, RFC 6763 s6 key/value)
+#
+# TXT rdata is NOT one string. It is a SEQUENCE of length-prefixed
+# strings, and treating it as one is the single most common way to
+# misread it -- a Matter device packs a dozen key/value pairs into one
+# record as a dozen separate strings. Everything downstream of here
+# (the Matter and Thread fingerprints) reads whatever this returns, so
+# it is written as a validator first, exactly like the TSIG and SPNEGO
+# decoders: total, bounded, and explicit about why it stopped.
+# =====================================================================
+
+# A TXT record may legally hold many strings, and an attacker controls
+# how many. Bounded for the same reason the DER walk is: this runs at
+# line rate on a Pi Zero 2W.
+TXT_MAX_STRINGS = 128
+# RFC 6763 s6.4: the key is everything before the first '='. A string
+# with no '=' is a BOOLEAN attribute whose presence is the value, and
+# a string that begins with '=' has no key and must be ignored.
+TXT_KV_SEP = 0x3D          # '='
+
+
+def txt_strings(rdata):
+    """
+    Split TXT rdata into its length-prefixed strings.
+
+    Returns (strings, error) where error is None when the rdata was
+    consumed exactly. A partial read still returns what was readable:
+    a device with one malformed trailing string should still be
+    identifiable from the dozen good ones ahead of it.
+    """
+    out = []
+    i, n = 0, len(rdata)
+    while i < n:
+        if len(out) >= TXT_MAX_STRINGS:
+            return out, f"more than {TXT_MAX_STRINGS} strings in one TXT record"
+        ln = rdata[i]
+        i += 1
+        if i + ln > n:
+            return out, (f"TXT string claims {ln} bytes but only {n - i} remain "
+                         f"in the rdata")
+        # A zero-length string is LEGAL: RFC 6763 s6.1 uses a single
+        # empty string as the way to say "this service has no TXT
+        # data", so it must not be treated as a terminator or an error.
+        out.append(rdata[i:i + ln])
+        i += ln
+    return out, None
+
+
+def txt_pairs(strings):
+    """
+    RFC 6763 s6.4 key/value extraction.
+
+    Returns a dict of {key: value_or_None}, where None means a boolean
+    attribute present with no '='. Keys are compared CASE-INSENSITIVELY
+    per s6.4 and stored lowercase, because Matter publishes 'VP' while
+    Thread publishes 'vn' and a case-sensitive table would silently
+    half-work.
+
+    VALUES ARE KEPT AS RAW BYTES, not decoded to str. RFC 6763 s6.5
+    permits arbitrary binary in a value, and Thread puts raw 8-byte
+    extended PAN IDs and IPv6 prefixes in there. Decoding here would
+    either throw or mangle them; the fingerprint layer decodes each
+    field the way that field is actually defined.
+
+    FIRST OCCURRENCE WINS, per s6.4: a duplicate key is to be ignored
+    rather than overwrite, and doing it the other way round would let a
+    spoofer append a second 'CM=0' to mask a real one.
+    """
+    pairs = {}
+    for s in strings:
+        if not s:
+            continue
+        eq = s.find(bytes([TXT_KV_SEP]))
+        if eq == 0:
+            continue                      # no key -- ignore per s6.4
+        if eq < 0:
+            key, val = s, None            # boolean attribute
+        else:
+            key, val = s[:eq], s[eq + 1:]
+        k = key.decode("ascii", "replace").lower()
+        if k in pairs:
+            continue                      # first occurrence wins
+        pairs[k] = val
+    return pairs
+
+
+# =====================================================================
+# NBNS first-level name decoding (RFC 1001 s4.1, RFC 1002 s4.2)
+#
+# This is the second name codec in this module, and it exists because
+# NBNS names only LOOK like DNS labels. Each of 16 name bytes is split
+# into two 4-bit nibbles and each nibble is mapped to 'A' + nibble,
+# producing exactly 32 printable characters that then travel as one
+# ordinary DNS label. A DNS parser reads that label without complaint
+# and hands back "EJFDEBFEEBFACACACACACACACACACAAA" -- which is why
+# WPAD-over-NBNS is invisible without this function, not merely
+# awkward to read.
+# =====================================================================
+
+def decode_nbns_label(label):
+    """
+    Decode one first-level-encoded NBNS label.
+
+    Returns (name, suffix_byte) with the name stripped of its trailing
+    pad spaces, or None when the label is not a well-formed encoding.
+    Returning None rather than a partial decode is deliberate: a
+    half-decoded NetBIOS name is a string that looks like a hostname
+    and is not one, and every caller here compares it against "WPAD".
+    """
+    if len(label) != NBNS_NAME_LABEL_LEN:
+        return None
+    out = bytearray()
+    for i in range(0, NBNS_NAME_LABEL_LEN, 2):
+        hi, lo = label[i], label[i + 1]
+        # Only 'A'..'P' are legal: the encoding maps a 4-bit nibble to
+        # 'A' + nibble, so anything outside that range means this is a
+        # 32-character DNS label that is not an NBNS name at all.
+        if not (0x41 <= hi <= 0x50) or not (0x41 <= lo <= 0x50):
+            return None
+        out.append(((hi - 0x41) << 4) | (lo - 0x41))
+    if len(out) != NBNS_NAME_BYTES:
+        return None
+    suffix = out[-1]
+    name = bytes(out[:-1]).rstrip(b" ")
+    return name.decode("ascii", "replace"), suffix
+
+
+def nbns_name(name_obj):
+    """
+    Decode an NBNS question/record name.
+
+    Returns a dict with the decoded NetBIOS name, its suffix byte and
+    what that suffix means, plus any SCOPE labels that followed. Scope
+    is almost always empty in practice but is part of the format, and
+    dropping it silently would merge two names that NetBIOS considers
+    distinct.
+    """
+    if name_obj is None or not name_obj.labels:
+        return None
+    first = decode_nbns_label(name_obj.labels[0])
+    if first is None:
+        return None
+    nb, suffix = first
+    scope = [l.decode("ascii", "replace") for l in name_obj.labels[1:]]
+    return {
+        "netbios_name": nb,
+        "suffix": suffix,
+        "suffix_name": NBNS_SUFFIX.get(suffix, f"0x{suffix:02X}"),
+        "scope": ".".join(scope),
+        "encoded": name_obj.labels[0].decode("ascii", "replace"),
+    }
+
+
+def encode_nbns_label(name, suffix=0x00):
+    """First-level ENCODER, for fixtures and for the cross-check.
+
+    Kept beside the decoder on purpose: the lab and the test tiers need
+    to produce real NBNS names, and a hand-built encoding in a fixture
+    is exactly the miscount that wasted three rounds on the TXT work.
+    The cross-check asserts encode/decode round-trips AND that the
+    bytes match an independent construction.
+    """
+    padded = name.upper().encode("ascii")[:15].ljust(15, b" ") + bytes([suffix])
+    out = bytearray()
+    for b in padded:
+        out.append(0x41 + (b >> 4))
+        out.append(0x41 + (b & 0x0F))
+    return bytes(out)
+
+
+# =====================================================================
+# Transport / name predicates for the new tiers
+# =====================================================================
+
+def is_llmnr_group(addr):
+    """Is this one of the two LLMNR link-scope multicast groups?"""
+    return addr in (LLMNR_V4_GROUP, LLMNR_V6_GROUP)
+
+
+def is_quic_long_header(payload):
+    """A QUIC long header, per RFC 9000 s17.2.
+
+    Checked so arbitrary UDP/853 is not reported as DoQ. The fixed bit
+    is checked too: RFC 9000 requires it set, and a packet with the
+    long-header bit but not the fixed bit is not QUIC.
+    """
+    if not payload:
+        return False
+    first = payload[0]
+    return bool(first & QUIC_LONG_HEADER_BIT) and bool(first & QUIC_FIXED_BIT)
+
+
+def is_ddr_query_name(labels):
+    """RFC 9462 DDR / RFC 9463 DNR discovery names.
+
+    Two shapes count: the well-known `_dns.resolver.arpa`, and the
+    `_dns.<resolver-name>` form a network hands out through DHCP or RA.
+    Matching the leading `_dns` label alone would be too loose -- it is
+    a legal DNS-SD service label -- so the arpa form is matched in
+    full and the generic form requires `_dns` to be the FIRST label of
+    an SVCB query, which the caller checks.
+    """
+    if not labels:
+        return None
+    low = [l.lower() for l in labels]
+    if low[0] != DDR_UNDERSCORE_DNS.encode():
+        return None
+    rest = tuple(l.decode("ascii", "replace") for l in low[1:])
+    if rest == DDR_RESOLVER_ARPA:
+        return "resolver.arpa"
+    return ".".join(rest) or "."
+
+
+def is_dnssd_meta_query(labels):
+    """A PTR query for _services._dns-sd._udp.<domain>.
+
+    Returns the domain it enumerates, or None. The domain matters: on
+    `.local` this is ordinary Bonjour browsing that any Mac does on
+    joining a network, while against a real zone over unicast it is
+    service enumeration. The caller uses the distinction; this only
+    reports it.
+    """
+    if len(labels) < 3:
+        return None
+    head = tuple(l.lower().decode("ascii", "replace") for l in labels[:3])
+    if head != DNSSD_META:
+        return None
+    return ".".join(l.decode("ascii", "replace") for l in labels[3:]) or "."

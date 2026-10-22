@@ -26362,17 +26362,32 @@ def _ipsec_selftest():
 # tier on UDP/5353 (DNSD-070..076): a Matter/Thread census (informational, once per instance)
 # and RFC 6762 scope checks — a TTL != 255 hop-limit violation, and the CERT VU#550620 off-link
 # source / open-reflector pair (CVE-2015-2809 / CVE-2017-6520 / CVE-2015-1892), the latter armed
-# from the capture interface's own subnets. Dual-stack; the engine never transmits (AST-enforced
-# in its conformance). Complements the ACTIVE do_dns_doctor.
+# from the capture interface's own subnets. v7 adds SIGRed (CVE-2020-1350, DNSD-044) plus the
+# DDNS tier (RFC 2136 opcode-5 dynamic-update posture — unsigned/TSIG-bypass accepted writes,
+# CVE-2017-3143; DNSD-053/054 fold in the BIND GSS-TSIG overflows CVE-2020-8622 / CVE-2020-8625
+# / CVE-2021-25216) and the rDNS tier (PTR private-topology leak to a public resolver, and
+# ip6.arpa reverse-tree enumeration). v8 adds BIND IXFR SOA-owner-not-apex (CVE-2021-25214,
+# DNSD-062) and five link-local / transport posture tiers: unicast DNS-SD enumeration, LLMNR
+# on 5355, NBT-NS on 137 (the MS16-077 WPAD query, CVE-2016-3213 / CVE-2016-3236), encrypted-DNS
+# transport on 853 (DoT/DoQ census, DDR/DNR discovery, DoH-endpoint resolution) and TSIG/SIG(0)
+# posture. This owns the name-resolution POSTURE (the vulnerable query); the POISONED answer
+# stays with SMB Watch / Relay. Dual-stack; the engine never transmits (AST-enforced in its
+# conformance). Complements the ACTIVE do_dns_doctor.
 _DNS_PASSIVE_PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'python', 'dns_doctor_passive')
 
 
 def _dns_passive_engine(local_prefixes=None):
     """Import the vendored dns_doctor_passive engine (its dir must be on sys.path so the
-    bare cross-imports resolve). Returns a fresh Engine with default Config. `local_prefixes`
-    (CIDR strings for the capture interface) arm the mDNS scope detectors DNSD-075/076, which
-    stay silent on an empty prefix list by design — see mdns.py."""
+    bare cross-imports resolve). Returns a fresh Engine with default Config.
+
+    `local_prefixes` (CIDR strings for the capture interface) arm the mDNS scope detectors
+    DNSD-075/076. The rDNS leak detector (DNSD-090) and the v8 encrypted-DNS census own-resolver
+    flag (DNSD-130/131) are armed with the private-address space itself — a private reverse query
+    or an encrypted-DNS session to a NON-private (public) resolver is the leak/bypass — reusing
+    netscope's own table so it never drifts. The DDNS updater allowlist (DNSD-082) is left empty:
+    who may write a zone is an operator trust decision, not something to infer from the capture
+    point, and the detected DDNS codes (DNSD-080/081) fire without it."""
     if _DNS_PASSIVE_PKG_DIR not in sys.path:
         sys.path.insert(0, _DNS_PASSIVE_PKG_DIR)
     import engine as _e
@@ -26380,6 +26395,13 @@ def _dns_passive_engine(local_prefixes=None):
     cfg = _Config()
     if local_prefixes:
         cfg.mdns_local_prefixes = tuple(local_prefixes)
+    try:
+        import netscope as _ns
+        _private = tuple(str(n) for n in (_ns.PRIVATE_V4 + _ns.PRIVATE_V6))
+        cfg.rdns_internal_prefixes = _private
+        cfg.dns_own_resolver_prefixes = _private
+    except Exception:
+        pass
     return _e.Engine(cfg)
 
 
@@ -26454,8 +26476,11 @@ def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
     transmits). Flags DNSSEC-CVE signatures (KeyTrap CVE-2023-50387, NSEC3 CVE-2023-50868) and
     over-DNS attacks (NXNSAttack, MaginotDNS cache-poisoning, DNSBomb, SAD DNS) in the observed
     DNS record structure, plus the v6 mDNS tier (Matter/Thread census and RFC 6762 scope / CERT
-    VU#550620 off-link reflector). Dual-stack; adapts the vendored dns_doctor_passive engine
-    over a bounded capture."""
+    VU#550620 off-link reflector) and the v7 SIGRed (CVE-2020-1350) + DDNS (RFC 2136 dynamic-
+    update posture, CVE-2017-3143) and rDNS (PTR topology-leak / ip6.arpa walk) tiers, plus the
+    v8 LLMNR (5355) / NBT-NS (137, MS16-077 WPAD CVE-2016-3213/3236) / encrypted-DNS (853 DoT-DoQ)
+    / DNS-SD / TSIG posture tiers and BIND IXFR CVE-2021-25214. Dual-stack; adapts the vendored
+    dns_doctor_passive engine over a bounded capture."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -26468,10 +26493,12 @@ def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
     fd, pcap = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
     # Large snaplen: DNSSEC responses (DNSKEY/RRSIG bundles) are big and must not truncate.
-    # Port 5353 joins the filter for the v6 mDNS tier (matches the engine's own BPF).
+    # Ports mirror the engine's own BPF: 53 unicast DNS, 5353 mDNS (v6), and the v8 tiers —
+    # 5355 LLMNR, 137 NBT-NS, 853 DoT/DoQ (encrypted-DNS transport census).
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
                 '-s', '65535', '-c', '20000', '-w', pcap,
-                'udp port 53 or tcp port 53 or udp port 5353'],
+                '(udp or tcp) and (port 53 or port 5353 or port 5355 '
+                'or port 137 or port 853)'],
                timeout=seconds + 8)
     if (os.path.getsize(pcap) <= 24 and res['err'] and any(
             k in res['err'].lower() for k in ('permission', "couldn't",

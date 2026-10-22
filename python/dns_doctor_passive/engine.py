@@ -29,16 +29,46 @@ import time
 
 import parse
 import detect
+import netscope
 import mdns as mdns_tier
+import ddns as ddns_tier
+import rdns as rdns_tier
+import llmnr as llmnr_tier
+import nbns as nbns_tier
+import encrypted as enc_tier
 from bailiwick import zone_of_query
-from state import Config, ZoneTable, InFlight, XferTable, CensusTable
-from findings import FINDINGS, BASELINE_DEPENDENT
+from state import (Config, ZoneTable, InFlight, XferTable, CensusTable,
+                   UpdatePending, WalkTable, CounterTable)
+from findings import (FINDINGS, BASELINE_DEPENDENT, PREFIX_DEPENDENT,
+                      PREFIX_CONFIG_KEY)
 
 # Port 5353 joins the filter for the mDNS tier. Kept as ONE filter
 # rather than two captures so there is a single capture path to reason
 # about, with the port split done in software immediately after parse.
-BPF_FILTER = "(udp or tcp) and (port 53 or port 5353)"
+# Five protocols now share one capture. Kept as ONE filter rather
+# than five captures so there is a single capture path to reason
+# about, with the fork done in software immediately after L4 parsing.
+BPF_FILTER = ("(udp or tcp) and (port 53 or port 5353 or port 5355 "
+              "or port 137 or port 853)")
 MDNS_PORT = 5353
+LLMNR_PORT = 5355
+NBNS_PORT = 137
+ENCRYPTED_PORT = 853
+
+# The CLI flag that arms each prefix-dependent code. This map exists
+# instead of deriving the flag from the config key, because the two are
+# NOT the same string -- and the first version of --print-codes did
+# derive it, which printed "[needs --mdns-local-prefixes]" for a flag
+# actually spelled --mdns-prefix. A gate label that names a flag the
+# parser does not accept is worse than no label: it tells an operator
+# the check is armable and then fails them at the shell.
+# conformance.py asserts every flag here is one argparse really takes.
+PREFIX_CLI_FLAG = {
+    "xfr_allowed_secondary_prefixes": "--xfr-secondary-prefix",
+    "mdns_local_prefixes": "--mdns-prefix",
+    "ddns_allowed_updater_prefixes": "--ddns-updater-prefix",
+    "rdns_internal_prefixes": "--rdns-internal-prefix",
+}
 
 
 class Stats:
@@ -64,9 +94,44 @@ class Engine:
         self.inflight = InFlight(self.cfg)
         self.xfers = XferTable(self.cfg)
         self.census = CensusTable(self.cfg.mdns_census_max)
-        self.mdns_local_nets, bad = mdns_tier.parse_local_prefixes(
+        self.mdns_local_nets, bad = netscope.parse_prefixes(
             self.cfg.mdns_local_prefixes)
         self.mdns_bad_prefixes = bad
+
+        # DDNS: pending requests awaiting a verdict, plus a
+        # first-sighting set so a steady-state posture fact is not
+        # re-reported on every update a DHCP server sends.
+        self.pending = UpdatePending(self.cfg)
+        self.ddns_allowed_nets, bad_d = netscope.parse_prefixes(
+            self.cfg.ddns_allowed_updater_prefixes)
+        self.ddns_bad_prefixes = bad_d
+        self.ddns_seen = CensusTable(self.cfg.mdns_census_max)
+
+        # rDNS: per-source walk windows, and a first-sighting set keyed
+        # on (destination, leaked network) -- a misconfigured resolver
+        # leaks the same prefix thousands of times a day.
+        self.walks = WalkTable(self.cfg)
+        self.rdns_internal_nets, bad_r = netscope.parse_prefixes(
+            self.cfg.rdns_internal_prefixes)
+        self.rdns_bad_prefixes = bad_r
+        self.rdns_seen = CensusTable(self.cfg.mdns_census_max)
+
+        # One shared first-sighting table for every posture code that
+        # reports a STATE rather than an event (LLMNR/NBNS in use,
+        # WPAD queries, encrypted-transport sessions, DNS-SD
+        # enumeration, SIG(0)). Shared rather than one per tier
+        # because every key is already prefixed with its code, so a
+        # single bounded table cannot confuse them -- and five
+        # separate LRUs would each need their own cap to tune.
+        self.posture = CensusTable(self.cfg.posture_seen_max)
+        self.nbstat = CounterTable(cap=self.cfg.walk_max_sources,
+                                   window=self.cfg.nbstat_window_seconds)
+        self.own_resolver_nets, bad_o = netscope.parse_prefixes(
+            self.cfg.dns_own_resolver_prefixes)
+        self.own_resolver_bad_prefixes = bad_o
+        self.xfr_secondary_nets, bad_x = netscope.parse_prefixes(
+            self.cfg.xfr_allowed_secondary_prefixes)
+        self.xfr_bad_prefixes = bad_x
         self.stats = Stats()
         self._emit = emit or (lambda f: None)
         self._last_sweep = 0.0
@@ -91,6 +156,72 @@ class Engine:
         # mDNS announcement on the network. The unicast detectors
         # therefore run ONLY on port 53 and the mDNS tier ONLY on
         # 5353; neither ever sees the other's traffic.
+        # ============ PORT FORK ============
+        # Five protocols, five rule sets, and three of them share the
+        # DNS header layout while meaning different things by it. Every
+        # fork below exists because crossing it produces plausible
+        # findings rather than obvious failures:
+        #
+        #   5353 mDNS   -- every name ends .local and is out of
+        #                  bailiwick, so DNSD-006 alone would fire on
+        #                  essentially every announcement.
+        #   5355 LLMNR  -- same wire format as DNS, but RFC 4795 does
+        #                  NOT require TTL 255 the way mDNS does, so
+        #                  the mDNS scope rule must not reach it.
+        #   137  NBNS   -- OPCODE 5 MEANS NAME REGISTRATION HERE, and
+        #                  in DNS it means UPDATE. Reaching the opcode
+        #                  fork, an ordinary Windows registration storm
+        #                  would be reported as unsigned dynamic
+        #                  updates being accepted. Forked FIRST, before
+        #                  the opcode router, for exactly that reason.
+        #   853  DoT/DoQ -- encrypted. There is nothing to parse, and
+        #                  attempting it would read ciphertext as a
+        #                  DNS header and report malformed packets
+        #                  forever.
+        #   53   DNS    -- the ordinary tier, itself forked by opcode.
+        #
+        # conformance.py asserts the whole matrix, in both directions
+        # for every pair.
+
+        # --- 853: encrypted. Never parsed as DNS. -------------------
+        if sport == ENCRYPTED_PORT or dport == ENCRYPTED_PORT:
+            out = enc_tier.detect_encrypted_session(
+                self.cfg, self.posture, src, dst, sport, dport, proto, payload,
+                self.own_resolver_nets, now)
+            for f in out:
+                self.stats.findings += 1
+                self._emit(f)
+            return out
+
+        # --- 137: NBNS. Forked BEFORE the opcode router. ------------
+        if sport == NBNS_PORT or dport == NBNS_PORT:
+            if not self.cfg.nbns_enabled:
+                return []
+            msg = parse.parse_dns(payload)
+            self.stats.parsed += 1
+            if msg.malformed:
+                self.stats.malformed += 1
+            out = nbns_tier.handle_nbns(msg, self.cfg, self.posture, self.nbstat,
+                                        src, dst, now)
+            for f in out:
+                self.stats.findings += 1
+                self._emit(f)
+            return out
+
+        # --- 5355: LLMNR. DNS wire format, different rules. ---------
+        if sport == LLMNR_PORT or dport == LLMNR_PORT:
+            if not self.cfg.llmnr_enabled:
+                return []
+            msg = parse.parse_dns(payload)
+            self.stats.parsed += 1
+            if msg.malformed:
+                self.stats.malformed += 1
+            out = llmnr_tier.handle_llmnr(msg, self.cfg, self.posture, src, dst, now)
+            for f in out:
+                self.stats.findings += 1
+                self._emit(f)
+            return out
+
         is_mdns = (sport == MDNS_PORT or dport == MDNS_PORT)
         if is_mdns:
             if not self.cfg.mdns_enabled:
@@ -112,11 +243,21 @@ class Engine:
             self.stats.malformed += 1
 
         q = msg.questions[0] if msg.questions else None
-        zone = zone_of_query(q["name"]) if q else "."
-        zstate = self.zones.get(zone, now)
         cfg = self.cfg
+        is_update = ddns_tier.is_update(msg)
+        if is_update:
+            # RFC 2136 names the zone outright in the ZONE section;
+            # deriving it by bailiwick would only add a way to be wrong.
+            zone = ddns_tier._zone_of_update(msg)
+        else:
+            zone = zone_of_query(q["name"]) if q else "."
+        zstate = self.zones.get(zone, now)
         out = []
 
+        # ---- OPCODE-INDEPENDENT STRUCTURAL LAYER -------------------
+        # These four judge the WIRE ENCODING, which an opcode cannot
+        # change, so they run on QUERY and UPDATE alike.
+        #
         # TuDoor first: a malformed message may still have partial
         # sections worth looking at, but the malformation is itself
         # the finding and should be reported even if nothing else is.
@@ -125,6 +266,40 @@ class Engine:
         # DNSD-007: a pointer anomaly is a memory-safety primitive and
         # must not be buried under the generic malformed-packet notice.
         out += detect.detect_pointer_anomaly(msg, cfg, zone)
+        # TSIG and SIG structure. Both appear in queries, responses,
+        # transfers and updates; neither assertion cares which.
+        out += detect.detect_tsig_malformed(msg, cfg, zone)
+        out += detect.detect_sigred(msg, cfg, zone, is_tcp)
+        # TSIG and SIG(0) posture. Opcode-independent for the same
+        # reason the structural checks are: TSIG covers queries,
+        # responses, transfers, NOTIFY and updates alike, and a weak
+        # algorithm or a wide replay window is the same weakness in
+        # each.
+        out += detect.detect_tsig_posture(msg, cfg, zone)
+        out += detect.detect_sig0(msg, cfg, zone, self.posture, src, now)
+
+        # ---- OPCODE ROUTING ----------------------------------------
+        # An UPDATE reuses all four section counts with different
+        # meanings (ZONE / PREREQUISITE / UPDATE / ADDITIONAL), so
+        # handing one to the QUERY detectors produces a quiet drip of
+        # plausible-looking findings -- a prerequisite failure is a
+        # perfectly ordinary NXDOMAIN, an updater's source port is not
+        # a resolver's, and a bulk update legitimately repeats records.
+        # This is the same hazard the mDNS port split exists for, and
+        # it is handled the same way: one hard fork, no overlap.
+        if is_update:
+            out += ddns_tier.handle_ddns(msg, cfg, self.pending, self.ddns_seen,
+                                         src, dst, sport, dport,
+                                         self.ddns_allowed_nets, now)
+            if now - self._last_sweep > 5.0:
+                self.inflight.sweep(now)
+                self.xfers.sweep(now)
+                self.pending.sweep(now)
+                self._last_sweep = now
+            for f in out:
+                self.stats.findings += 1
+                self._emit(f)
+            return out
 
         if msg.qr:
             # ---- response path ----
@@ -141,32 +316,76 @@ class Engine:
             out += detect.detect_svcb_alias_abuse(msg, cfg, zone)
             out += detect.detect_edns_option_duplication(msg, cfg, zone)
             out += detect.detect_duplicate_rr_flood(msg, cfg, zone)
+            out += detect.detect_dnssd_fanout(msg, cfg, zone)
+            out += enc_tier.handle_encrypted_dns_query(msg, cfg, self.posture,
+                                                       src, dst, now)
             out += detect.detect_dnsbomb(msg, cfg, zone, zstate, now)
             out += detect.detect_nsec3_encloser(msg, cfg, zone, zstate, now)
             out += detect.detect_water_torture(msg, cfg, zone, zstate, now)
             if q is not None:
                 key = (msg.txid, tuple(q["name"].lower_labels()), q["qtype"], dport)
                 out += detect.detect_sad_dns_conflict(msg, cfg, zone, self.inflight, key, now)
-            if is_tcp and q is not None and q["qtype"] in (parse.QT_IXFR, parse.QT_AXFR):
-                xkey = (bytes(src), bytes(dst), sport, dport)
-                xs = self.xfers.get(xkey, now, q["qtype"])
+            # A transfer RESPONSE may legally omit the Question section
+            # after the first message (RFC 5936 s2.2), so the stream is
+            # looked up whenever one exists for this conversation --
+            # not only when the qtype is still visible in the packet.
+            # Keying on the question alone would have dropped every
+            # message after the first on a conforming multi-message
+            # transfer, which is precisely the traffic DNSD-060..063
+            # exist to judge.
+            xkey = (bytes(src), bytes(dst), sport, dport)
+            xs = self.xfers.streams.get(xkey) if is_tcp else None
+            if xs is None and is_tcp and q is not None \
+                    and q["qtype"] in (parse.QT_IXFR, parse.QT_AXFR):
+                xs = self.xfers.get(xkey, now, q["qtype"], client=bytes(dst))
+            if xs is not None:
+                xs.last_seen = now
+                # Structure is judged BEFORE the counters advance, so
+                # "is this the first message" and "has an SOA been seen
+                # already" still describe the state this message
+                # arrived into.
+                out += detect.detect_axfr_structure(msg, cfg, zone, xs, is_tcp)
+                out += detect.detect_ixfr_soa_apex(msg, cfg, zone, xs, is_tcp)
                 out += detect.detect_xfr_tsig_absent(msg, cfg, zone, xs, now, is_tcp)
+                xs.records += len(msg.answers)
+                xs.first_message_done = True
+                out += detect.detect_xfr_completed_disclosure(
+                    msg, cfg, zone, xs, self.xfr_secondary_nets, bytes(dst), now, is_tcp)
         else:
             # ---- query path ----
             out += detect.detect_tkey_query(msg, cfg, zone)
             if is_tcp and q is not None and q["qtype"] in (parse.QT_IXFR, parse.QT_AXFR):
                 # Register the transfer from the QUERY side so the
-                # response stream is keyed on the same conversation.
-                self.xfers.get((bytes(dst), bytes(src), dport, sport), now, q["qtype"])
+                # response stream is keyed on the same conversation,
+                # and record WHO asked -- the client address is what
+                # DNSD-061 judges, and by the time the terminating SOA
+                # arrives the query is long gone.
+                self.xfers.get((bytes(dst), bytes(src), dport, sport), now,
+                               q["qtype"], client=bytes(src))
+            # RFC 5936 s4.2 leaves AXFR over UDP undefined. Checked on
+            # the UDP path specifically, and AXFR-only: RFC 1995 s2
+            # permits IXFR over UDP outright.
+            out += detect.detect_axfr_over_udp(msg, cfg, zone, is_tcp)
             if q is not None:
                 key = (msg.txid, tuple(q["name"].lower_labels()), q["qtype"], sport)
                 self.inflight.note_query(key, now)
                 zstate.push("query_times", now, cfg.ring_size)
                 out += detect.detect_source_port_entropy(cfg, zone, zstate, sport, now)
+            # rDNS leg. Query-side only: both checks are about what a
+            # client ASKS FOR and who it asks, neither about answers.
+            out += rdns_tier.handle_rdns(msg, cfg, self.walks, self.rdns_seen,
+                                         src, dst, self.rdns_internal_nets, now)
+            out += detect.detect_dnssd_enumeration(msg, cfg, self.posture, src, now)
+            # The encrypted-DNS precursors: both travel in cleartext
+            # on port 53, because a client probing for an encrypted
+            # endpoint does not yet know where it is.
+            out += enc_tier.handle_encrypted_dns_query(msg, cfg, self.posture,
+                                                       src, dst, now)
 
         if now - self._last_sweep > 5.0:
             self.inflight.sweep(now)
             self.xfers.sweep(now)
+            self.pending.sweep(now)
             self._last_sweep = now
 
         for f in out:
@@ -302,6 +521,39 @@ def main():
     p.add_argument("--exclude-zone", action="append", default=[],
                    help="zone to suppress behavioural findings for (repeatable)")
     p.add_argument("--max-zones", type=int, default=None)
+    p.add_argument("--mdns-prefix", action="append", default=[],
+                   dest="mdns_prefixes", metavar="CIDR",
+                   help="CIDR belonging to THIS link; enables DNSD-075/076 "
+                        "(repeatable). Without it both stay silent, because "
+                        "guessing off-link from address class is wrong on a "
+                        "publicly-addressed LAN.")
+    p.add_argument("--ddns-updater-prefix", action="append", default=[],
+                   dest="ddns_prefixes", metavar="CIDR",
+                   help="CIDR permitted to send dynamic updates; enables "
+                        "DNSD-082 (repeatable).")
+    p.add_argument("--rdns-internal-prefix", action="append", default=[],
+                   dest="rdns_prefixes", metavar="CIDR",
+                   help="CIDR of your own resolvers/networks; enables DNSD-090 "
+                        "(repeatable).")
+    p.add_argument("--no-ddns", action="store_true",
+                   help="disable the DDNS tier (RFC 2136 opcode 5)")
+    p.add_argument("--no-rdns", action="store_true",
+                   help="disable the rDNS tier (PTR)")
+    p.add_argument("--own-resolver-prefix", action="append", default=[],
+                   dest="own_resolver_prefixes", metavar="CIDR",
+                   help="CIDR of resolvers YOU run; lets DNSD-130/131 say whether an "
+                        "encrypted session went to your resolver or past it "
+                        "(repeatable).")
+    p.add_argument("--xfr-secondary-prefix", action="append", default=[],
+                   dest="xfr_secondary_prefixes", metavar="CIDR",
+                   help="CIDR of secondaries permitted to pull your zones; enables "
+                        "DNSD-061 (repeatable).")
+    p.add_argument("--no-llmnr", action="store_true", help="disable the LLMNR tier")
+    p.add_argument("--no-nbns", action="store_true", help="disable the NBT-NS tier")
+    p.add_argument("--no-encrypted-dns", action="store_true",
+                   help="disable the encrypted-DNS transport tier (DoT/DoQ/DDR)")
+    p.add_argument("--no-dnssd", action="store_true",
+                   help="disable unicast DNS-SD enumeration detection")
     p.add_argument("--print-codes", action="store_true",
                    help="print the finding-code registry and exit")
     args = p.parse_args()
@@ -309,7 +561,15 @@ def main():
     if args.print_codes:
         for code in sorted(FINDINGS):
             m = FINDINGS[code]
-            gate = "  [baseline-gated]" if code in BASELINE_DEPENDENT else ""
+            if code in BASELINE_DEPENDENT:
+                gate = "  [baseline-gated]"
+            elif code in PREFIX_DEPENDENT:
+                # Named rather than left to fire never: a check that is
+                # silent for want of config is indistinguishable from a
+                # check that is broken, unless something says so.
+                gate = f"  [needs {PREFIX_CLI_FLAG[PREFIX_CONFIG_KEY[code]]}]"
+            else:
+                gate = ""
             print(f"{code}  {m['name']:34s} {m['severity']:8s} {m['confidence']:6s}{gate}")
         return 0
 
@@ -321,6 +581,17 @@ def main():
     cfg.excluded_zones = set(args.exclude_zone)
     if args.max_zones:
         cfg.max_zones = args.max_zones
+    cfg.mdns_local_prefixes = tuple(args.mdns_prefixes)
+    cfg.ddns_allowed_updater_prefixes = tuple(args.ddns_prefixes)
+    cfg.rdns_internal_prefixes = tuple(args.rdns_prefixes)
+    cfg.ddns_enabled = not args.no_ddns
+    cfg.rdns_enabled = not args.no_rdns
+    cfg.dns_own_resolver_prefixes = tuple(args.own_resolver_prefixes)
+    cfg.xfr_allowed_secondary_prefixes = tuple(args.xfr_secondary_prefixes)
+    cfg.llmnr_enabled = not args.no_llmnr
+    cfg.nbns_enabled = not args.no_nbns
+    cfg.encrypted_dns_enabled = not args.no_encrypted_dns
+    cfg.dnssd_enabled = not args.no_dnssd
 
     stats = run(args.iface, cfg, timeout=args.timeout)
     print(f"frames={stats.frames} parsed={stats.parsed} findings={stats.findings} "

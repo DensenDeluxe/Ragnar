@@ -464,16 +464,23 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   (`CVE-2026-11721` BIND, `CVE-2026-52688` PowerDNS Recursor); `DNSD-041` an NSEC next-name
   outside its zone (`CVE-2026-13321`); `DNSD-042` an NSEC3 owner outside the queried zone —
   parent apex-hash impersonation (`CVE-2026-10723`); `DNSD-043` NSEC and NSEC3 for one zone in
-  one response with only one half signed (`CVE-2026-13204`).
+  one response with only one half signed (`CVE-2026-13204`); `DNSD-044` a **SIG/KEY record whose
+  rdata length overflows the 16-bit size Windows DNS allocates** — **SIGRed** (`CVE-2020-1350`,
+  CVSS 10.0, CISA KEV).
 - **Protocol abuse** — `DNSD-050` an SVCB/HTTPS AliasMode fanning out to many ServiceMode
   records (`CVE-2026-81563` / `CVE-2026-81736`); `DNSD-051` a repeated single-instance EDNS
   option (`CVE-2026-42944`); `DNSD-052` identical SOA/CNAME/DNAME records repeated
   (`CVE-2026-75029`); `DNSD-053` a TKEY query — an attack *attempt*, not a vulnerable
-  resolver (`CVE-2026-76163`).
+  resolver (`CVE-2026-76163`), also a TKEY whose SPNEGO/ASN.1 lengths are self-contradictory —
+  the BIND GSS-TSIG overflow (`CVE-2020-8625` / `CVE-2021-25216`); `DNSD-054` a TSIG response
+  assertion that answered NOERROR with a failed/empty MAC (`CVE-2020-8622`).
 - **Zone transfer** — `DNSD-060` a multi-message TCP AXFR/IXFR that completed with unsigned
   intermediate messages and no final TSIG (`CVE-2026-19033`). TCP is parsed per segment (no
   stream reassembly); the capture uses a full 65535-byte snaplen so large transfer segments
-  are not truncated.
+  are not truncated. `DNSD-062` an IXFR stream carrying an SOA record whose **owner name is not
+  the zone apex** — per ISC this makes the receiving BIND delete the zone's own SOA and then
+  terminate on the next refresh (`CVE-2021-25214`); IXFR legitimately carries many SOA records,
+  so the owner name is the discriminator, never the count.
   Plus `DNSD-007` a malformed/truncated response (TuDoor class) and `DNSD-011` an unsupported
   DNSSEC algorithm.
 - **mDNS tier (v6, UDP/5353)** — mDNS and unicast DNS share a wire format but not a rule set,
@@ -493,6 +500,42 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   spoofing stays with [SMB Watch](#smb-watch)); the three remote Avahi crafted-packet bugs
   (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002) are named only to document why they are out
   of scope (~5.0 CVSS v2, under the bar, not in CISA KEV).
+- **DDNS tier (v7, RFC 2136 opcode 5)** — a dynamic UPDATE forks to its own rule set (a writer is
+  not a resolver, so the unicast detectors never run on it). `DNSD-080` an UPDATE carrying no TSIG
+  and no SIG(0) that was answered **NOERROR** — the zone accepts unauthenticated writes (a UDP
+  source-IP ACL is exactly this and is itself the finding, a spoofable source being the whole
+  problem); `DNSD-081` an UPDATE answered NOERROR while its TSIG reports BADSIG/BADKEY/BADTIME or
+  carries an empty/truncated MAC — a **completed** authentication bypass, not an attempt
+  (`CVE-2017-3143`); `DNSD-082` an UPDATE from outside an operator-supplied permitted-updater list
+  (silent without that config — a learned allowlist would arm itself from whatever it saw first,
+  so it is deliberately not learned, and the in-app watcher leaves it unset).
+- **rDNS tier (v7, reverse DNS)** — no CVE, posture only. `DNSD-090` a reverse lookup for RFC 1918
+  / CGNAT / link-local / ULA space addressed to a resolver **outside private space** — internal
+  topology leaking to the public DNS (armed in the in-app watcher with the private-address table
+  itself, so a private PTR to a public resolver fires while an on-net resolver stays silent);
+  `DNSD-091` one source issuing many `ip6.arpa` queries that share a long leading nibble prefix in
+  one window — IPv6 reverse-tree enumeration (needs no baseline; the common-prefix rule is what
+  separates it from bulk reverse lookups).
+- **Link-local name-resolution & transport posture (v8)** — v8 captures four more protocols
+  (5353 already; now **5355 LLMNR**, **137 NBT-NS**, **853 DoT/DoQ**) and owns their *posture* — the
+  vulnerable **query** is the finding — while the **poisoned answer** stays with [SMB Watch](#smb-watch)
+  (Responder/Inveigh). *Unicast DNS-SD:* `DNSD-100` a `_services._dns-sd._udp` PTR query over
+  **unicast** DNS (enumerates every service type a zone publishes in one question; the same query
+  on `.local` is ordinary Bonjour and is not flagged), `DNSD-101` a DNS-SD PTR response fanning out
+  to excessive instances. *LLMNR (RFC 4795):* `DNSD-110` LLMNR in use at all (unauthenticated by
+  design, MS recommends disabling), `DNSD-111` a query to a multicast group other than
+  `224.0.0.252` / `ff02::1:3` (RFC 4795 says silently discard), `DNSD-112` a **WPAD** query over
+  LLMNR (the host will take proxy config from the first responder). *NBT-NS (RFC 1001/1002):*
+  `DNSD-120` NBT-NS in use, `DNSD-121` a **WPAD** query over NBNS — the MS16-077 fallback flaw
+  exploited *via NetBIOS name responses* (`CVE-2016-3213` / `CVE-2016-3236`), `DNSD-122` an NBSTAT
+  node-status sweep (host + domain-role enumeration). *Encrypted-DNS transport:* `DNSD-130` a DoT
+  session (TCP 853) and `DNSD-131` a DoQ session (UDP 853, confirmed by a QUIC long header) — census
+  only, flagged whether the server is inside the own-resolver prefixes (DoT to your resolver is good
+  practice, past it a bypass; armed in-app with the private-address table), `DNSD-132` an SVCB DDR/DNR
+  discovery probe, `DNSD-133` a cleartext query resolving a known public DoH hostname (a correlation
+  record TLS Watch can later join on an SNI). *TSIG / SIG(0):* `DNSD-140` a deprecated TSIG algorithm
+  (hmac-md5 / hmac-sha1), `DNSD-141` a TSIG fudge far above RFC 8945's 300 s (the fudge is the replay
+  window), `DNSD-142` a SIG(0) transaction signature observed.
 
 The stateless detectors (KeyTrap, NSEC3 iteration, bailiwick, algorithm) fire on a single
 response; the **baseline-gated** ones (DNSBomb, NXNS burst, NSEC3-encloser, water-torture,
