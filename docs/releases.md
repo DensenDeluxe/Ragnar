@@ -4,12 +4,13 @@
 
 ### 2026-10-22
 
-#### [#1006](https://github.com/PierreGode/Ragnar/pull/1006) — feat(site): sync /os download page Ulfberht card to red
+#### [#1006](https://github.com/PierreGode/Ragnar/pull/1006) — feat(site): /os Ulfberht card red + Huginn flasher link on the Forge page
 *branch `fix/os-mirror-red`*
 
 - **/os download page** now matches the ragnar.life landing page: the offensive **Ulfberht** edition card uses a **blood-red** accent instead of gold, so it reads distinct from the standard defensive edition at a glance.
 - Adds a `--red` palette and mirrors the `.card.gold` rules as `.card.red` (top accent rule, version pill, download button with white text for contrast, SHA accent); the Ulfberht `<article>` carries `class="card red"`.
 - Standard card stays steel/blue; the Forge banner keeps its gold. Pure CSS/markup — no behaviour change. Lands on the GitHub Pages mirror (`pierregode.github.io/Ragnar/os/`).
+- **Forge flasher** (`rusense_flasher/index.html`) gains a **Huginn Wardrive Node** section linking out to the Huginn web flasher (`pierregode.github.io/HuginnESP/`), mirroring the existing CYD cross-link so the ESP32 flashers are discoverable from one place. Serves on both the Pages flasher and `ragnar.life/forge/`.
 
 #### [#1004](https://github.com/PierreGode/Ragnar/pull/1004) — feat(net): DNS Watch v8 — LLMNR / NBT-NS / encrypted-DNS / DNS-SD / TSIG posture + BIND IXFR
 *branch `feature/dns-poison-v8`*
