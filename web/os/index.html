@@ -179,7 +179,7 @@
         <span class="chip">arm64 · Pi&nbsp;Lite</span>
         <span class="chip">Web UI :8000</span>
       </div>
-      <a class="dl" href="https://ragnar.life/images/RagnarOS-arm64.img.xz" download>
+      <a class="dl" href="https://ragnar.life/dl.php?f=std">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
         Download image
       </a>
@@ -201,7 +201,7 @@
         <span class="chip">arm64 · Kali base</span>
         <span class="chip">Nexmon</span>
       </div>
-      <a class="dl" href="https://ragnar.life/images/RagnarOS-Ulfberht-arm64.img.xz" download>
+      <a class="dl" href="https://ragnar.life/dl.php?f=ulf">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
         Download image
       </a>
@@ -266,6 +266,10 @@
       });
     });
   })();
+</script>
+<script>/* visit beacon (fire-and-forget; works cross-origin from the Pages mirror too) */
+  try{ navigator.sendBeacon && navigator.sendBeacon('https://ragnar.life/track.php?p=os'); }
+  catch(e){ try{ new Image().src = 'https://ragnar.life/track.php?p=os&t='+Date.now(); }catch(_){} }
 </script>
 </body>
 </html>
