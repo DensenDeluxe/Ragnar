@@ -4,6 +4,19 @@
 
 ### 2026-10-22
 
+#### [#1004](https://github.com/PierreGode/Ragnar/pull/1004) — feat(net): DNS Watch v8 — LLMNR / NBT-NS / encrypted-DNS / DNS-SD / TSIG posture + BIND IXFR
+*branch `feature/dns-poison-v8`*
+
+- **DNS Watch v8** refreshes the vendored `python/dns_doctor_passive/` engine with three new modules (`llmnr.py`, `nbns.py`, `encrypted.py`), captures four more protocols (**5355 LLMNR**, **137 NBT-NS**, **853 DoT/DoQ**, alongside 5353 mDNS), and adds three new **detected** CVEs plus five posture tiers:
+  - **BIND IXFR** `DNSD-062` — an IXFR stream carrying an SOA record whose owner name is **not the zone apex**, which makes the receiving BIND delete the zone's own SOA and terminate on the next refresh (**`CVE-2021-25214`**). IXFR legitimately carries many SOA records, so the owner name is the discriminator, never the count.
+  - **NBT-NS WPAD** `DNSD-121` — a WPAD name query over NBT-NS, the precondition for the **MS16-077** fallback flaw exploited *via NetBIOS name responses* (**`CVE-2016-3213`** / **`CVE-2016-3236`**).
+  - **Posture tiers (no CVE):** unicast **DNS-SD** service enumeration / PTR fan-out (`DNSD-100/101`); **LLMNR** in use / wrong-multicast-group / WPAD query (`DNSD-110..112`); **NBT-NS** in use / NBSTAT enumeration (`DNSD-120/122`); **encrypted-DNS transport** census — DoT (`DNSD-130`), DoQ (`DNSD-131`, confirmed by a QUIC long header), DDR/DNR discovery (`DNSD-132`), DoH-endpoint resolution with a TLS-Watch correlation record (`DNSD-133`); and **TSIG/SIG(0)** posture — weak HMAC, excessive fudge, SIG(0) in use (`DNSD-140..142`).
+- **The name-resolution boundary with SMB Watch is explicit:** this tier owns the *posture* (the vulnerable **query** — `DNSD-112`/`DNSD-121` fire on WPAD queries only), while the **poisoned answer** (Responder/Inveigh) stays with [SMB Watch](nettools.md#smb-watch). The NBNS WPAD name uses first-level NetBIOS encoding, so the detector matches the encoded form, not the literal string `WPAD`.
+- **Adapter:** capture filter now `(udp or tcp) and (port 53 or 5353 or 5355 or 137 or 853)` (matches the engine). The in-app watcher arms the encrypted-DNS own-resolver flag (`DNSD-130/131`) and the rDNS leak check with the **private-address table** (DoT/DoQ or a private PTR to a *public* resolver is the bypass/leak; to a private resolver it stays silent). All v8 tiers are enabled by default.
+- **CVE index +3 named / +3 detected → 413 named / 350 detected** (DNS Watch 37 → 40); all three attribute to DNS Watch, none deduped elsewhere. CREDITS.md / README.md counts synced.
+- **Self-test:** the vendored `dns_passive` suite grows **54 → 91** scenarios. Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token → card prose only, no JS/cache-bust.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
 #### [#1002](https://github.com/PierreGode/Ragnar/pull/1002) — feat(net): DNS Watch v7 — SIGRed + DDNS (RFC 2136) + rDNS tiers
 *branch `feature/dns-poison-v7`*
 

@@ -43,11 +43,78 @@ LAYER = "mdns"
 
 # DNS-SD service types the census reports, mapped to their code.
 CENSUS_SERVICES = {
-    "_matter._tcp":  ("DNSD-070", "Matter operational node"),
-    "_matterc._udp": ("DNSD-071", "Matter commissionable device (setup mode)"),
-    "_matterd._udp": ("DNSD-072", "Matter commissioner (controller or hub)"),
-    "_meshcop._udp": ("DNSD-073", "Thread border router"),
+    "_matter._tcp":    ("DNSD-070", "Matter operational node"),
+    "_matterc._udp":   ("DNSD-071", "Matter commissionable device (setup mode)"),
+    "_matterd._udp":   ("DNSD-072", "Matter commissioner (controller or hub)"),
+    "_meshcop._udp":   ("DNSD-073", "Thread border router"),
+    # The ephemeral-key border agent endpoint, alongside the ordinary
+    # PSKc one. Reported as presence rather than as an open window,
+    # because this tier could not establish from the wire whether the
+    # service is advertised continuously by a capable router or only
+    # while an epskc session is live -- and the louder reading is the
+    # one that would be wrong on every Thread border router in the
+    # building if the former is true.
+    "_meshcop-e._udp": ("DNSD-078", "Thread border agent, ephemeral-key endpoint"),
 }
+
+# Which fingerprint vocabulary applies to each service type. Matter
+# and Thread use DIFFERENT, case-differing key sets for the same kinds
+# of fact (Matter 'VP' vs Thread 'vn'), so the tables are separate and
+# the lookup is by service rather than by trying every key on every
+# record.
+MATTER_SERVICES = ("_matter._tcp", "_matterc._udp", "_matterd._udp")
+THREAD_SERVICES = ("_meshcop._udp", "_meshcop-e._udp")
+
+# Matter DNS-SD TXT keys, lowercased (RFC 6763 s6.4 makes key
+# comparison case-insensitive; Matter publishes them uppercase).
+# Only the keys with identification or posture value are named. The
+# session-timing and pairing-hint keys (SII, SAI, SAT, PH, PI, T) are
+# deliberately absent: they are tuning parameters with no security
+# content, and they CHANGE, which would churn a census keyed on them.
+MATTER_TXT = {
+    "vp": "vendor_product",      # "<vendorId>+<productId>", decimal
+    "dt": "device_type",         # 32-bit Matter device type ID
+    "dn": "device_name",         # USER-CHOSEN free text -- see cfg.mdns_include_device_name
+    "d":  "discriminator",       # 12-bit, distinguishes identical devices
+    "cm": "commissioning_mode",  # 0 = closed; non-zero = open (DNSD-077)
+    "ri": "rotating_device_id",
+    "icd": "intermittently_connected",
+}
+
+# Thread MeshCoP TXT keys (lowercase on the wire).
+THREAD_TXT = {
+    "rv": "record_version",
+    "tv": "thread_version",
+    "nn": "network_name",
+    "xp": "extended_pan_id",     # raw 8 bytes
+    "xa": "extended_address",    # raw 8 bytes, EUI-64
+    "vn": "vendor_name",
+    "mn": "model_name",
+    "sb": "state_bitmap",        # raw 4 bytes -- see fingerprint() for why
+    "omr": "omr_prefix",         # raw: Off-Mesh-Routable IPv6 prefix
+    "dn": "thread_domain_name",  # NOTE: Thread's 'dn' is a DOMAIN name, not a device name
+    "id": "border_agent_id",
+}
+
+# Keys the spec defines as INTEGERS, rendered as ints so a consumer
+# does not have to know which TXT values are numeric. An unparseable
+# value falls back to its raw text rather than being dropped: a
+# malformed CM should stay visible to whoever is debugging the device.
+TXT_INT_KEYS = {"dt", "d", "cm"}
+
+# Keys whose value is raw binary rather than text, rendered as hex.
+#
+# 'omr' and 'sb' are in here for the same reason, and it is worth
+# stating: their on-wire encodings could not be pinned from a source
+# that agreed with itself. 'sb' is a packed state bitmap whose
+# published bit layout is self-inconsistent in the one place it is
+# written down, and 'omr' carries an IPv6 prefix in an encoding this
+# build did not confirm. Both are therefore reported as hex EVIDENCE
+# and nothing is inferred from them -- no bit is named, no prefix is
+# rendered, and no finding is raised on either. A detector built on a
+# guessed bit layout is worse than no detector, because it is
+# confidently wrong on every border router on the link.
+TXT_BINARY_KEYS = {"xp", "xa", "sb", "id", "ri", "omr"}
 
 
 def _addr_text(raw):
@@ -121,18 +188,60 @@ def detect_census(msg, cfg, census_table, src_raw, now):
     out = []
     for svc, inst in census_records(msg):
         code, label = CENSUS_SERVICES[svc]
-        key = (svc, inst or "")
+        fp = describe(msg, svc, inst, cfg)
+        # The fingerprint is part of the KEY, as a boolean, for a
+        # reason worth keeping. A device's announcement does not always
+        # carry its TXT: a bare PTR response censuses the instance with
+        # nothing but a name, and if that were the only key the TXT
+        # arriving in the next packet would be suppressed forever and
+        # the fingerprint would be permanently invisible for exactly
+        # the devices that announce in pieces.
+        #
+        # Including a BOOLEAN rather than the fingerprint's contents
+        # bounds this at two emissions per instance -- one bare, one
+        # fingerprinted -- where keying on the contents would re-emit
+        # every time a device renamed itself or a timing parameter
+        # drifted, which is the churn CENSUS_CODES exists to prevent.
+        key = (svc, inst or "", bool(fp))
         if not census_table.first_sighting(key, now):
             continue
         who = f"'{inst}'" if inst else "an unnamed instance"
+        detail = f"{label} seen on this LAN: {who} advertising {svc}"
+        if fp:
+            detail += " -- " + _summarise(fp)
         out.append(finding(
             code, "local.",
-            f"{label} seen on this LAN: {who} advertising {svc}",
+            detail,
             {"service_type": svc, "instance": inst,
-             "source": _addr_text(src_raw),
+             "source": _addr_text(src_raw), "fingerprint": fp,
              "note": "census only -- presence, not a vulnerability"},
         ))
     return out
+
+
+def _summarise(fp):
+    """A one-line human summary, for the operator who reads the detail
+    string and never opens the evidence dict.
+
+    Ordered by what identifies the thing on the shelf first: the
+    user-chosen name, then the model, then the network. A vendor ID
+    identifies a product line; only the device name identifies the
+    lamp someone is standing next to, which is why it leads.
+    """
+    bits = []
+    for name, label in (("device_name", None),
+                        ("vendor_product", "VID+PID"),
+                        ("device_type", "device type"),
+                        ("model_name", None),
+                        ("vendor_name", None),
+                        ("network_name", "Thread network"),
+                        ("thread_version", "Thread"),
+                        ("node_id", "node")):
+        v = fp.get(name)
+        if v in (None, True):
+            continue
+        bits.append(f"{label} {v}" if label else str(v))
+    return ", ".join(bits) if bits else "no identifying TXT fields"
 
 
 # ======================================================================
@@ -231,4 +340,230 @@ def handle_mdns(msg, cfg, census_table, src_raw, dst_raw, ttl, local_nets, now):
     out += detect_off_link_source(msg, cfg, src_raw, dst_raw, local_nets)
     out += detect_off_link_unicast_response(msg, cfg, src_raw, dst_raw, local_nets)
     out += detect_census(msg, cfg, census_table, src_raw, now)
+    out += detect_commissioning_window(msg, cfg, census_table, src_raw, now)
+    return out
+
+
+# ======================================================================
+# MATTER / THREAD FINGERPRINT
+#
+# All of this is CLEARTEXT and already captured: mDNS discovery is the
+# only plane that names Matter at all, because operational traffic on
+# UDP 5540 is encrypted per session. So the fingerprint costs nothing
+# on the wire -- it is a decode of records the tier already reads.
+#
+# EVERYTHING HERE IS A CLAIM, NOT A FACT. mDNS is unauthenticated, so
+# a vendor ID is "what this host says it is". That is fine for a
+# census, and it is why no severity in this tier climbs on the
+# strength of a TXT value: DNSD-077 reports that a device SAYS its
+# window is open, which is exactly what the finding claims. Judging
+# whether an advertisement is legitimate at all remains smbwatch's
+# job under the existing boundary.
+# ======================================================================
+
+def split_matter_instance(instance):
+    """
+    An operational Matter instance name IS its identity: the 64-bit
+    compressed fabric ID and the 64-bit node ID in hex, hyphen-joined
+    (e.g. 2906C908D115D362-8FC7772401CD0696).
+
+    So the fabric and node IDs were already being captured before this
+    build -- as one opaque label. This splits it, which is what turns
+    the census from "Matter is here" into "these N nodes on these M
+    fabrics are here".
+
+    Returns (compressed_fabric_id, node_id) as lowercase hex, or None.
+    Strict on the shape: 16 hex digits either side and nothing else.
+    A looser parse would quietly accept any hyphenated instance name
+    and report halves of a user-chosen service name as fabric IDs.
+    """
+    if not instance or "-" not in instance:
+        return None
+    left, _, right = instance.partition("-")
+    if len(left) != 16 or len(right) != 16:
+        return None
+    try:
+        int(left, 16), int(right, 16)
+    except ValueError:
+        return None
+    return left.lower(), right.lower()
+
+
+def _render(key, value):
+    """One TXT value, rendered the way that field is actually defined."""
+    if value is None:
+        return True                      # boolean attribute, present
+    if key in TXT_BINARY_KEYS:
+        return value.hex()
+    text = value.decode("utf-8", "replace")
+    if key in TXT_INT_KEYS:
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    return text
+
+
+def txt_fingerprint(service, pairs, cfg):
+    """
+    Named fields for one service's TXT pairs.
+
+    The vocabulary is chosen BY SERVICE, not by trying both tables.
+    Matter and Thread both publish a 'dn' key and they mean different
+    things -- Matter's is the user-chosen DEVICE name, Thread's is the
+    DOMAIN name -- so a merged table would file a Thread domain under
+    a device name and put a network's topology where an operator reads
+    equipment labels.
+    """
+    if not cfg.mdns_fingerprint:
+        return {}
+    if service in MATTER_SERVICES:
+        table = MATTER_TXT
+    elif service in THREAD_SERVICES:
+        table = THREAD_TXT
+    else:
+        return {}
+    out = {}
+    for key, name in table.items():
+        if key not in pairs:
+            continue
+        if name == "device_name" and not cfg.mdns_include_device_name:
+            # Redacted rather than omitted, so a reader can tell the
+            # difference between "no name advertised" and "name
+            # withheld by configuration".
+            out["device_name"] = "<redacted by mdns_include_device_name=False>"
+            continue
+        out[name] = _render(key, pairs[key])
+    return out
+
+
+def _owns(rr, service, instance):
+    """Does this record belong to <instance>.<service>?
+
+    BOTH halves are compared, and the instance alone is not enough.
+    A Thread border router advertises the SAME instance name under
+    _meshcop._udp and _meshcop-e._udp, so matching on the instance
+    alone attributed the PSKc service's TXT to the ephemeral endpoint
+    -- harmless there, since it is one device, but the mechanism was
+    wrong: two genuinely different devices can share a human-readable
+    instance name ("Office Printer" under _ipp._tcp and under
+    _matterc._udp), and that would have filed one device's vendor,
+    model and network under the other.
+    """
+    return (parse.service_type_of(rr.name) == service
+            and parse.instance_of(rr.name) == instance)
+
+
+def _txt_pairs_for(msg, service, instance):
+    """Merge the TXT pairs of every TXT record owned by this instance.
+
+    Merged across records because a device may split its attributes
+    over more than one TXT record in the same announcement, and
+    first-occurrence-wins is already enforced inside each record.
+    """
+    merged = {}
+    for rr in msg.answers + msg.additional:
+        if rr.rtype != parse.T_TXT or not _owns(rr, service, instance):
+            continue
+        for k, v in (rr.parsed or {}).get("pairs", {}).items():
+            merged.setdefault(k, v)
+    return merged
+
+
+def _srv_for(msg, service, instance):
+    """Port and target host for this instance, if an SRV is present.
+
+    SRV has been decoded by the parser since the mDNS build but only
+    its target was ever read; the port is the part that tells an
+    operator where the thing actually listens.
+    """
+    for rr in msg.answers + msg.additional:
+        if rr.rtype != parse.T_SRV or not _owns(rr, service, instance):
+            continue
+        p = rr.parsed or {}
+        t = p.get("target")
+        return {"port": p.get("port"),
+                "host": t.text() if t is not None else None}
+    return None
+
+
+def describe(msg, service, instance, cfg):
+    """Full fingerprint for one censused instance."""
+    fp = {}
+    pairs = _txt_pairs_for(msg, service, instance)
+    fp.update(txt_fingerprint(service, pairs, cfg))
+    if service == "_matter._tcp":
+        ids = split_matter_instance(instance)
+        if ids:
+            fp["compressed_fabric_id"], fp["node_id"] = ids
+    srv = _srv_for(msg, service, instance)
+    if srv:
+        fp["srv"] = srv
+    return fp
+
+
+# ======================================================================
+# DNSD-077 -- the device's own statement that its window is open
+# ======================================================================
+
+def detect_commissioning_window(msg, cfg, table, src_raw, now):
+    """
+    A non-zero CM in a Matter TXT record.
+
+    WHY THIS EXISTS ALONGSIDE DNSD-071. DNSD-071 fires on the presence
+    of _matterc._udp and infers "setup mode" from it. That inference is
+    weaker than it looks: the service type says the device is
+    commissionABLE, while CM says whether the window is open RIGHT NOW.
+    A device can advertise the service with CM=0. So DNSD-077 is the
+    authoritative statement and DNSD-071 is the hint, which is why one
+    is a warning and the other a notice.
+
+    WHAT IS DELIBERATELY NOT CLAIMED: the difference between CM=1 and
+    CM=2. Both are non-zero and both mean the window is open; which
+    one corresponds to which commissioning method, and whether either
+    uses the factory-printed passcode, could not be established from a
+    source that stated it plainly. So the raw value goes in the
+    evidence and the finding claims only what CM=0-versus-non-zero
+    supports. Naming CM=2 "the weaker mode" in a detail string would
+    have been a guess an operator then acts on.
+
+    SUPPRESSION INCLUDES THE CM VALUE, so a window opening and closing
+    re-reports once per state change rather than once per announcement
+    -- mDNS devices re-announce constantly, and a commissioning window
+    is precisely the transient an operator wants the edges of.
+    """
+    if not cfg.mdns_enabled:
+        return []
+    out = []
+    for svc, inst in census_records(msg):
+        if svc not in MATTER_SERVICES:
+            continue
+        pairs = _txt_pairs_for(msg, svc, inst)
+        raw = pairs.get("cm")
+        if raw is None:
+            continue
+        try:
+            cm = int(raw.decode("ascii", "strict"))
+        except (ValueError, UnicodeDecodeError):
+            # A non-numeric CM is malformed, but inventing a finding
+            # for it would be a detector for a typo. The census still
+            # carries the raw value as evidence.
+            continue
+        if cm == 0:
+            continue
+        key = ("DNSD-077", svc, inst or "", cm)
+        if not table.first_sighting(key, now):
+            continue
+        fp = describe(msg, svc, inst, cfg)
+        who = f"'{inst}'" if inst else "an unnamed instance"
+        out.append(finding(
+            "DNSD-077", "local.",
+            f"Matter device {who} reports CM={cm} on {svc} -- its own TXT record says "
+            f"the commissioning window is open, so anything on this link can attempt "
+            f"to pair with it",
+            {"service_type": svc, "instance": inst, "commissioning_mode": cm,
+             "source": _addr_text(src_raw), "fingerprint": fp,
+             "note": "CM is self-reported over unauthenticated mDNS; it states intent, "
+                     "not whether pairing would succeed"},
+        ))
     return out

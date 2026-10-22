@@ -62,6 +62,118 @@ MDNS_UNICAST_BIT = 0x8000
 MDNS_CACHE_FLUSH_BIT = 0x8000
 QT_IXFR, QT_AXFR, QT_TKEY = 251, 252, 249
 
+# --- LLMNR (RFC 4795) ----------------------------------------------
+# Same wire format as DNS, different transport rules and a different
+# deprecation story: Microsoft recommends disabling it outright, so
+# its PRESENCE is the posture finding rather than any one packet.
+LLMNR_PORT = 5355
+LLMNR_V4_GROUP = bytes([224, 0, 0, 252])
+LLMNR_V6_GROUP = bytes.fromhex("ff020000000000000000000000010003")
+
+# RFC 4795 s2.5 DOES NOT REQUIRE TTL 255, and this comment is here so
+# nobody transfers the mDNS rule across. mDNS (RFC 6762 s11) makes 255
+# a MUST and DNSD-074 reports any other value. LLMNR says the TTL
+# "MAY be set to any value" and merely RECOMMENDS 255 for
+# compatibility with early RFC 3927 implementations. A TTL check on
+# LLMNR would therefore fire on conforming traffic -- it is not a
+# scope violation, it is allowed. The scope rule LLMNR actually has is
+# about the DESTINATION: a query sent to any multicast address other
+# than the two groups above MUST be silently discarded.
+LLMNR_TTL_IS_UNCONSTRAINED = True
+
+# LLMNR header flags that DNS does not have (RFC 4795 s2.1.1).
+LLMNR_FLAG_C = 0x0400      # Conflict: sender saw multiple responses
+LLMNR_FLAG_T = 0x0200      # Tentative: responder has not verified uniqueness
+
+# --- NBNS / NBT-NS (RFC 1001/1002) ---------------------------------
+# NBNS is NOT DNS on the wire despite the shared 12-byte header
+# layout, and the two differences are both traps:
+#
+#   1. NAMES use a two-level encoding. The first level splits each of
+#      16 name bytes into two 4-bit nibbles and maps each to 'A'+nibble,
+#      producing 32 printable characters that then travel as ONE
+#      ordinary DNS label. A DNS parser reads that label fine and
+#      returns gibberish -- "EJFDEBFEEBFACACACACACACACACACAAA" rather
+#      than "WPAD".
+#   2. OPCODE 5 means NAME REGISTRATION here, while in DNS it means
+#      UPDATE (RFC 2136). So NBNS traffic reaching the opcode router
+#      would be read as a dynamic update, and a registration storm
+#      would be reported as unsigned dynamic updates being accepted.
+#      Port 137 is therefore forked BEFORE the opcode fork.
+NBNS_PORT = 137
+NBNS_NAME_LABEL_LEN = 32           # the first-level-encoded label
+NBNS_NAME_BYTES = 16               # 15 chars + 1 suffix byte
+T_NB, T_NBSTAT = 32, 33            # 0x0020, 0x0021
+NBNS_OPCODE_QUERY = 0
+NBNS_OPCODE_REGISTRATION = 5
+NBNS_OPCODE_RELEASE = 6
+NBNS_OPCODE_WACK = 7
+NBNS_OPCODE_REFRESH = 8
+NBNS_OPCODES = {
+    0: "QUERY", 5: "REGISTRATION", 6: "RELEASE", 7: "WACK", 8: "REFRESH",
+}
+# The suffix byte is the NetBIOS "type", and it is what distinguishes
+# a workstation record from a domain-master-browser record under the
+# same name.
+NBNS_SUFFIX = {
+    0x00: "workstation", 0x03: "messenger", 0x1B: "domain master browser",
+    0x1C: "domain controllers", 0x1D: "master browser",
+    0x1E: "browser elections", 0x20: "file server",
+}
+
+# --- Encrypted DNS transports --------------------------------------
+# Port 853 carries DoT over TCP (RFC 7858) and DoQ over UDP (RFC 9250).
+# Nothing inside either is parseable, and that stays true -- what is
+# detectable is the TRANSPORT, which is a DNS posture question: these
+# bypass the resolver whose logs, RPZ and filtering an operator runs.
+DOT_PORT = DOQ_PORT = 853
+# A QUIC long header has the high bit of the first byte set (RFC 9000
+# s17.2). Checked so that arbitrary UDP/853 is not reported as DoQ.
+QUIC_LONG_HEADER_BIT = 0x80
+QUIC_FIXED_BIT = 0x40
+
+# RFC 9462 DDR / RFC 9463 DNR: a client discovers encrypted-DNS
+# endpoints by querying SVCB for these names IN CLEARTEXT on port 53.
+# That makes the intent to leave for an encrypted transport visible to
+# this module without any TLS parsing at all.
+DDR_RESOLVER_ARPA = ("resolver", "arpa")
+DDR_UNDERSCORE_DNS = "_dns"
+
+# Hostnames of public DoH/DoT resolvers. A CLEARTEXT A/AAAA/HTTPS
+# query for one of these is the resolution step that precedes the
+# encrypted session, so it is DNS-native evidence of an impending
+# bypass -- no SNI parsing, no overlap with tlswatch.
+#
+# Deliberately a list of KNOWN providers rather than a heuristic: there
+# is no way to recognise a private DoH endpoint from a DNS query, and
+# pretending otherwise would mean guessing. The honest limitation is
+# stated rather than papered over.
+DOH_PROVIDER_HOSTS = frozenset({
+    "dns.google", "dns64.dns.google",
+    "cloudflare-dns.com", "one.one.one.one", "mozilla.cloudflare-dns.com",
+    "security.cloudflare-dns.com", "family.cloudflare-dns.com",
+    "dns.quad9.net", "dns9.quad9.net", "dns10.quad9.net", "dns11.quad9.net",
+    "doh.opendns.com", "doh.familyshield.opendns.com",
+    "dns.nextdns.io", "doh.cleanbrowsing.org",
+    "dns.adguard.com", "dns-unfiltered.adguard.com",
+    "doh.mullvad.net", "adblock.doh.mullvad.net",
+    "dns.sb", "doh.sb", "doh.dns.sb",
+    "dns.controld.com", "freedns.controld.com",
+    "odvr.nic.cz", "dnsforge.de", "doh.libredns.gr",
+})
+
+# --- DNS-SD meta-query (RFC 6763 s9) -------------------------------
+# A PTR query for _services._dns-sd._udp enumerates EVERY service type
+# in a zone or on a link.
+DNSSD_META = ("_services", "_dns-sd", "_udp")
+
+# --- TSIG posture --------------------------------------------------
+# RFC 8945 s5.2 deprecates these for new deployments.
+TSIG_WEAK_ALGOS = frozenset({"hmac-md5.sig-alg.reg.int.", "hmac-sha1."})
+# RFC 8945 s5.2.1 recommends 300 seconds. A larger fudge widens the
+# window in which a captured TSIG can be replayed.
+TSIG_RECOMMENDED_FUDGE = 300
+
 # SIG (24) is the OBSOLETE predecessor of RRSIG (46) with an identical
 # rdata layout. It matters because Windows DNS parses BOTH through one
 # function (SigWireRead) -- so SIGRed is reachable through either type
@@ -498,6 +610,10 @@ def _parse_rdata(rr, buf, rdoff, ptr_sink=None):
             # but never which device is advertising it.
             target, _ = parse_name(buf, rdoff, ptr_sink=ptr_sink)
             rr.parsed = {"target": target}
+        elif rr.rtype == T_TXT:
+            strings, err = txt_strings(rr.rdata)
+            rr.parsed = {"strings": strings, "txt_error": err,
+                         "pairs": txt_pairs(strings)}
         elif rr.rtype == T_SRV and rr.rdlength >= 7:
             rr.parsed = {
                 "priority": _u16(buf, rdoff),
@@ -1017,3 +1133,234 @@ def _parse_tkey(buf, rdoff, rr):
     if out["gssapi"] and key_size:
         out["spnego_error"] = spnego_struct_error(buf[key_start:key_end])
     return out
+
+
+# =====================================================================
+# DNS-SD TXT rdata (RFC 1035 s3.3.14 wire form, RFC 6763 s6 key/value)
+#
+# TXT rdata is NOT one string. It is a SEQUENCE of length-prefixed
+# strings, and treating it as one is the single most common way to
+# misread it -- a Matter device packs a dozen key/value pairs into one
+# record as a dozen separate strings. Everything downstream of here
+# (the Matter and Thread fingerprints) reads whatever this returns, so
+# it is written as a validator first, exactly like the TSIG and SPNEGO
+# decoders: total, bounded, and explicit about why it stopped.
+# =====================================================================
+
+# A TXT record may legally hold many strings, and an attacker controls
+# how many. Bounded for the same reason the DER walk is: this runs at
+# line rate on a Pi Zero 2W.
+TXT_MAX_STRINGS = 128
+# RFC 6763 s6.4: the key is everything before the first '='. A string
+# with no '=' is a BOOLEAN attribute whose presence is the value, and
+# a string that begins with '=' has no key and must be ignored.
+TXT_KV_SEP = 0x3D          # '='
+
+
+def txt_strings(rdata):
+    """
+    Split TXT rdata into its length-prefixed strings.
+
+    Returns (strings, error) where error is None when the rdata was
+    consumed exactly. A partial read still returns what was readable:
+    a device with one malformed trailing string should still be
+    identifiable from the dozen good ones ahead of it.
+    """
+    out = []
+    i, n = 0, len(rdata)
+    while i < n:
+        if len(out) >= TXT_MAX_STRINGS:
+            return out, f"more than {TXT_MAX_STRINGS} strings in one TXT record"
+        ln = rdata[i]
+        i += 1
+        if i + ln > n:
+            return out, (f"TXT string claims {ln} bytes but only {n - i} remain "
+                         f"in the rdata")
+        # A zero-length string is LEGAL: RFC 6763 s6.1 uses a single
+        # empty string as the way to say "this service has no TXT
+        # data", so it must not be treated as a terminator or an error.
+        out.append(rdata[i:i + ln])
+        i += ln
+    return out, None
+
+
+def txt_pairs(strings):
+    """
+    RFC 6763 s6.4 key/value extraction.
+
+    Returns a dict of {key: value_or_None}, where None means a boolean
+    attribute present with no '='. Keys are compared CASE-INSENSITIVELY
+    per s6.4 and stored lowercase, because Matter publishes 'VP' while
+    Thread publishes 'vn' and a case-sensitive table would silently
+    half-work.
+
+    VALUES ARE KEPT AS RAW BYTES, not decoded to str. RFC 6763 s6.5
+    permits arbitrary binary in a value, and Thread puts raw 8-byte
+    extended PAN IDs and IPv6 prefixes in there. Decoding here would
+    either throw or mangle them; the fingerprint layer decodes each
+    field the way that field is actually defined.
+
+    FIRST OCCURRENCE WINS, per s6.4: a duplicate key is to be ignored
+    rather than overwrite, and doing it the other way round would let a
+    spoofer append a second 'CM=0' to mask a real one.
+    """
+    pairs = {}
+    for s in strings:
+        if not s:
+            continue
+        eq = s.find(bytes([TXT_KV_SEP]))
+        if eq == 0:
+            continue                      # no key -- ignore per s6.4
+        if eq < 0:
+            key, val = s, None            # boolean attribute
+        else:
+            key, val = s[:eq], s[eq + 1:]
+        k = key.decode("ascii", "replace").lower()
+        if k in pairs:
+            continue                      # first occurrence wins
+        pairs[k] = val
+    return pairs
+
+
+# =====================================================================
+# NBNS first-level name decoding (RFC 1001 s4.1, RFC 1002 s4.2)
+#
+# This is the second name codec in this module, and it exists because
+# NBNS names only LOOK like DNS labels. Each of 16 name bytes is split
+# into two 4-bit nibbles and each nibble is mapped to 'A' + nibble,
+# producing exactly 32 printable characters that then travel as one
+# ordinary DNS label. A DNS parser reads that label without complaint
+# and hands back "EJFDEBFEEBFACACACACACACACACACAAA" -- which is why
+# WPAD-over-NBNS is invisible without this function, not merely
+# awkward to read.
+# =====================================================================
+
+def decode_nbns_label(label):
+    """
+    Decode one first-level-encoded NBNS label.
+
+    Returns (name, suffix_byte) with the name stripped of its trailing
+    pad spaces, or None when the label is not a well-formed encoding.
+    Returning None rather than a partial decode is deliberate: a
+    half-decoded NetBIOS name is a string that looks like a hostname
+    and is not one, and every caller here compares it against "WPAD".
+    """
+    if len(label) != NBNS_NAME_LABEL_LEN:
+        return None
+    out = bytearray()
+    for i in range(0, NBNS_NAME_LABEL_LEN, 2):
+        hi, lo = label[i], label[i + 1]
+        # Only 'A'..'P' are legal: the encoding maps a 4-bit nibble to
+        # 'A' + nibble, so anything outside that range means this is a
+        # 32-character DNS label that is not an NBNS name at all.
+        if not (0x41 <= hi <= 0x50) or not (0x41 <= lo <= 0x50):
+            return None
+        out.append(((hi - 0x41) << 4) | (lo - 0x41))
+    if len(out) != NBNS_NAME_BYTES:
+        return None
+    suffix = out[-1]
+    name = bytes(out[:-1]).rstrip(b" ")
+    return name.decode("ascii", "replace"), suffix
+
+
+def nbns_name(name_obj):
+    """
+    Decode an NBNS question/record name.
+
+    Returns a dict with the decoded NetBIOS name, its suffix byte and
+    what that suffix means, plus any SCOPE labels that followed. Scope
+    is almost always empty in practice but is part of the format, and
+    dropping it silently would merge two names that NetBIOS considers
+    distinct.
+    """
+    if name_obj is None or not name_obj.labels:
+        return None
+    first = decode_nbns_label(name_obj.labels[0])
+    if first is None:
+        return None
+    nb, suffix = first
+    scope = [l.decode("ascii", "replace") for l in name_obj.labels[1:]]
+    return {
+        "netbios_name": nb,
+        "suffix": suffix,
+        "suffix_name": NBNS_SUFFIX.get(suffix, f"0x{suffix:02X}"),
+        "scope": ".".join(scope),
+        "encoded": name_obj.labels[0].decode("ascii", "replace"),
+    }
+
+
+def encode_nbns_label(name, suffix=0x00):
+    """First-level ENCODER, for fixtures and for the cross-check.
+
+    Kept beside the decoder on purpose: the lab and the test tiers need
+    to produce real NBNS names, and a hand-built encoding in a fixture
+    is exactly the miscount that wasted three rounds on the TXT work.
+    The cross-check asserts encode/decode round-trips AND that the
+    bytes match an independent construction.
+    """
+    padded = name.upper().encode("ascii")[:15].ljust(15, b" ") + bytes([suffix])
+    out = bytearray()
+    for b in padded:
+        out.append(0x41 + (b >> 4))
+        out.append(0x41 + (b & 0x0F))
+    return bytes(out)
+
+
+# =====================================================================
+# Transport / name predicates for the new tiers
+# =====================================================================
+
+def is_llmnr_group(addr):
+    """Is this one of the two LLMNR link-scope multicast groups?"""
+    return addr in (LLMNR_V4_GROUP, LLMNR_V6_GROUP)
+
+
+def is_quic_long_header(payload):
+    """A QUIC long header, per RFC 9000 s17.2.
+
+    Checked so arbitrary UDP/853 is not reported as DoQ. The fixed bit
+    is checked too: RFC 9000 requires it set, and a packet with the
+    long-header bit but not the fixed bit is not QUIC.
+    """
+    if not payload:
+        return False
+    first = payload[0]
+    return bool(first & QUIC_LONG_HEADER_BIT) and bool(first & QUIC_FIXED_BIT)
+
+
+def is_ddr_query_name(labels):
+    """RFC 9462 DDR / RFC 9463 DNR discovery names.
+
+    Two shapes count: the well-known `_dns.resolver.arpa`, and the
+    `_dns.<resolver-name>` form a network hands out through DHCP or RA.
+    Matching the leading `_dns` label alone would be too loose -- it is
+    a legal DNS-SD service label -- so the arpa form is matched in
+    full and the generic form requires `_dns` to be the FIRST label of
+    an SVCB query, which the caller checks.
+    """
+    if not labels:
+        return None
+    low = [l.lower() for l in labels]
+    if low[0] != DDR_UNDERSCORE_DNS.encode():
+        return None
+    rest = tuple(l.decode("ascii", "replace") for l in low[1:])
+    if rest == DDR_RESOLVER_ARPA:
+        return "resolver.arpa"
+    return ".".join(rest) or "."
+
+
+def is_dnssd_meta_query(labels):
+    """A PTR query for _services._dns-sd._udp.<domain>.
+
+    Returns the domain it enumerates, or None. The domain matters: on
+    `.local` this is ordinary Bonjour browsing that any Mac does on
+    joining a network, while against a real zone over unicast it is
+    service enumeration. The caller uses the distinction; this only
+    reports it.
+    """
+    if len(labels) < 3:
+        return None
+    head = tuple(l.lower().decode("ascii", "replace") for l in labels[:3])
+    if head != DNSSD_META:
+        return None
+    return ".".join(l.decode("ascii", "replace") for l in labels[3:]) or "."

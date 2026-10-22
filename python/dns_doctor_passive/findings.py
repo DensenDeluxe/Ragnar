@@ -23,10 +23,17 @@ Code ranges by detector class:
   030-039  response integrity (SAD DNS)
   040-049  DNSSEC structural integrity (RRSIG labels, NSEC/NSEC3 chain)
   050-059  protocol abuse (SVCB alias fan-out, EDNS options, duplicate RRs, TKEY)
-  060-069  zone transfer integrity (TSIG coverage across multi-message XFR)
-  070-079  mDNS (RFC 6762 / DNS-SD): Matter+Thread census, scope violations
+  060-069  zone transfer: TSIG coverage, completed-transfer disclosure,
+           RFC 5936 / RFC 1995 structure, undefined transport
+  070-079  mDNS (RFC 6762 / DNS-SD): Matter+Thread census and fingerprint,
+           scope violations, commissioning-window posture
   080-089  DDNS (RFC 2136 opcode 5): dynamic-update posture
   090-099  rDNS (PTR): private reverse leak, ip6.arpa tree enumeration
+  100-109  DNS-SD over unicast: service-type enumeration, PTR fan-out
+  110-119  LLMNR (RFC 4795): deprecated-protocol posture, scope, WPAD
+  120-129  NBNS / NBT-NS (RFC 1001/1002): posture, WPAD, NBSTAT recon
+  130-139  encrypted-DNS transport (DoT/DoQ/DDR): resolver bypass
+  140-149  TSIG / SIG(0) posture: weak algorithm, replay window
 
 CONFIDENCE is separate from SEVERITY on purpose (LESSON T): severity
 says how bad it would be if real, confidence says how sure the wire
@@ -198,6 +205,27 @@ FINDINGS = {
         "desc": "A multi-message TCP zone transfer completed with unsigned intermediate messages and no final TSIG -- a secondary applying this has already served unrolled-back data (RFC 8945). Detects the COMPLETED attack, not an attempt",
     },
 
+    "DNSD-061": {
+        "name": "XFR_COMPLETED_TO_UNEXPECTED_CLIENT", "severity": "critical", "confidence": "high",
+        "cve": None, "klass": "transfer", "stateful": True,
+        "desc": "A zone transfer COMPLETED to a client outside the operator-supplied list of permitted secondaries -- the whole zone has already been handed over, so this reports a finished disclosure rather than an attempt. Requires that configuration and is silent without it",
+    },
+    "DNSD-062": {
+        "name": "IXFR_SOA_OWNER_NOT_APEX", "severity": "warning", "confidence": "high",
+        "cve": "CVE-2021-25214", "klass": "transfer", "stateful": False,
+        "desc": "An IXFR stream carries an SOA record whose owner name is not the transferred zone's apex. Per ISC this makes the receiving BIND delete the zone's own SOA, and named then terminates on the next refresh query for that zone. IXFR legitimately contains MANY SOA records -- the RFC 1995 example has six -- so the owner name is the discriminator, never the count",
+    },
+    "DNSD-063": {
+        "name": "AXFR_STRUCTURE_VIOLATION", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "transfer", "stateful": True,
+        "desc": "An AXFR stream breaks RFC 5936 s2.2: an intermediate message carries an SOA, the first message does not begin with the zone's apex SOA, or an SOA owner is not the apex. AXFR-ONLY by construction -- RFC 1995 uses SOA records as IXFR delta markers, so applying this rule to IXFR would fire on every conforming incremental transfer",
+    },
+    "DNSD-064": {
+        "name": "AXFR_OVER_UDP", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "transfer", "stateful": False,
+        "desc": "An AXFR query arrived over UDP. RFC 5936 s4.2: 'AXFR sessions over UDP transport are not defined' -- no conforming client sends this, and it is the shape of a reconnaissance or amplification probe. AXFR-ONLY: RFC 1995 s2 explicitly PERMITS IXFR over UDP, so including IXFR here would report conforming traffic",
+    },
+
     # --- mDNS tier (070-079) --------------------------------------
     # Two legs, deliberately separate concerns:
     #   census   (070-073) -- what Matter/Thread exists on this LAN
@@ -244,6 +272,17 @@ FINDINGS = {
         "desc": "An mDNS responder answered to an off-link unicast destination (CERT VU#550620) -- it is an open reflector: DDoS amplification fuel and an information leak of every service it advertises",
     },
 
+    "DNSD-077": {
+        "name": "MDNS_MATTER_COMMISSIONING_WINDOW_OPEN", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Matter device's own TXT record reports a non-zero CM (commissioning mode) -- it states that its pairing window is open right now, so anything on this link can attempt to commission it. Stronger than DNSD-071, which only infers setup mode from the service type being advertised at all",
+    },
+    "DNSD-078": {
+        "name": "MDNS_THREAD_BORDER_AGENT_EPHEMERAL", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Thread border agent is advertising the ephemeral-key commissioning service (_meshcop-e._udp) -- an epskc endpoint alongside the ordinary PSKc one. Census only: reported as presence because this tier could not establish from the wire whether the endpoint is advertised continuously or only while a session is live",
+    },
+
     # --- DDNS tier (080-089) --------------------------------------
     # RFC 2136 UPDATE, opcode 5. Both posture codes report an OUTCOME
     # read off the server's own answer, not an attempt: "someone tried
@@ -281,6 +320,106 @@ FINDINGS = {
         "cve": None, "klass": "rdns", "stateful": True,
         "desc": "One source issued many distinct ip6.arpa queries sharing a long leading nibble prefix inside one window -- reverse-tree enumeration, which turns RFC 8020's NXDOMAIN-versus-empty-non-terminal distinction into an IPv6 host-discovery oracle. The common-prefix requirement is what separates it from bulk reverse lookups",
     },
+
+    # --- DNS-SD over unicast (100-109) ----------------------------
+    "DNSD-100": {
+        "name": "DNSSD_SERVICE_ENUMERATION", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "dns-sd", "stateful": True,
+        "desc": "A PTR query for _services._dns-sd._udp against a real zone over unicast DNS (RFC 6763 s9) -- this enumerates EVERY service type published in that zone in one question. Restricted to unicast: the same query on .local is ordinary Bonjour browsing that any laptop does on joining a network",
+    },
+    "DNSD-101": {
+        "name": "DNSSD_PTR_FANOUT", "severity": "warning", "confidence": "medium",
+        "cve": None, "klass": "dns-sd", "stateful": False,
+        "desc": "One DNS-SD PTR response enumerates an excessive number of service instances -- both an amplification vector (a small question, a large answer) and the shape of a successful enumeration being answered",
+    },
+
+    # --- LLMNR (110-119) ------------------------------------------
+    # NO CVE TIER. The LLMNR weaknesses that matter are protocol
+    # DESIGN, not implementation bugs, and a CVE search turned up no
+    # qualifying LLMNR-specific set. Posture only -- same honest
+    # verdict as the rDNS leg.
+    #
+    # BOUNDARY WITH smbwatch: smbwatch owns LLMNR/NBT-NS name
+    # POISONING (Responder/Inveigh). This tier never judges whether an
+    # LLMNR answer is legitimate -- only that the protocol is in use,
+    # that transport rules were broken, and what is being asked for.
+    "DNSD-110": {
+        "name": "LLMNR_IN_USE", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "llmnr", "stateful": True,
+        "desc": "LLMNR traffic was observed on UDP/TCP 5355. LLMNR has no authentication by design and Microsoft recommends disabling it, so its presence is attack surface with no legitimate requirement on a managed network -- the finding is that it is on at all, not that any one packet is bad",
+    },
+    "DNSD-111": {
+        "name": "LLMNR_WRONG_MULTICAST_GROUP", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "llmnr", "stateful": False,
+        "desc": "An LLMNR query arrived addressed to a multicast group other than 224.0.0.252 or ff02::1:3, which RFC 4795 s2 says a responder MUST silently discard -- a conforming sender never produces this, so it is a malformed stack or an attempt to reach responders that do not check",
+    },
+    "DNSD-112": {
+        "name": "LLMNR_WPAD_QUERY", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "llmnr", "stateful": True,
+        "desc": "A host asked for WPAD over LLMNR, so it is configured to accept a web-proxy configuration from whoever answers first on the link. The vulnerable state is the query, which this sees; the poisoned answer is smbwatch's half",
+    },
+
+    # --- NBNS / NBT-NS (120-129) ----------------------------------
+    "DNSD-120": {
+        "name": "NBNS_IN_USE", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "nbns", "stateful": True,
+        "desc": "NetBIOS Name Service traffic was observed on UDP 137. NBT-NS is older and more thoroughly deprecated than LLMNR, unauthenticated by design, and present on a modern network only through legacy configuration",
+    },
+    "DNSD-121": {
+        "name": "NBNS_WPAD_QUERY", "severity": "warning", "confidence": "high",
+        "cve": "CVE-2016-3213, CVE-2016-3236", "klass": "nbns", "stateful": True,
+        "desc": "A host asked for the WPAD name over NBNS. This is the precondition for the MS16-077 WPAD fallback flaw (CVE-2016-3213, CVSS 8.8), which is exploited 'via NetBIOS name responses' -- a host still emitting this query will take its proxy configuration from the first responder on the link",
+    },
+    "DNSD-122": {
+        "name": "NBNS_NBSTAT_ENUMERATION", "severity": "warning", "confidence": "medium",
+        "cve": None, "klass": "nbns", "stateful": True,
+        "desc": "Repeated NBSTAT (node status) queries from one source -- NBSTAT returns a host's full NetBIOS name table and its MAC address, so a sweep of them is host and domain-role enumeration",
+    },
+
+    # --- encrypted-DNS transport (130-139) ------------------------
+    # The README previously called DoT/DoH an honest zero, and half of
+    # that stands: nothing INSIDE an encrypted transport is parseable
+    # and never will be. What is detectable is the transport itself,
+    # which is a different and genuinely operational question for
+    # anyone running their own resolvers -- these bypass the logging,
+    # RPZ and filtering that resolver provides.
+    "DNSD-130": {
+        "name": "DNS_OVER_TLS_OBSERVED", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "encrypted-transport", "stateful": True,
+        "desc": "A DNS-over-TLS session (TCP 853, RFC 7858) was observed. Census only: reported once per client/server pair, with whether the server sits inside the configured own-resolver prefixes, because DoT to your own resolver is good practice and DoT past it is a bypass",
+    },
+    "DNSD-131": {
+        "name": "DNS_OVER_QUIC_OBSERVED", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "encrypted-transport", "stateful": True,
+        "desc": "A DNS-over-QUIC session (UDP 853, RFC 9250) was observed, confirmed by a QUIC long header rather than by port alone. Census only, same reasoning as DoT",
+    },
+    "DNSD-132": {
+        "name": "ENCRYPTED_DNS_DISCOVERY", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "encrypted-transport", "stateful": True,
+        "desc": "A client issued an SVCB query for a DDR/DNR discovery name (RFC 9462 _dns.resolver.arpa, or RFC 9463 _dns.<resolver>) -- it is probing to upgrade itself off cleartext DNS. Visible here because the probe itself travels in cleartext on port 53",
+    },
+    "DNSD-133": {
+        "name": "DOH_ENDPOINT_RESOLUTION", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "encrypted-transport", "stateful": True,
+        "desc": "A cleartext query resolved the hostname of a known public DoH resolver -- the step that precedes an encrypted session this sensor will not be able to read. Carries a correlation record (client, hostname, answer addresses) for tlswatch to join a later TLS session against, because DoH on 443 is identifiable only from the SNI and this module does not parse TLS",
+    },
+
+    # --- TSIG / SIG(0) posture (140-149) --------------------------
+    "DNSD-140": {
+        "name": "TSIG_WEAK_ALGORITHM", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "tsig-posture", "stateful": False,
+        "desc": "A TSIG used hmac-md5 or hmac-sha1, both deprecated for new deployments by RFC 8945 s5.2. The key itself is unobservable, so this reports the algorithm in use and nothing about the key's strength",
+    },
+    "DNSD-141": {
+        "name": "TSIG_EXCESSIVE_FUDGE", "severity": "warning", "confidence": "high",
+        "cve": None, "klass": "tsig-posture", "stateful": False,
+        "desc": "A TSIG's fudge field is far above the 300 seconds RFC 8945 s5.2.1 recommends -- the fudge IS the replay window, so a large one means a captured signed message stays replayable for that long",
+    },
+    "DNSD-142": {
+        "name": "SIG0_IN_USE", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "tsig-posture", "stateful": True,
+        "desc": "A SIG(0) transaction signature was observed (RFC 2931). SIG(0) was largely abandoned in favour of TSIG and brings public-key management into the transaction path; its presence is worth knowing about rather than alarming over",
+    },
 }
 
 # Codes whose detector needs a LEARNED per-zone baseline before it can
@@ -292,12 +431,22 @@ BASELINE_DEPENDENT = {"DNSD-020", "DNSD-021", "DNSD-022"}
 # once per (service, instance) and then suppressed. mDNS hosts
 # re-announce constantly -- without this the census would emit on
 # every announcement packet and drown the feed it is meant to inform.
-CENSUS_CODES = {"DNSD-070", "DNSD-071", "DNSD-072", "DNSD-073"}
+CENSUS_CODES = {"DNSD-070", "DNSD-071", "DNSD-072", "DNSD-073", "DNSD-078",
+                "DNSD-130", "DNSD-131", "DNSD-142"}
+
+# Codes suppressed per instance like the census, but which are NOT
+# census codes -- so they may carry a severity above notice. The
+# distinction matters: CENSUS_CODES is the set the README promises is
+# "never an alarm", and DNSD-077 is an alarm. Its key includes the CM
+# value, so a window opening and closing re-reports once per state
+# change rather than once per announcement packet.
+INSTANCE_SUPPRESSED = {"DNSD-077", "DNSD-110", "DNSD-112", "DNSD-120",
+                       "DNSD-121", "DNSD-122", "DNSD-100", "DNSD-132", "DNSD-133"}
 
 # The two scope codes that cannot run without operator-supplied local
 # prefixes. Named here so the engine can report them as disabled
 # rather than silently never firing.
-PREFIX_DEPENDENT = {"DNSD-075", "DNSD-076", "DNSD-082", "DNSD-090"}
+PREFIX_DEPENDENT = {"DNSD-061", "DNSD-075", "DNSD-076", "DNSD-082", "DNSD-090"}
 
 # Which config key each prefix-dependent code waits on. They are NOT
 # the same key: an mDNS local prefix is "this link", a DDNS updater
@@ -305,6 +454,7 @@ PREFIX_DEPENDENT = {"DNSD-075", "DNSD-076", "DNSD-082", "DNSD-090"}
 # prefix is "my organisation's resolvers". Collapsing them into one
 # list would make each check wrong in the other two's terms.
 PREFIX_CONFIG_KEY = {
+    "DNSD-061": "xfr_allowed_secondary_prefixes",
     "DNSD-075": "mdns_local_prefixes",
     "DNSD-076": "mdns_local_prefixes",
     "DNSD-082": "ddns_allowed_updater_prefixes",
@@ -329,9 +479,19 @@ def _validate():
         seen_names.add(m["name"])
         assert m["klass"] in ("structural", "posture", "behavioural", "integrity",
                               "dnssec-integrity", "protocol-abuse", "transfer", "mdns",
-                              "ddns", "rdns")
+                              "ddns", "rdns", "dns-sd", "llmnr", "nbns",
+                              "encrypted-transport", "tsig-posture")
     assert BASELINE_DEPENDENT <= set(FINDINGS), "BASELINE_DEPENDENT names an unknown code"
     assert PREFIX_DEPENDENT <= set(FINDINGS), "PREFIX_DEPENDENT names an unknown code"
+    assert CENSUS_CODES <= set(FINDINGS), "CENSUS_CODES names an unknown code"
+    assert INSTANCE_SUPPRESSED <= set(FINDINGS), "INSTANCE_SUPPRESSED names an unknown code"
+    assert not (CENSUS_CODES & INSTANCE_SUPPRESSED), (
+        "a code cannot be both a census code and an instance-suppressed alarm: "
+        "CENSUS_CODES is the set documented as never being an alarm")
+    for _c in CENSUS_CODES:
+        assert FINDINGS[_c]["severity"] == "notice", (
+            f"{_c} is a census code, so it must carry notice severity -- the README "
+            f"promises the census is never an alarm")
     assert set(PREFIX_CONFIG_KEY) == PREFIX_DEPENDENT, (
         "every prefix-dependent code must name the config key it waits on, "
         "or the engine cannot report it as disabled rather than silently dead")

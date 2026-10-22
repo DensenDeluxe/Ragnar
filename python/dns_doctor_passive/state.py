@@ -47,13 +47,18 @@ class Config:
                  "svcb_max_servicemode", "duplicate_rr_threshold",
                  "xfr_max_streams", "xfr_ttl_seconds",
                  "mdns_enabled", "mdns_local_prefixes", "mdns_census_max",
+                 "mdns_fingerprint", "mdns_include_device_name",
                  "ddns_enabled", "ddns_allowed_updater_prefixes",
                  "ddns_max_pending", "ddns_pending_ttl_seconds",
                  "rdns_enabled", "rdns_internal_prefixes",
                  "ip6_walk_enabled", "ip6_walk_window_seconds",
                  "ip6_walk_min_queries", "ip6_walk_min_distinct_ratio",
                  "ip6_walk_min_common_nibbles", "walk_max_sources",
-                 "sigred_report_near_miss")
+                 "sigred_report_near_miss", "xfr_allowed_secondary_prefixes",
+                 "llmnr_enabled", "nbns_enabled", "encrypted_dns_enabled",
+                 "dns_own_resolver_prefixes", "dnssd_enabled",
+                 "dnssd_max_instances", "nbstat_window_seconds",
+                 "nbstat_min_queries", "tsig_max_fudge", "posture_seen_max")
 
     def __init__(self, **kw):
         # LRU cap. MEASURED per-zone cost after lazy ring allocation:
@@ -122,6 +127,19 @@ class Config:
         # wrong on a carrier-neutral colo or ISP LAN.
         self.mdns_local_prefixes = ()
         self.mdns_census_max = 2048
+        # Decode Matter/Thread TXT records into a device fingerprint
+        # rather than reporting bare service types.
+        self.mdns_fingerprint = True
+        # The DNS-SD 'DN' key is the USER-CHOSEN device name ("Dave's
+        # Bedroom Lamp"). Included by default because it is the field
+        # that makes a census line actionable for smart-home
+        # troubleshooting -- a vendor ID identifies a model, only DN
+        # identifies the thing on the shelf.
+        #
+        # It is also tenant-chosen free text, so it lands in the
+        # findings feed verbatim. The switch exists for a deployment
+        # that must not retain it; the default is on.
+        self.mdns_include_device_name = True
 
         # --- DDNS tier (RFC 2136 opcode 5) -------------------------
         self.ddns_enabled = True
@@ -170,6 +188,50 @@ class Config:
         # SIGRed reports only the arithmetic that actually wraps.
         # See detect_sigred for why a near miss is deliberately silent.
         self.sigred_report_near_miss = False
+
+        # --- LLMNR / NBNS posture tiers ---------------------------
+        # Both ship ON, unlike the behavioural detectors, because
+        # neither needs a baseline: the finding is that a deprecated,
+        # unauthenticated name-resolution protocol is in use at all,
+        # which is a fact about one packet.
+        self.llmnr_enabled = True
+        self.nbns_enabled = True
+        self.nbstat_window_seconds = 60.0
+        self.nbstat_min_queries = 8
+
+        # --- encrypted-DNS transport tier -------------------------
+        self.encrypted_dns_enabled = True
+        # CIDRs of resolvers this operator runs. DoT/DoQ TO them is
+        # good practice; DoT/DoQ PAST them is a bypass of the logging,
+        # RPZ and filtering they provide. Without the config the
+        # census still reports the session and says the verdict is
+        # undecidable, rather than guessing which it was.
+        self.dns_own_resolver_prefixes = ()
+
+        # --- DNS-SD over unicast ----------------------------------
+        self.dnssd_enabled = True
+        # Instances behind one DNS-SD PTR response before it counts as
+        # a fan-out. A real service type on a real zone publishes a
+        # handful; an enumeration answer publishes everything.
+        self.dnssd_max_instances = 32
+
+        # --- TSIG posture -----------------------------------------
+        # RFC 8945 s5.2.1 recommends 300s. The fudge IS the replay
+        # window, so this is reported rather than assumed benign.
+        self.tsig_max_fudge = 300
+
+        # Shared first-sighting cap for every posture code that
+        # reports a STATE rather than an event.
+        self.posture_seen_max = 4096
+
+        # --- zone transfer ----------------------------------------
+        # CIDRs of secondaries permitted to pull your zones. DNSD-061
+        # reports a COMPLETED transfer to anything outside them and is
+        # silent without the config, for the same reason as every
+        # other prefix-gated code here: on an ISP tap the config-free
+        # version would fire on every legitimate transfer between your
+        # own nameservers.
+        self.xfr_allowed_secondary_prefixes = ()
 
         for k, v in kw.items():
             if not hasattr(self, k):
@@ -393,13 +455,24 @@ class XferStream:
     """
     One TCP zone-transfer conversation, keyed by 4-tuple.
 
-    Fixed size: five scalars, no buffers. This is the ONLY per-stream
-    state in the module and it exists solely for DNSD-060.
+    Fixed size: scalars and one small set of reported codes, no
+    record buffers. `reported` stays a plain bool for DNSD-060 and the
+    later codes each get their own flag, rather than one shared
+    "already reported" that would let whichever fired first silence
+    the others.
+
+    `client` is stored rather than re-derived from the table key.
+    The key is (server, client, server_port, client_port) and the
+    client is therefore key[1] -- but a detector that unpacked the key
+    itself would break silently the first time the key shape changed,
+    and the key shape has already changed once in this module.
     """
     __slots__ = ("started", "last_seen", "messages", "signed_messages",
-                 "last_signed", "soa_count", "qtype", "reported")
+                 "last_signed", "soa_count", "qtype", "reported",
+                 "client", "records", "first_message_done",
+                 "reported_leak", "reported_struct", "reported_apex", "apex")
 
-    def __init__(self, now, qtype):
+    def __init__(self, now, qtype, client=None):
         self.started = now
         self.last_seen = now
         self.messages = 0
@@ -408,6 +481,18 @@ class XferStream:
         self.soa_count = 0
         self.qtype = qtype
         self.reported = False
+        self.client = client
+        self.records = 0
+        self.first_message_done = False
+        self.reported_leak = False
+        self.reported_struct = False
+        self.reported_apex = False
+        # The transferred zone's apex, remembered from whichever
+        # message carried the Question section. RFC 5936 s2.2 requires
+        # only the FIRST message to copy it, so without this the apex
+        # checks could not run on later messages -- and CVE-2021-25214's
+        # malformed SOA has no reason to arrive in message one.
+        self.apex = None
 
 
 class XferTable:
@@ -426,13 +511,15 @@ class XferTable:
         self.cfg = cfg
         self.streams = OrderedDict()
 
-    def get(self, key, now, qtype=None):
+    def get(self, key, now, qtype=None, client=None):
         st = self.streams.get(key)
         if st is None:
             if len(self.streams) >= self.cfg.xfr_max_streams:
                 self.streams.popitem(last=False)
-            st = XferStream(now, qtype)
+            st = XferStream(now, qtype, client=client)
             self.streams[key] = st
+        elif st.client is None and client is not None:
+            st.client = client
         else:
             self.streams.move_to_end(key)
         st.last_seen = now
@@ -613,6 +700,55 @@ class WalkTable:
         st = WalkState(now, cap)
         self.entries[src] = st
         return st
+
+    def __len__(self):
+        return len(self.entries)
+
+
+class CounterTable:
+    """
+    Per-source event counts inside a sliding window.
+
+    Deliberately simpler than WalkTable: NBSTAT enumeration needs only
+    "how many from this source lately", with none of the distinctness
+    or common-prefix machinery the ip6.arpa walk depends on. Reusing
+    WalkState here by passing a query name as its nibble tuple would
+    have worked and would have left two unrelated detectors sharing a
+    structure whose fields mean different things in each -- which is
+    how a later change to one silently breaks the other.
+    """
+    __slots__ = ("cap", "window", "entries", "evictions")
+
+    def __init__(self, cap=1024, window=60.0):
+        self.cap = cap
+        self.window = window
+        self.entries = OrderedDict()
+        self.evictions = 0
+
+    def bump(self, key, now):
+        """Count one event and return the count inside the window."""
+        e = self.entries.get(key)
+        if e is None:
+            if len(self.entries) >= self.cap:
+                self.entries.popitem(last=False)
+                self.evictions += 1
+            e = [now, 0, False]       # window_start, count, reported
+            self.entries[key] = e
+        else:
+            self.entries.move_to_end(key)
+            if now - e[0] > self.window:
+                e[0], e[1], e[2] = now, 0, False
+        e[1] += 1
+        return e[1]
+
+    def reported(self, key):
+        e = self.entries.get(key)
+        return bool(e and e[2])
+
+    def mark_reported(self, key):
+        e = self.entries.get(key)
+        if e:
+            e[2] = True
 
     def __len__(self):
         return len(self.entries)
