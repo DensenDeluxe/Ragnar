@@ -118,6 +118,18 @@
   .note{max-width:720px; margin:26px auto 0; text-align:center; color:var(--faint); font-size:12.5px; line-height:1.6}
   .note b{color:var(--muted)}
 
+  /* ---- forge banner ---- */
+  .forge{display:flex; align-items:center; gap:16px; margin:34px 0 0;
+    padding:18px 20px; border-radius:var(--r); text-decoration:none;
+    background:linear-gradient(100deg,rgba(217,164,65,.09),rgba(90,160,224,.06));
+    border:1px solid var(--line2); transition:transform .08s ease, border-color .2s}
+  .forge:hover{transform:translateY(-1px); border-color:var(--gold); text-decoration:none}
+  .forge .ico{font-size:26px; line-height:1; filter:drop-shadow(0 2px 8px var(--gold-glow))}
+  .forge .txt{flex:1; color:var(--muted); font-size:14px}
+  .forge .txt b{display:block; color:var(--ink); font-family:Cinzel,serif; letter-spacing:.03em; font-size:16px; margin-bottom:2px}
+  .forge .go{color:var(--gold-2); font-weight:700; white-space:nowrap; font-size:14px}
+  @media(max-width:560px){ .forge{flex-direction:column; text-align:center; gap:10px} }
+
   /* ---- footer ---- */
   footer{margin-top:52px; border-top:1px solid var(--line); padding:26px 0 46px; text-align:center}
   .links{display:flex; flex-wrap:wrap; gap:8px 20px; justify-content:center; margin-bottom:14px}
@@ -201,6 +213,12 @@
 
   </section>
 
+  <a class="forge" href="https://ragnar.life/forge/">
+    <span class="ico">⚒</span>
+    <span class="txt"><b>The Forge</b>Flash the ESP32 companion nodes — RuSense CSI sensors, CYD &amp; coordinators — straight from your browser.</span>
+    <span class="go">Enter the Forge →</span>
+  </a>
+
   <section class="flash">
     <h2>Flash it in three moves</h2>
     <div class="steps">
@@ -227,6 +245,7 @@
     <div class="links">
       <a href="https://github.com/PierreGode/Ragnar">GitHub</a>
       <a href="https://github.com/PierreGode/Ragnar/releases">Releases &amp; changelog</a>
+      <a href="https://ragnar.life/forge/">Forge (firmware flasher)</a>
       <a href="https://github.com/PierreGode/Ragnar#readme">Docs</a>
     </div>
     <small>Ragnar OS · forged for the Raspberry Pi · © 2026</small>
