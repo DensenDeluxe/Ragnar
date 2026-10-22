@@ -477,7 +477,10 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
 - **Zone transfer** — `DNSD-060` a multi-message TCP AXFR/IXFR that completed with unsigned
   intermediate messages and no final TSIG (`CVE-2026-19033`). TCP is parsed per segment (no
   stream reassembly); the capture uses a full 65535-byte snaplen so large transfer segments
-  are not truncated.
+  are not truncated. `DNSD-062` an IXFR stream carrying an SOA record whose **owner name is not
+  the zone apex** — per ISC this makes the receiving BIND delete the zone's own SOA and then
+  terminate on the next refresh (`CVE-2021-25214`); IXFR legitimately carries many SOA records,
+  so the owner name is the discriminator, never the count.
   Plus `DNSD-007` a malformed/truncated response (TuDoor class) and `DNSD-011` an unsupported
   DNSSEC algorithm.
 - **mDNS tier (v6, UDP/5353)** — mDNS and unicast DNS share a wire format but not a rule set,
@@ -513,6 +516,26 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   `DNSD-091` one source issuing many `ip6.arpa` queries that share a long leading nibble prefix in
   one window — IPv6 reverse-tree enumeration (needs no baseline; the common-prefix rule is what
   separates it from bulk reverse lookups).
+- **Link-local name-resolution & transport posture (v8)** — v8 captures four more protocols
+  (5353 already; now **5355 LLMNR**, **137 NBT-NS**, **853 DoT/DoQ**) and owns their *posture* — the
+  vulnerable **query** is the finding — while the **poisoned answer** stays with [SMB Watch](#smb-watch)
+  (Responder/Inveigh). *Unicast DNS-SD:* `DNSD-100` a `_services._dns-sd._udp` PTR query over
+  **unicast** DNS (enumerates every service type a zone publishes in one question; the same query
+  on `.local` is ordinary Bonjour and is not flagged), `DNSD-101` a DNS-SD PTR response fanning out
+  to excessive instances. *LLMNR (RFC 4795):* `DNSD-110` LLMNR in use at all (unauthenticated by
+  design, MS recommends disabling), `DNSD-111` a query to a multicast group other than
+  `224.0.0.252` / `ff02::1:3` (RFC 4795 says silently discard), `DNSD-112` a **WPAD** query over
+  LLMNR (the host will take proxy config from the first responder). *NBT-NS (RFC 1001/1002):*
+  `DNSD-120` NBT-NS in use, `DNSD-121` a **WPAD** query over NBNS — the MS16-077 fallback flaw
+  exploited *via NetBIOS name responses* (`CVE-2016-3213` / `CVE-2016-3236`), `DNSD-122` an NBSTAT
+  node-status sweep (host + domain-role enumeration). *Encrypted-DNS transport:* `DNSD-130` a DoT
+  session (TCP 853) and `DNSD-131` a DoQ session (UDP 853, confirmed by a QUIC long header) — census
+  only, flagged whether the server is inside the own-resolver prefixes (DoT to your resolver is good
+  practice, past it a bypass; armed in-app with the private-address table), `DNSD-132` an SVCB DDR/DNR
+  discovery probe, `DNSD-133` a cleartext query resolving a known public DoH hostname (a correlation
+  record TLS Watch can later join on an SNI). *TSIG / SIG(0):* `DNSD-140` a deprecated TSIG algorithm
+  (hmac-md5 / hmac-sha1), `DNSD-141` a TSIG fudge far above RFC 8945's 300 s (the fudge is the replay
+  window), `DNSD-142` a SIG(0) transaction signature observed.
 
 The stateless detectors (KeyTrap, NSEC3 iteration, bailiwick, algorithm) fire on a single
 response; the **baseline-gated** ones (DNSBomb, NXNS burst, NSEC3-encloser, water-torture,

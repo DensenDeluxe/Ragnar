@@ -701,5 +701,613 @@ class TestSigredAndTsig(unittest.TestCase):
         self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
 
 
+
+# ======================================================================
+# Matter / Thread fingerprint
+# ======================================================================
+
+def mdns_txt(service, instance, pairs):
+    from scapy.layers.dns import DNSRR
+    return DNSRR(rrname=f"{instance}.{service}.local.", type="TXT", ttl=4500,
+                 rdata=pairs)
+
+
+def mdns_ptr(service, instance):
+    from scapy.layers.dns import DNSRR
+    return DNSRR(rrname=f"{service}.local.", type="PTR", ttl=4500,
+                 rdata=f"{instance}.{service}.local.")
+
+
+def mdns_fp_frame(l3, records):
+    from scapy.layers.dns import DNS
+    an = None
+    for r in records:
+        an = r if an is None else an / r
+    return raw(Ether() / l3 / UDP(sport=5353, dport=5353)
+               / DNS(qr=1, an=an, ancount=len(records)))
+
+
+MV4 = IP(src="192.168.77.50", dst="224.0.0.251", ttl=255)
+MV6 = IPv6(src="fd00:77::50", dst="ff02::fb", hlim=255)
+MPFX = ("192.168.77.0/24", "fd00:77::/64")
+OP_INST = "2906C908D115D362-8FC7772401CD0696"
+
+
+class TestMatterFingerprint(unittest.TestCase):
+    """Fingerprint extraction on both stacks, with identical verdicts.
+    Matter is IPv6-first, so the v6 path is the one that matters most
+    here even though the record content is transport-independent."""
+
+    def _fp(self, cfg, l3, records, code):
+        eng = Engine(cfg)
+        out = eng.handle_frame(mdns_fp_frame(l3, records))
+        hits = [x for x in out if x["code"] == code]
+        self.assertTrue(hits, f"expected {code}, got {codes(out)}")
+        return hits[0]["evidence"]["fingerprint"]
+
+    def test_operational_identity_both_stacks(self):
+        got = {}
+        for label, l3 in (("IPv4", MV4), ("IPv6", MV6)):
+            fp = self._fp(Config(mdns_local_prefixes=MPFX), l3,
+                          [mdns_ptr("_matter._tcp", OP_INST),
+                           mdns_txt("_matter._tcp", OP_INST, ["SII=5000"])],
+                          "DNSD-070")
+            self.assertEqual(fp.get("compressed_fabric_id"), "2906c908d115d362", label)
+            self.assertEqual(fp.get("node_id"), "8fc7772401cd0696", label)
+            got[label] = fp
+        self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
+
+    def test_device_name_is_captured_verbatim(self):
+        for label, l3 in (("IPv4", MV4), ("IPv6", MV6)):
+            fp = self._fp(Config(mdns_local_prefixes=MPFX), l3,
+                          [mdns_ptr("_matterc._udp", "AB3C7F1E2D4A5B6C"),
+                           mdns_txt("_matterc._udp", "AB3C7F1E2D4A5B6C",
+                                    ["VP=4151+1", "DT=266", "DN=Dave's Bedroom Lamp"])],
+                          "DNSD-071")
+            self.assertEqual(fp.get("device_name"), "Dave's Bedroom Lamp", label)
+            self.assertEqual(fp.get("vendor_product"), "4151+1", label)
+            self.assertEqual(fp.get("device_type"), 266, label)
+
+    def test_thread_dn_is_a_domain_not_a_device_name(self):
+        """Matter's 'dn' is the user-chosen device name; Thread's is
+        the domain name. A merged key table would file one as the
+        other."""
+        for label, l3 in (("IPv4", MV4), ("IPv6", MV6)):
+            fp = self._fp(Config(mdns_local_prefixes=MPFX), l3,
+                          [mdns_ptr("_meshcop._udp", "MyHub"),
+                           mdns_txt("_meshcop._udp", "MyHub",
+                                    ["tv=1.3.0", "nn=Guest-Thread", "dn=DefaultDomain"])],
+                          "DNSD-073")
+            self.assertEqual(fp.get("thread_domain_name"), "DefaultDomain", label)
+            self.assertNotIn("device_name", fp, label)
+            self.assertEqual(fp.get("network_name"), "Guest-Thread", label)
+
+    def test_ephemeral_endpoint_does_not_inherit_txt(self):
+        """A Thread border router advertises the same instance name
+        under _meshcop._udp and _meshcop-e._udp."""
+        eng = Engine(Config(mdns_local_prefixes=MPFX))
+        out = eng.handle_frame(mdns_fp_frame(MV4, [
+            mdns_ptr("_meshcop._udp", "MyHub"),
+            mdns_txt("_meshcop._udp", "MyHub", ["vn=Nordic"]),
+            mdns_ptr("_meshcop-e._udp", "MyHub")]))
+        by = {x["code"]: x["evidence"]["fingerprint"] for x in out}
+        self.assertIn("DNSD-078", by, codes(out))
+        self.assertEqual(by["DNSD-073"].get("vendor_name"), "Nordic")
+        self.assertEqual(by["DNSD-078"], {})
+
+    def test_sb_and_omr_are_never_interpreted(self):
+        fp = self._fp(Config(mdns_local_prefixes=MPFX), MV4,
+                      [mdns_ptr("_meshcop._udp", "MyHub"),
+                       mdns_txt("_meshcop._udp", "MyHub",
+                                [b"sb=" + bytes.fromhex("00000e31"),
+                                 b"omr=" + bytes.fromhex("40fd11223344556600")])],
+                      "DNSD-073")
+        self.assertEqual(fp.get("state_bitmap"), "00000e31")
+        self.assertEqual(fp.get("omr_prefix"), "40fd11223344556600")
+        for derived in ("connection_mode", "thread_role", "bbr_primary",
+                        "interface_status", "availability"):
+            self.assertNotIn(derived, fp,
+                             "nothing may be derived from a bit layout this build "
+                             "could not pin")
+
+    def test_device_name_switch(self):
+        recs = [mdns_ptr("_matterc._udp", "X1"),
+                mdns_txt("_matterc._udp", "X1", ["DN=Dave's Bedroom Lamp"])]
+        fp = self._fp(Config(mdns_local_prefixes=MPFX,
+                             mdns_include_device_name=False), MV4, recs, "DNSD-071")
+        self.assertNotIn("Dave", str(fp))
+        self.assertIn("redacted", str(fp.get("device_name", "")))
+        self.assertTrue(Config().mdns_include_device_name,
+                        "DN is on by default")
+
+
+class TestCommissioningWindow(unittest.TestCase):
+
+    @staticmethod
+    def _frame(l3, cm, extra=()):
+        pairs = list(extra) + ([f"CM={cm}"] if cm is not None else [])
+        return mdns_fp_frame(l3, [mdns_ptr("_matterc._udp", "X1"),
+                                  mdns_txt("_matterc._udp", "X1", pairs)])
+
+    def test_open_window_both_stacks(self):
+        for cm in (1, 2):
+            got = {}
+            for label, l3 in (("IPv4", MV4), ("IPv6", MV6)):
+                eng = Engine(Config(mdns_local_prefixes=MPFX))
+                out = eng.handle_frame(self._frame(l3, cm))
+                got[label] = codes(out)
+                self.assertIn("DNSD-077", got[label], f"{label} CM={cm}: {got[label]}")
+            self.assertEqual(got["IPv4"], got["IPv6"],
+                             f"dual-stack divergence at CM={cm}: {got}")
+
+    def test_closed_and_absent_and_junk_are_silent(self):
+        for cm, why in ((0, "CM=0 means closed"),
+                        (None, "no CM key at all"),
+                        ("open", "a non-numeric CM is a typo, not a finding")):
+            for l3 in (MV4, MV6):
+                eng = Engine(Config(mdns_local_prefixes=MPFX))
+                out = eng.handle_frame(self._frame(l3, cm, extra=["VP=4151+1"]))
+                self.assertNotIn("DNSD-077", codes(out), why)
+
+    def test_one_report_per_state_not_per_packet(self):
+        eng = Engine(Config(mdns_local_prefixes=MPFX))
+        n = [len([x for x in eng.handle_frame(self._frame(MV4, cm))
+                  if x["code"] == "DNSD-077"]) for cm in (1, 1, 1, 2, 2)]
+        self.assertEqual(n, [1, 0, 0, 1, 0], n)
+
+    def test_alarm_names_the_device(self):
+        eng = Engine(Config(mdns_local_prefixes=MPFX))
+        out = eng.handle_frame(self._frame(MV4, 1, extra=["DN=Hall Light"]))
+        f = [x for x in out if x["code"] == "DNSD-077"][0]
+        self.assertEqual(f["evidence"]["fingerprint"].get("device_name"), "Hall Light")
+
+
+
+# ======================================================================
+# LLMNR / NBNS / encrypted transport / DNS-SD / TSIG posture
+# ======================================================================
+
+def hdr5(qr=0, opcode=0, qd=1, an=0, ns=0, ar=0, txid=0x1234):
+    import struct
+    return struct.pack("!HHHHHH", txid, (qr << 15) | (opcode << 11), qd, an, ns, ar)
+
+
+def dn5(s):
+    return b"".join(bytes([len(l)]) + l for l in s.encode().split(b".") if l) + b"\x00"
+
+
+def f5(payload, l3, sport, dport, tcp=False):
+    from scapy.all import TCP
+    if tcp:
+        l4 = TCP(sport=sport, dport=dport) / (len(payload).to_bytes(2, "big") + payload)
+    else:
+        l4 = UDP(sport=sport, dport=dport) / payload
+    return raw(Ether() / l3 / l4)
+
+
+class TestLlmnrTier(unittest.TestCase):
+
+    GROUPS = (("IPv4", IP(src="192.168.1.50", dst="224.0.0.252")),
+              ("IPv6", IPv6(src="fd00::50", dst="ff02::1:3")))
+
+    @staticmethod
+    def _q(name, qr=0):
+        import struct
+        return (hdr5(qr=qr) + dn5(name) + struct.pack("!HH", 1, 1))
+
+    def test_presence_both_stacks(self):
+        got = {}
+        for label, l3 in self.GROUPS:
+            eng = Engine(Config())
+            out = eng.handle_frame(f5(self._q("printer"), l3, 50000, 5355), now=1.0)
+            got[label] = codes(out)
+            self.assertIn("DNSD-110", got[label], label)
+        self.assertEqual(got["IPv4"], got["IPv6"], f"divergence: {got}")
+
+    def test_ttl_is_not_a_violation(self):
+        """RFC 4795 s2.5 permits ANY TTL. The mDNS rule (RFC 6762 s11,
+        255 is a MUST) must not be transferred here -- it would fire on
+        conforming traffic."""
+        for ttl in (1, 64, 128, 255):
+            eng = Engine(Config(mdns_local_prefixes=("192.168.1.0/24",)))
+            out = eng.handle_frame(
+                f5(self._q("printer"), IP(src="192.168.1.50", dst="224.0.0.252", ttl=ttl),
+                   50000, 5355), now=1.0)
+            self.assertNotIn("DNSD-074", codes(out), f"TTL {ttl}")
+
+    def test_wrong_group_and_unicast(self):
+        for label, bad in (("IPv4", IP(src="192.168.1.50", dst="239.1.2.3")),
+                           ("IPv6", IPv6(src="fd00::50", dst="ff02::dead"))):
+            eng = Engine(Config())
+            self.assertIn("DNSD-111",
+                          codes(eng.handle_frame(f5(self._q("x"), bad, 50000, 5355),
+                                                 now=1.0)), label)
+        # A unicast response is legitimate, not a scope violation.
+        eng = Engine(Config())
+        out = eng.handle_frame(f5(self._q("x", qr=1),
+                                  IP(src="192.168.1.60", dst="192.168.1.50"),
+                                  5355, 50000), now=1.0)
+        self.assertNotIn("DNSD-111", codes(out))
+
+    def test_wpad_query_only(self):
+        for label, l3 in self.GROUPS:
+            eng = Engine(Config())
+            self.assertIn("DNSD-112",
+                          codes(eng.handle_frame(f5(self._q("wpad"), l3, 50000, 5355),
+                                                 now=1.0)), label)
+        eng = Engine(Config())
+        out = eng.handle_frame(f5(self._q("wpad", qr=1),
+                                  IP(src="192.168.1.60", dst="192.168.1.50"),
+                                  5355, 50000), now=1.0)
+        self.assertNotIn("DNSD-112", codes(out),
+                         "the poisoned answer is smbwatch's half")
+
+
+class TestNbnsTier(unittest.TestCase):
+
+    @staticmethod
+    def _q(name, qtype=None, opcode=0, suffix=0x00, txid=0x1234):
+        import struct
+        qtype = parse.T_NB if qtype is None else qtype
+        return (hdr5(opcode=opcode, txid=txid)
+                + bytes([parse.NBNS_NAME_LABEL_LEN])
+                + parse.encode_nbns_label(name, suffix) + b"\x00"
+                + struct.pack("!HH", qtype, 1))
+
+    SRC = IP(src="192.168.1.70", dst="192.168.1.255")
+
+    def test_codec_round_trip(self):
+        for name, suffix in (("WPAD", 0x00), ("DC01", 0x1B), ("FILESRV01", 0x20)):
+            enc = parse.encode_nbns_label(name, suffix)
+            self.assertEqual(len(enc), 32)
+            self.assertEqual(parse.decode_nbns_label(enc), (name, suffix))
+        for bad in (b"Z" * 32, b"a" * 32, b"A" * 31, b""):
+            self.assertIsNone(parse.decode_nbns_label(bad))
+
+    def test_wpad_and_presence(self):
+        eng = Engine(Config())
+        out = eng.handle_frame(f5(self._q("WPAD"), self.SRC, 137, 137), now=1.0)
+        self.assertIn("DNSD-120", codes(out))
+        self.assertIn("DNSD-121", codes(out))
+        f = [x for x in out if x["code"] == "DNSD-121"][0]
+        self.assertEqual(f["evidence"]["netbios"]["netbios_name"], "WPAD")
+
+    def test_registration_does_not_reach_ddns(self):
+        """NBNS opcode 5 is NAME REGISTRATION; DNS opcode 5 is UPDATE.
+        A Windows registration storm must not be reported as unsigned
+        dynamic updates being accepted."""
+        eng = Engine(Config(ddns_allowed_updater_prefixes=("10.0.0.0/8",)))
+        out = eng.handle_frame(
+            f5(self._q("PC01", opcode=parse.NBNS_OPCODE_REGISTRATION),
+               IP(src="203.0.113.9", dst="192.168.1.255"), 137, 137), now=1.0)
+        self.assertFalse([c for c in codes(out) if c.startswith("DNSD-08")],
+                         codes(out))
+        self.assertEqual(len(eng.pending), 0)
+
+    def test_nbstat_is_rate_based(self):
+        eng = Engine(Config())
+        out = eng.handle_frame(f5(self._q("H1", qtype=parse.T_NBSTAT), self.SRC,
+                                  137, 137), now=1.0)
+        self.assertNotIn("DNSD-122", codes(out), "one NBSTAT is ordinary browsing")
+        eng = Engine(Config())
+        got = []
+        for i in range(12):
+            got += eng.handle_frame(
+                f5(self._q(f"H{i}", qtype=parse.T_NBSTAT, txid=i), self.SRC, 137, 137),
+                now=1.0 + i * 0.1)
+        self.assertIn("DNSD-122", codes(got))
+        self.assertEqual(codes(got).count("DNSD-122"), 1)
+
+
+class TestEncryptedTransport(unittest.TestCase):
+
+    TLS = b"\x16\x03\x01\x00\x10handshake"
+    QUIC = bytes([0xC3, 0, 0, 0, 1]) + b"initial"
+    OWN = ("10.0.0.0/24", "fd00::/64")
+
+    def test_dot_doq_both_stacks(self):
+        for label, inside, outside in (
+                ("IPv4", IP(src="10.0.0.9", dst="10.0.0.1"),
+                 IP(src="10.0.0.9", dst="1.1.1.1")),
+                ("IPv6", IPv6(src="fd00::9", dst="fd00::1"),
+                 IPv6(src="fd00::9", dst="2606:4700::1111"))):
+            eng = Engine(Config(dns_own_resolver_prefixes=self.OWN))
+            out = eng.handle_frame(f5(self.TLS, inside, 50000, 853, tcp=True), now=1.0)
+            self.assertIn("DNSD-130", codes(out), label)
+            self.assertIs(out[0]["evidence"]["inside_own_resolvers"], True, label)
+            eng = Engine(Config(dns_own_resolver_prefixes=self.OWN))
+            out = eng.handle_frame(f5(self.TLS, outside, 50000, 853, tcp=True), now=1.0)
+            self.assertIs(out[0]["evidence"]["inside_own_resolvers"], False, label)
+            eng = Engine(Config(dns_own_resolver_prefixes=self.OWN))
+            self.assertIn("DNSD-131",
+                          codes(eng.handle_frame(f5(self.QUIC, outside, 50000, 853),
+                                                 now=1.0)), label)
+
+    def test_unconfigured_is_undecidable(self):
+        eng = Engine(Config())
+        out = eng.handle_frame(f5(self.TLS, IP(src="10.0.0.9", dst="1.1.1.1"),
+                                  50000, 853, tcp=True), now=1.0)
+        self.assertIsNone(out[0]["evidence"]["inside_own_resolvers"])
+
+    def test_udp_853_without_quic_is_silent(self):
+        for payload in (b"\x00not-quic", bytes([0x80]) + b"nofixed", b""):
+            eng = Engine(Config(dns_own_resolver_prefixes=self.OWN))
+            self.assertEqual(eng.handle_frame(
+                f5(payload, IP(src="10.0.0.9", dst="9.9.9.9"), 50000, 853), now=1.0), [])
+
+    def test_nothing_is_parsed_from_an_encrypted_session(self):
+        eng = Engine(Config(dns_own_resolver_prefixes=self.OWN))
+        eng.handle_frame(f5(self.TLS, IP(src="10.0.0.9", dst="1.1.1.1"), 50000, 853,
+                            tcp=True), now=1.0)
+        self.assertEqual(eng.stats.parsed, 0)
+
+    def test_ddr_and_doh_precursor(self):
+        import dns.message, dns.rrset
+        for name in ("_dns.resolver.arpa.", "_dns.isp.example."):
+            eng = Engine(Config())
+            w = dns.message.make_query(name, "SVCB").to_wire()
+            out = eng.handle_frame(f5(w, IP(src="10.0.0.9", dst="10.0.0.1"), 50000, 53),
+                                   now=1.0)
+            self.assertIn("DNSD-132", codes(out), name)
+        eng = Engine(Config())
+        r = dns.message.make_response(dns.message.from_wire(
+            dns.message.make_query("dns.google.", "A").to_wire()))
+        r.answer.append(dns.rrset.from_text("dns.google.", 300, "IN", "A", "8.8.8.8"))
+        out = eng.handle_frame(f5(r.to_wire(), IP(src="10.0.0.1", dst="10.0.0.9"),
+                                  53, 50000), now=1.0)
+        f = [x for x in out if x["code"] == "DNSD-133"][0]
+        self.assertEqual(f["evidence"]["correlation"]["join"], "tls_sni")
+        self.assertEqual(f["evidence"]["correlation"]["addresses"], ["8.8.8.8"])
+
+
+class TestDnssdAndTsigPosture(unittest.TestCase):
+
+    def test_unicast_enumeration_only(self):
+        import dns.message
+        eng = Engine(Config())
+        w = dns.message.make_query("_services._dns-sd._udp.example.com.", "PTR").to_wire()
+        self.assertIn("DNSD-100",
+                      codes(eng.handle_frame(f5(w, IP(src="198.51.100.9", dst="10.0.0.1"),
+                                                50000, 53), now=1.0)))
+        eng = Engine(Config())
+        w = dns.message.make_query("_services._dns-sd._udp.local.", "PTR").to_wire()
+        self.assertNotIn("DNSD-100",
+                         codes(eng.handle_frame(f5(w, IP(src="198.51.100.9", dst="10.0.0.1"),
+                                                   50000, 53), now=1.0)),
+                         ".local is ordinary Bonjour browsing")
+
+    @staticmethod
+    def _tsig(algo, fudge=300, mac_size=32, declared_mac=None):
+        import struct
+        declared = mac_size if declared_mac is None else declared_mac
+        rd = (algo + (0).to_bytes(6, "big") + struct.pack("!HH", fudge, declared)
+              + b"\x11" * mac_size + struct.pack("!HHH", 0x1234, 0, 0))
+        return b"\x01k\x00" + struct.pack("!HHIH", parse.T_TSIG, 255, 0, len(rd)) + rd
+
+    def _msg(self, rr, qr=1):
+        import struct
+        return hdr5(qr=qr, ar=1) + dn5("example.com") + struct.pack("!HH", 1, 1) + rr
+
+    def test_weak_algorithm_and_fudge(self):
+        for l3 in (IP(src="10.0.0.1", dst="10.0.0.5"), IPv6(src="fd00::1", dst="fd00::5")):
+            eng = Engine(Config())
+            out = eng.handle_frame(f5(self._msg(self._tsig(dn5("hmac-sha1"), mac_size=20)),
+                                      l3, 53, 50000), now=1.0)
+            self.assertIn("DNSD-140", codes(out))
+            eng = Engine(Config())
+            out = eng.handle_frame(f5(self._msg(self._tsig(dn5("hmac-sha256"), fudge=3600)),
+                                      l3, 53, 50000), now=1.0)
+            self.assertIn("DNSD-141", codes(out))
+            eng = Engine(Config())
+            out = eng.handle_frame(f5(self._msg(self._tsig(dn5("hmac-sha256"))),
+                                      l3, 53, 50000), now=1.0)
+            self.assertEqual(codes(out), [], "a current algorithm at 300s is silent")
+
+    def test_broken_tsig_posture_is_suppressed(self):
+        eng = Engine(Config())
+        out = eng.handle_frame(
+            f5(self._msg(self._tsig(dn5("hmac-sha256"), fudge=65535, mac_size=32,
+                                    declared_mac=200)),
+               IP(src="10.0.0.1", dst="10.0.0.5"), 53, 50000), now=1.0)
+        self.assertIn("DNSD-054", codes(out))
+        self.assertNotIn("DNSD-141", codes(out),
+                         "the fields of a record that does not parse mean nothing")
+
+    def test_sig0(self):
+        import struct
+        rd = (struct.pack("!HBBIIIH", 0, 8, 0, 0, 1800000000, 1700000000, 1234)
+              + dn5("key.example.com") + b"\x55" * 64)
+        rr = b"\x00" + struct.pack("!HHIH", parse.T_SIG, 255, 0, len(rd)) + rd
+        for l3 in (IP(src="10.0.0.5", dst="10.0.0.1"), IPv6(src="fd00::5", dst="fd00::1")):
+            eng = Engine(Config())
+            out = eng.handle_frame(f5(self._msg(rr, qr=0), l3, 50000, 53), now=1.0)
+            self.assertIn("DNSD-142", codes(out))
+
+
+
+# ======================================================================
+# Zone transfer, continued (061-064)
+# ======================================================================
+
+def xq(zone, qt):
+    import dns.message
+    return dns.message.make_query(zone, qt).to_wire()
+
+
+def xsoa(owner, serial=1):
+    import dns.rrset
+    return dns.rrset.from_text(owner, 300, "IN", "SOA",
+                               f"ns1.example.com. root.example.com. "
+                               f"{serial} 3600 600 86400 300")
+
+
+def xa(name="www.example.com.", addr="192.0.2.1"):
+    import dns.rrset
+    return dns.rrset.from_text(name, 300, "IN", "A", addr)
+
+
+def xresp(zone, qt, rrsets, rcode=0, with_question=True):
+    import dns.message
+    m = dns.message.make_response(dns.message.from_wire(xq(zone, qt)))
+    m.set_rcode(rcode)
+    if not with_question:
+        m.question = []
+    for rs in rrsets:
+        m.answer.append(rs)
+    return m.to_wire()
+
+
+def xf(payload, l3, sport, dport, tcp=True):
+    from scapy.all import TCP
+    if tcp:
+        return raw(Ether() / l3 / TCP(sport=sport, dport=dport)
+                   / (len(payload).to_bytes(2, "big") + payload))
+    return raw(Ether() / l3 / UDP(sport=sport, dport=dport) / payload)
+
+
+class TestXfrDisclosure(unittest.TestCase):
+
+    SEC = ("10.0.0.0/8", "fd00::/64")
+    PAIRS = (
+        ("IPv4", IP(src="203.0.113.9", dst="10.0.0.1"),
+         IP(src="10.0.0.1", dst="203.0.113.9"),
+         IP(src="10.0.0.5", dst="10.0.0.1"), IP(src="10.0.0.1", dst="10.0.0.5")),
+        ("IPv6", IPv6(src="2001:db8:bad::9", dst="fd00::1"),
+         IPv6(src="fd00::1", dst="2001:db8:bad::9"),
+         IPv6(src="fd00::5", dst="fd00::1"), IPv6(src="fd00::1", dst="fd00::5")),
+    )
+    FULL = None
+
+    def setUp(self):
+        self.FULL = [xsoa("example.com."), xa(), xsoa("example.com.")]
+
+    def _exchange(self, cfg, cli, srv, rrsets, qt="AXFR", rcode=0):
+        eng = Engine(cfg)
+        first = eng.handle_frame(xf(xq("example.com.", qt), cli, 50000, 53), now=1.0)
+        out = eng.handle_frame(xf(xresp("example.com.", qt, rrsets, rcode=rcode),
+                                  srv, 53, 50000), now=1.01)
+        return codes(first), codes(out)
+
+    def test_outside_client_both_stacks(self):
+        got = {}
+        for label, out_cli, out_srv, ok_cli, ok_srv in self.PAIRS:
+            c1, c2 = self._exchange(Config(xfr_allowed_secondary_prefixes=self.SEC),
+                                    out_cli, out_srv, self.FULL)
+            self.assertNotIn("DNSD-061", c1, f"{label}: the query alone")
+            self.assertIn("DNSD-061", c2, f"{label}: {c2}")
+            got[label] = c2
+            _, c2ok = self._exchange(Config(xfr_allowed_secondary_prefixes=self.SEC),
+                                     ok_cli, ok_srv, self.FULL)
+            self.assertNotIn("DNSD-061", c2ok, f"{label}: a permitted secondary")
+        self.assertEqual(got["IPv4"], got["IPv6"], f"divergence: {got}")
+
+    def test_rejected_and_incomplete_and_unconfigured(self):
+        out_cli, out_srv = self.PAIRS[0][1], self.PAIRS[0][2]
+        for rcode in (5, 9, 3):
+            _, c2 = self._exchange(Config(xfr_allowed_secondary_prefixes=self.SEC),
+                                   out_cli, out_srv, [], rcode=rcode)
+            self.assertNotIn("DNSD-061", c2, f"rcode {rcode} is the ACL working")
+        _, c2 = self._exchange(Config(xfr_allowed_secondary_prefixes=self.SEC),
+                               out_cli, out_srv,
+                               [xsoa("example.com."), xa()])
+        self.assertNotIn("DNSD-061", c2, "no terminating SOA is not a completed transfer")
+        _, c2 = self._exchange(Config(), out_cli, out_srv, self.FULL)
+        self.assertNotIn("DNSD-061", c2, "silent with no configured secondaries")
+
+
+class TestIxfrSoaApex(unittest.TestCase):
+    """CVE-2021-25214, and the conforming IXFR it must not fire on."""
+
+    CLI = IP(src="10.0.0.5", dst="10.0.0.1")
+    SRV = IP(src="10.0.0.1", dst="10.0.0.5")
+
+    def _ex(self, rrsets, qt="IXFR", cli=None, srv=None):
+        eng = Engine(Config())
+        eng.handle_frame(xf(xq("example.com.", qt), cli or self.CLI, 50000, 53), now=1.0)
+        return codes(eng.handle_frame(
+            xf(xresp("example.com.", qt, rrsets), srv or self.SRV, 53, 50000), now=1.01))
+
+    def test_non_apex_soa_both_stacks(self):
+        bad = [xsoa("example.com.", 3), xsoa("example.com.", 2), xa(),
+               xsoa("sub.example.com.", 3), xsoa("example.com.", 3)]
+        for label, cli, srv in (("IPv4", self.CLI, self.SRV),
+                                ("IPv6", IPv6(src="fd00::5", dst="fd00::1"),
+                                 IPv6(src="fd00::1", dst="fd00::5"))):
+            self.assertIn("DNSD-062", self._ex(bad, cli=cli, srv=srv), label)
+
+    def test_conforming_six_soa_ixfr_is_silent(self):
+        """RFC 1995's own example response carries SIX SOA records, all
+        at the apex. Any count-based rule would fire on every
+        conforming incremental transfer."""
+        six = [xsoa("example.com.", 3), xsoa("example.com.", 1), xa(),
+               xsoa("example.com.", 2), xa(), xsoa("example.com.", 2), xa(),
+               xsoa("example.com.", 3), xa(), xsoa("example.com.", 3)]
+        self.assertNotIn("DNSD-062", self._ex(six))
+
+    def test_parent_zone_soa(self):
+        self.assertIn("DNSD-062", self._ex([xsoa("example.com.", 3), xsoa("com.", 3),
+                                            xsoa("example.com.", 3)]))
+
+    def test_axfr_goes_to_063_not_062(self):
+        got = self._ex([xsoa("example.com."), xsoa("sub.example.com."), xa()], qt="AXFR")
+        self.assertNotIn("DNSD-062", got)
+        self.assertIn("DNSD-063", got)
+
+
+class TestAxfrStructureAndTransport(unittest.TestCase):
+
+    CLI = IP(src="10.0.0.5", dst="10.0.0.1")
+    SRV = IP(src="10.0.0.1", dst="10.0.0.5")
+
+    def _stream(self, messages, qt="AXFR"):
+        eng = Engine(Config())
+        eng.handle_frame(xf(xq("example.com.", qt), self.CLI, 50000, 53), now=1.0)
+        out = []
+        for i, rrsets in enumerate(messages):
+            out += eng.handle_frame(
+                xf(xresp("example.com.", qt, rrsets, with_question=(i == 0)),
+                   self.SRV, 53, 50000), now=1.01 + i * 0.01)
+        return codes(out)
+
+    def test_violations(self):
+        self.assertIn("DNSD-063", self._stream([[xa(), xsoa("example.com.")]]))
+        self.assertIn("DNSD-063", self._stream(
+            [[xsoa("example.com."), xsoa("sub.example.com."), xa()]]))
+        self.assertIn("DNSD-063", self._stream(
+            [[xsoa("example.com."), xa()],
+             [xa(), xsoa("example.com."), xa()],
+             [xa(), xsoa("example.com.")]]))
+
+    def test_conforming_axfr_is_silent(self):
+        self.assertNotIn("DNSD-063", self._stream(
+            [[xsoa("example.com."), xa(), xsoa("example.com.")]]))
+        self.assertNotIn("DNSD-063", self._stream(
+            [[xsoa("example.com."), xa()], [xa(), xa()],
+             [xa(), xsoa("example.com.")]]))
+
+    def test_conforming_multi_message_ixfr_is_silent(self):
+        """RFC 1995 makes SOAs the delta markers, so 'an SOA in an
+        intermediate message' describes every conforming IXFR."""
+        self.assertNotIn("DNSD-063", self._stream(
+            [[xsoa("example.com.", 3), xsoa("example.com.", 1), xa()],
+             [xsoa("example.com.", 2), xa(), xsoa("example.com.", 2), xa()],
+             [xsoa("example.com.", 3), xa(), xsoa("example.com.", 3)]], qt="IXFR"))
+
+    def test_axfr_over_udp_but_not_ixfr(self):
+        for label, l3 in (("IPv4", IP(src="203.0.113.9", dst="10.0.0.1")),
+                          ("IPv6", IPv6(src="2001:db8::9", dst="fd00::1"))):
+            eng = Engine(Config())
+            self.assertIn("DNSD-064", codes(eng.handle_frame(
+                xf(xq("example.com.", "AXFR"), l3, 50000, 53, tcp=False), now=1.0)), label)
+            # RFC 1995 s2 PERMITS IXFR over UDP.
+            eng = Engine(Config())
+            self.assertNotIn("DNSD-064", codes(eng.handle_frame(
+                xf(xq("example.com.", "IXFR"), l3, 50000, 53, tcp=False), now=1.0)), label)
+            # AXFR over TCP is normal.
+            eng = Engine(Config())
+            self.assertNotIn("DNSD-064", codes(eng.handle_frame(
+                xf(xq("example.com.", "AXFR"), l3, 50000, 53), now=1.0)), label)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **410** distinct CVE IDs
-- **347** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **413** distinct CVE IDs
+- **350** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **54** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -32,12 +32,12 @@ detector works is in [nettools.md](nettools.md).
 | 2013 | 6 |
 | 2014 | 8 |
 | 2015 | 13 |
-| 2016 | 6 |
+| 2016 | 8 |
 | 2017 | 18 |
 | 2018 | 13 |
 | 2019 | 20 |
 | 2020 | 33 |
-| 2021 | 38 |
+| 2021 | 39 |
 | 2022 | 32 |
 | 2023 | 49 |
 | 2024 | 55 |
@@ -62,7 +62,7 @@ detector works is in [nettools.md](nettools.md).
 | Dell Guard | 2 |
 | DHCP Guardian | 2 |
 | DNS Doctor (active) | 2 |
-| DNS Watch | 37 |
+| DNS Watch | 40 |
 | EIGRP Watch | 3 |
 | FTP Watch | 3 |
 | ICMP Watch | 3 |
@@ -148,6 +148,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2016-1547](https://nvd.nist.gov/vuln/detail/CVE-2016-1547) |  | card text only | NTP Watch | — |
 | [CVE-2016-2108](https://nvd.nist.gov/vuln/detail/CVE-2016-2108) |  | detected | TLS Watch | — |
 | [CVE-2016-2183](https://nvd.nist.gov/vuln/detail/CVE-2016-2183) | SWEET32 | detected | IPsec / IKE Watch, SSH Watch, TLS Watch | — |
+| [CVE-2016-3213](https://nvd.nist.gov/vuln/detail/CVE-2016-3213) |  | detected | DNS Watch | — |
+| [CVE-2016-3236](https://nvd.nist.gov/vuln/detail/CVE-2016-3236) |  | detected | DNS Watch | — |
 | [CVE-2016-7431](https://nvd.nist.gov/vuln/detail/CVE-2016-7431) |  | detected | NTP Watch | — |
 | [CVE-2016-8610](https://nvd.nist.gov/vuln/detail/CVE-2016-8610) | SSL Death Alert | detected | TLS Watch | — |
 | [CVE-2016-9312](https://nvd.nist.gov/vuln/detail/CVE-2016-9312) |  | detected | NTP Watch | — |
@@ -255,6 +257,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-3571](https://nvd.nist.gov/vuln/detail/CVE-2021-3571) |  | detected | PTP Watch | — |
 | [CVE-2021-20024](https://nvd.nist.gov/vuln/detail/CVE-2021-20024) |  | detected | LLDP Watch | — |
 | [CVE-2021-22779](https://nvd.nist.gov/vuln/detail/CVE-2021-22779) | ModiPwn (Modicon UMAS auth bypass) | detected | Modbus Watch | — |
+| [CVE-2021-25214](https://nvd.nist.gov/vuln/detail/CVE-2021-25214) |  | detected | DNS Watch | — |
 | [CVE-2021-25216](https://nvd.nist.gov/vuln/detail/CVE-2021-25216) |  | detected | DNS Watch | — |
 | [CVE-2021-25220](https://nvd.nist.gov/vuln/detail/CVE-2021-25220) | MaginotDNS | detected | DNS Watch | — |
 | [CVE-2021-26111](https://nvd.nist.gov/vuln/detail/CVE-2021-26111) | FortiSwitch lldpmedd memory exhaustion | detected | CDP Watch, LLDP Watch | — |

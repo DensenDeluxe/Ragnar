@@ -16,6 +16,7 @@ Split by cost, because the Pi Zero 2W runs these at line rate:
 from collections import Counter, defaultdict
 
 import parse
+import netscope
 from bailiwick import in_bailiwick, normalize, out_of_bailiwick_rrs
 from findings import finding, BASELINE_DEPENDENT
 
@@ -1130,3 +1131,510 @@ def detect_tsig_malformed(msg, cfg, zone):
              "affected": "BIND 9.0.0-9.11.21, 9.12.0-9.16.5, 9.17.0-9.17.3"},
         ))
     return out
+
+
+# ======================================================================
+# DNS-SD OVER UNICAST (100-109)
+# ======================================================================
+
+def detect_dnssd_enumeration(msg, cfg, table, src_raw, now):
+    """
+    DNSD-100. A PTR query for `_services._dns-sd._udp.<domain>` returns
+    every service type published in that domain (RFC 6763 s9).
+
+    RESTRICTED TO UNICAST ZONES, and the restriction is the entire
+    false-positive control. The identical query against `.local` is
+    what any Mac, iPhone or Bonjour-aware application issues on
+    joining a network -- "show me what is on this LAN" -- so reporting
+    it would put a warning on every laptop in the building. Against a
+    real zone over unicast DNS it is service enumeration, and it is
+    rare enough that a single one is worth a line.
+
+    This runs on port 53 only, so the `.local` case cannot reach it
+    through the mDNS fork anyway; the domain check is belt and braces
+    for a unicast query that names `.local` explicitly, which is both
+    legal and meaningless.
+    """
+    if not cfg.dnssd_enabled or msg.qr:
+        return []
+    q = _question(msg)
+    if q is None or q["qtype"] != parse.T_PTR:
+        return []
+    domain = parse.is_dnssd_meta_query(q["name"].labels)
+    if domain is None:
+        return []
+    if domain.rstrip(".").lower() in ("local", ""):
+        return []
+    if not table.first_sighting(("DNSD-100", bytes(src_raw), domain), now):
+        return []
+    return [finding(
+        "DNSD-100", domain,
+        f"service-type enumeration: PTR query for _services._dns-sd._udp.{domain} from "
+        f"{_fmt_addr(src_raw)} -- one question that returns every service type published "
+        f"in that zone",
+        {"source": _fmt_addr(src_raw), "domain": domain,
+         "qname": q["name"].text(), "rfc": "RFC 6763 s9"},
+    )]
+
+
+def detect_dnssd_fanout(msg, cfg, zone):
+    """
+    DNSD-101. One DNS-SD PTR response carrying an excessive number of
+    instance records.
+
+    Two things at once: a small question answered by a large reply is
+    an amplification vector, and a large reply to a service-type query
+    is what a successful enumeration looks like from the server's side.
+    Counted per OWNER NAME rather than per message, because a response
+    legitimately answering several different service types should not
+    add up into a fan-out that none of them is.
+    """
+    if not cfg.dnssd_enabled or not msg.qr:
+        return []
+    per_owner = defaultdict(list)
+    for rr in msg.answers:
+        if rr.rtype != parse.T_PTR:
+            continue
+        svc = parse.service_type_of(rr.name)
+        if svc is None:
+            continue
+        per_owner[(tuple(rr.name.lower_labels()), svc)].append(rr)
+    out = []
+    for (labels, svc), rrs in per_owner.items():
+        if len(rrs) <= cfg.dnssd_max_instances:
+            continue
+        out.append(finding(
+            "DNSD-101", zone,
+            f"DNS-SD PTR response for {svc} enumerates {len(rrs)} service instances in "
+            f"one answer -- an amplification vector, and the shape of an enumeration "
+            f"being answered",
+            {"service_type": svc, "instances": len(rrs),
+             "threshold": cfg.dnssd_max_instances,
+             "owner": ".".join(l.decode("ascii", "replace") for l in labels) + "."},
+        ))
+    return out
+
+
+# ======================================================================
+# TSIG / SIG(0) POSTURE (140-149)
+# ======================================================================
+
+def detect_tsig_posture(msg, cfg, zone):
+    """
+    DNSD-140 and DNSD-141, read off TSIG records this module already
+    decodes for DNSD-054 and DNSD-081.
+
+    WHAT CANNOT BE SEEN, and is therefore not claimed: the key. A
+    passive sensor has no way to judge whether a shared secret is
+    strong, reused across zones, or still the one from the runbook
+    nobody has rotated. What it CAN see is the algorithm and the
+    replay window, and both are stated in the clear in every signed
+    message.
+
+    THE FUDGE IS THE REPLAY WINDOW. RFC 8945 s5.2.1 recommends 300
+    seconds, and the field is 16 bits -- so the worst case on the wire
+    is 65535 seconds, a little over eighteen hours, not the "a whole
+    day" an earlier draft of this comment claimed. The ceiling matters:
+    it is what makes this a bounded, checkable posture value rather
+    than an open-ended one, and a detector that described an
+    impossible figure would have been describing a packet nobody can
+    send. (Caught by a fixture: struct refused to pack 86400 into a
+    u16.)
+
+    This is the posture check in the pair an operator can actually act
+    on, because the fudge is a configuration value rather than a
+    property of the key.
+
+    A TIME-SKEW CHECK WAS CONSIDERED AND REJECTED. Comparing a TSIG's
+    time_signed against the sensor's own clock would detect replays and
+    broken server clocks -- but the reference would be the Pi's clock,
+    which is the single thing in the measurement most likely to be
+    wrong, and a sensor with drifted NTP would report every signed
+    message on the network as skewed. A check whose reference is its
+    own weakest link is not worth the alert budget.
+    """
+    out = []
+    for rr in msg.all_rrs():
+        if rr.rtype != parse.T_TSIG:
+            continue
+        p = rr.parsed or {}
+        if p.get("struct_error"):
+            continue        # DNSD-054's business; fields are untrustworthy
+        algo = p.get("algorithm")
+        if algo in parse.TSIG_WEAK_ALGOS:
+            out.append(finding(
+                "DNSD-140", zone,
+                f"TSIG for {rr.name.text()} uses {algo}, deprecated for new deployments "
+                f"by RFC 8945 s5.2 -- the key itself is unobservable, so this reports the "
+                f"algorithm and nothing about the secret's strength",
+                {"owner": rr.name.text(), "algorithm": algo, "section": rr.section,
+                 "deprecated_by": "RFC 8945 s5.2"},
+            ))
+        fudge = p.get("fudge")
+        if fudge is not None and fudge > cfg.tsig_max_fudge:
+            out.append(finding(
+                "DNSD-141", zone,
+                f"TSIG for {rr.name.text()} carries a fudge of {fudge}s against the "
+                f"{parse.TSIG_RECOMMENDED_FUDGE}s RFC 8945 s5.2.1 recommends -- the fudge "
+                f"IS the replay window, so a captured signed message stays replayable "
+                f"for {fudge}s ({fudge / 3600.0:.1f}h of the 18.2h the 16-bit field "
+                f"allows at most)",
+                {"owner": rr.name.text(), "fudge": fudge,
+                 "recommended": parse.TSIG_RECOMMENDED_FUDGE,
+                 "threshold": cfg.tsig_max_fudge, "algorithm": algo,
+                 "section": rr.section},
+            ))
+    return out
+
+
+def detect_sig0(msg, cfg, zone, table, src_raw, now):
+    """
+    DNSD-142. A SIG(0) transaction signature (RFC 2931).
+
+    SIG(0) is a SIG record covering type 0 -- it signs the MESSAGE
+    rather than an RRset. It was largely abandoned in favour of TSIG
+    because it drags public-key management into the transaction path,
+    so seeing one is unusual enough to be worth a line and ordinary
+    enough not to be an alarm. Notice severity, suppressed per signer.
+    """
+    out = []
+    for rr in msg.all_rrs():
+        if rr.rtype != parse.T_SIG:
+            continue
+        p = rr.parsed or {}
+        if p.get("type_covered") != 0:
+            continue
+        signer = p.get("signer")
+        signer_text = signer.text() if signer is not None else rr.name.text()
+        if not table.first_sighting(("DNSD-142", bytes(src_raw), signer_text), now):
+            continue
+        out.append(finding(
+            "DNSD-142", zone,
+            f"SIG(0) transaction signature from {_fmt_addr(src_raw)}, signer "
+            f"{signer_text} -- RFC 2931 rather than TSIG, which is unusual enough to "
+            f"note and not in itself a weakness",
+            {"source": _fmt_addr(src_raw), "signer": signer_text,
+             "algorithm": p.get("algorithm"), "key_tag": p.get("key_tag"),
+             "section": rr.section},
+        ))
+    return out
+
+
+def _fmt_addr(raw):
+    import ipaddress
+    try:
+        return str(ipaddress.ip_address(bytes(raw)))
+    except ValueError:
+        return bytes(raw).hex()
+
+
+# ======================================================================
+# ZONE TRANSFER, continued (061-064)
+#
+# Two of these four are AXFR-ONLY, and the reason is the same both
+# times: IXFR is a DIFFERENT protocol with a different RFC, and the
+# AXFR rules do not apply to it. Getting that wrong would have
+# produced detectors that fire on conforming incremental transfers --
+# the same class of error as transferring the mDNS TTL rule to LLMNR.
+#
+#   RFC 5936 s2.2 (AXFR): intermediate messages MUST NOT contain an
+#   SOA; the first message MUST begin with the zone's apex SOA and the
+#   last MUST end with the same one.
+#
+#   RFC 1995 (IXFR): SOA records ARE the delta markers. The RFC's own
+#   example response contains SIX of them. An SOA count rule applied
+#   to IXFR is guaranteed to be wrong.
+#
+#   RFC 5936 s4.2 (AXFR): "AXFR sessions over UDP transport are not
+#   defined."  RFC 1995 s2 (IXFR): "Transport of a query may be by
+#   either UDP or TCP" -- IXFR over UDP is explicitly PERMITTED, and a
+#   server that cannot fit the answer replies with a single SOA to say
+#   "retry over TCP". So a UDP rule applied to IXFR fires on correct
+#   behaviour, and a single-SOA IXFR response is not an incomplete
+#   transfer.
+# ======================================================================
+
+def _apex_labels(msg, xstream):
+    """The transferred zone's apex, from the query name.
+
+    Taken from the QUESTION rather than derived by bailiwick: RFC 5936
+    s2.2 requires the first message to copy the query's Question
+    section, and the zone being transferred is named there exactly.
+    Guessing it any other way would only add a way to be wrong about
+    which owner names count as the apex.
+    """
+    q = _question(msg)
+    if q is not None:
+        apex = tuple(q["name"].lower_labels())
+        if xstream is not None and xstream.apex is None:
+            xstream.apex = apex
+        return apex
+    # Later messages may legally omit the Question, so fall back to the
+    # apex this stream already established. Without this the apex
+    # checks only ever ran on message one, and a malformed SOA has no
+    # reason to arrive there -- the xstream argument was accepted and
+    # then ignored, which is the quietest kind of dead parameter.
+    if xstream is not None:
+        return xstream.apex
+    return None
+
+
+def detect_xfr_completed_disclosure(msg, cfg, zone, xstream, allowed_nets,
+                                    client_raw, now, is_tcp):
+    """
+    DNSD-061. A transfer that COMPLETED to a client outside the
+    permitted-secondary list.
+
+    THE COMPLETION IS THE FINDING. An AXFR query is worth nothing on
+    its own -- the internet is full of them, and a server with a
+    correct ACL answers REFUSED. What matters is a transfer that
+    finished, because at that point the entire zone has already been
+    handed over and there is nothing to prevent any more. So this is
+    read off the terminating SOA, exactly like DNSD-060, and it is
+    critical/high for the same reason: a completed disclosure, not an
+    attempt.
+
+    COMPLETION IS soa_count >= 2, which works for both forms. A
+    single-message AXFR carries the apex SOA as its first and last
+    record, so two; a multi-message one carries one in the first
+    message and one in the last. An IXFR that fell back to a full
+    transfer looks the same. An IXFR that genuinely had deltas carries
+    more, which also satisfies it.
+
+    CONFIG-GATED AND SILENT WITHOUT IT. On an ISP's own tap the
+    config-free version of this check fires on every legitimate
+    transfer between the operator's own nameservers, which is the one
+    thing guaranteed to get it switched off in the first hour.
+    """
+    if not is_tcp or xstream is None or not msg.qr:
+        return []
+    qtype = xstream.qtype
+    if qtype not in (parse.QT_IXFR, parse.QT_AXFR):
+        return []
+    if msg.rcode != 0:
+        # REFUSED / NOTAUTH means the ACL did its job. A rejected
+        # transfer says nothing about disclosure.
+        return []
+    if xstream.soa_count < 2 or xstream.reported_leak:
+        return []
+    target = client_raw if xstream.client is None else xstream.client
+    inside = netscope.in_any_prefix(target, allowed_nets)
+    if inside is not False:
+        # True  -> a permitted secondary, which is ordinary operation.
+        # None  -> undecidable, no prefixes configured. Stay silent.
+        return []
+    xstream.reported_leak = True
+    kind = "IXFR" if qtype == parse.QT_IXFR else "AXFR"
+    return [finding(
+        "DNSD-061", zone,
+        f"{kind} for {zone} COMPLETED to {_fmt_addr(target)}, which is outside every "
+        f"configured permitted-secondary prefix -- {xstream.records} records across "
+        f"{xstream.messages} message(s); the zone has already been disclosed",
+        {"transfer_type": kind, "client": _fmt_addr(target),
+         "records": xstream.records, "messages": xstream.messages,
+         "soa_records_seen": xstream.soa_count,
+         "signed_messages": xstream.signed_messages,
+         "configured_prefixes": [str(n) for n in allowed_nets],
+         "qname": _qname_text(msg)},
+    )]
+
+
+def detect_ixfr_soa_apex(msg, cfg, zone, xstream, is_tcp=True):
+    """
+    DNSD-062. CVE-2021-25214 (CVSS 6.5, availability).
+
+    ISC's own description: an incremental transfer stream containing
+    "SOA records with an owner name other than the transferred zone's
+    apex" causes the receiving server to remove the zone's SOA record,
+    and named then terminates on the next SOA refresh query for that
+    zone.
+
+    THE OWNER NAME IS THE DISCRIMINATOR, NEVER THE COUNT. IXFR uses
+    SOA records as its delta markers -- the RFC 1995 example response
+    contains six of them, all at the zone apex -- so any rule that
+    counted SOAs in an IXFR would fire on every correct incremental
+    transfer. The bug is one SOA in the wrong place in the name tree,
+    and that is exactly what is checked.
+
+    IXFR ONLY. A non-apex SOA in an AXFR is also wrong, but it is
+    wrong under RFC 5936 rather than under this CVE, and DNSD-063
+    reports it there. Keeping them apart means an operator reading
+    DNSD-062 knows they are looking at the CVE shape and not at a
+    generic structural complaint.
+
+    `PR:L` in the CVE vector means the attacker has to be a source the
+    target accepts transfers from. That bounds the likelihood, not the
+    detectability -- the same accept call as CVE-2020-8622.
+    """
+    q = _question(msg)
+    qtype = q["qtype"] if q is not None else (xstream.qtype if xstream else None)
+    if qtype != parse.QT_IXFR or not msg.qr:
+        return []
+    apex = _apex_labels(msg, xstream)
+    if apex is None:
+        # No Question section to establish the apex from. RFC 5936
+        # permits later messages to omit it, and without the apex this
+        # check cannot be made -- so it is not made, rather than
+        # guessed at from the first SOA it happens to see.
+        return []
+    out = []
+    for rr in msg.answers:
+        if rr.rtype != parse.T_SOA:
+            continue
+        if tuple(rr.name.lower_labels()) == apex:
+            continue
+        out.append(finding(
+            "DNSD-062", zone,
+            f"IXFR for {zone} carries an SOA record owned by {rr.name.text()}, which is "
+            f"not the transferred zone's apex -- the CVE-2021-25214 shape: a receiving "
+            f"BIND deletes the zone's own SOA and terminates on its next refresh query",
+            {"soa_owner": rr.name.text(), "zone_apex": _labels_text(apex),
+             "section": rr.section, "qname": _qname_text(msg),
+             "affected": "BIND 9.5.0-9.11.29, 9.12.0-9.16.13, 9.17.0-9.17.11 "
+                         "(CVE-2021-25214)"},
+        ))
+    return out
+
+
+def detect_axfr_structure(msg, cfg, zone, xstream, is_tcp=True):
+    """
+    DNSD-063. RFC 5936 s2.2 structure, AXFR only.
+
+    Three violations, all of which a conforming server never produces:
+
+      * an SOA in an INTERMEDIATE message (the first and last may
+        carry one; nothing in between may),
+      * the first message not BEGINNING with an SOA,
+      * an SOA whose owner is not the zone apex.
+
+    AXFR ONLY, and this is the half of the pair that would do real
+    damage if it leaked onto IXFR: RFC 1995 makes SOA records the
+    delta markers of an incremental transfer, so "an SOA in an
+    intermediate message" describes every multi-message IXFR ever
+    sent. Conformance asserts a six-SOA IXFR stays silent here.
+    """
+    if xstream is None:
+        return []
+    q = _question(msg)
+    qtype = q["qtype"] if q is not None else xstream.qtype
+    if qtype != parse.QT_AXFR or not msg.qr or msg.rcode != 0:
+        return []
+    soas = [rr for rr in msg.answers if rr.rtype == parse.T_SOA]
+    first_message = not xstream.first_message_done
+    apex = _apex_labels(msg, xstream)
+    out = []
+
+    if first_message:
+        if msg.answers and msg.answers[0].rtype != parse.T_SOA:
+            out.append(finding(
+                "DNSD-063", zone,
+                f"AXFR for {zone} does not begin with an SOA record -- its first answer "
+                f"is type {msg.answers[0].rtype}, and RFC 5936 s2.2 requires the first "
+                f"message to open with the zone's apex SOA",
+                {"violation": "first message does not begin with SOA",
+                 "first_record_type": msg.answers[0].rtype,
+                 "qname": _qname_text(msg)},
+            ))
+        elif len(soas) >= 2 and msg.answers[-1].rtype != parse.T_SOA:
+            # A SECOND SOA inside the first message with records still
+            # after it. RFC 5936 s2.2 allows an SOA only as the very
+            # first and very last record of the whole stream, so
+            # SOA..SOA..record cannot be conforming however the stream
+            # continues.
+            #
+            # This leg was missing, and it mattered more than it looks:
+            # the intermediate-message check below only arms from
+            # message two onward, so a SINGLE-message AXFR carrying a
+            # mid-stream SOA went unreported -- and a single-message
+            # transfer is precisely the case this tier sees reliably,
+            # because it is the one that fits inside a TCP segment
+            # without the reassembly this module does not have.
+            xstream.reported_struct = True
+            out.append(finding(
+                "DNSD-063", zone,
+                f"AXFR for {zone} carries {len(soas)} SOA records in its first message "
+                f"with records still following the last of them -- RFC 5936 s2.2 allows "
+                f"an SOA only as the very first and very last record of the stream",
+                {"violation": "SOA mid-stream in the first message",
+                 "soa_records_in_message": len(soas),
+                 "last_record_type": msg.answers[-1].rtype,
+                 "qname": _qname_text(msg)},
+            ))
+    elif soas and xstream.soa_count >= 1:
+        # An SOA after the opening one, in a message that is neither
+        # the first nor provably the last. A conforming server puts
+        # exactly one closing SOA at the very end, so this fires only
+        # when a second SOA shows up with records still following it.
+        trailing = msg.answers[-1].rtype != parse.T_SOA
+        if trailing and not xstream.reported_struct:
+            xstream.reported_struct = True
+            out.append(finding(
+                "DNSD-063", zone,
+                f"AXFR for {zone} carries an SOA in an intermediate message with records "
+                f"still following it -- RFC 5936 s2.2 allows an SOA only as the very "
+                f"first and very last record of the whole stream",
+                {"violation": "SOA in an intermediate message",
+                 "message_number": xstream.messages,
+                 "soa_records_in_message": len(soas), "qname": _qname_text(msg)},
+            ))
+
+    if apex is not None and not xstream.reported_apex:
+        for rr in soas:
+            if tuple(rr.name.lower_labels()) == apex:
+                continue
+            xstream.reported_apex = True
+            out.append(finding(
+                "DNSD-063", zone,
+                f"AXFR for {zone} carries an SOA owned by {rr.name.text()}, which is not "
+                f"the transferred zone's apex -- RFC 5936 s2.2 requires the opening and "
+                f"closing SOA to be the zone's own",
+                {"violation": "SOA owner is not the zone apex",
+                 "soa_owner": rr.name.text(), "zone_apex": _labels_text(apex),
+                 "qname": _qname_text(msg)},
+            ))
+            break
+    return out
+
+
+def detect_axfr_over_udp(msg, cfg, zone, is_tcp):
+    """
+    DNSD-064. RFC 5936 s4.2: "AXFR sessions over UDP transport are not
+    defined."
+
+    AXFR ONLY, and the IXFR exclusion here is not a nicety. RFC 1995
+    s2 says "Transport of a query may be by either UDP or TCP", and a
+    server that cannot fit an incremental answer into a datagram
+    replies with a single SOA to tell the client to retry over TCP.
+    IXFR over UDP is therefore CORRECT BEHAVIOUR that happens
+    constantly, and a UDP rule covering both would have reported it as
+    a violation -- which is the same mistake as transferring the mDNS
+    TTL requirement to LLMNR, caught the same way, by reading the
+    other protocol's RFC instead of assuming it matched.
+
+    Stated precisely: RFC 5936 does not mandate a server response to a
+    UDP AXFR, so this is UNDEFINED rather than forbidden. The finding
+    is that no conforming client emits it, which makes it a
+    reconnaissance or amplification probe rather than a broken
+    secondary.
+    """
+    if is_tcp or msg.qr:
+        return []
+    q = _question(msg)
+    if q is None or q["qtype"] != parse.QT_AXFR:
+        return []
+    return [finding(
+        "DNSD-064", zone,
+        f"AXFR query for {zone} arrived over UDP -- RFC 5936 s4.2 leaves AXFR over UDP "
+        f"undefined and no conforming client emits it, so this is a probe rather than a "
+        f"misconfigured secondary",
+        {"qname": q["name"].text(), "qtype": q["qtype"], "transport": "udp",
+         "rfc": "RFC 5936 s4.2",
+         "note": "IXFR over UDP is explicitly permitted by RFC 1995 s2 and is NOT "
+                 "reported"},
+    )]
+
+
+def _labels_text(labels):
+    if not labels:
+        return "."
+    return ".".join(l.decode("ascii", "replace") for l in labels) + "."
