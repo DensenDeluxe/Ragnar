@@ -21,6 +21,7 @@ from scapy.layers.dns import (DNS, DNSQR, DNSRR, DNSRRDNSKEY, DNSRRRSIG,
 from scapy.all import Ether, UDP
 
 import parse
+import spf as spf_tier
 from state import Config
 from engine import Engine
 
@@ -662,7 +663,7 @@ class TestSigredAndTsig(unittest.TestCase):
 
     def _tcp(self, payload, l3, sport=53, dport=33333):
         from scapy.all import TCP
-        return raw(Ether() / l3 / TCP(sport=sport, dport=dport)
+        return raw(Ether() / l3 / TCP(sport=sport, dport=dport, seq=1000, flags="PA")
                    / (len(payload).to_bytes(2, "big") + payload))
 
     def test_sigred_both_types_both_stacks(self):
@@ -876,10 +877,24 @@ def dn5(s):
     return b"".join(bytes([len(l)]) + l for l in s.encode().split(b".") if l) + b"\x00"
 
 
+# Per-conversation TCP sequence numbers. A multi-message fixture that
+# frames every message at the same sequence number is, on a real
+# wire, message two claiming message one's bytes and contradicting
+# them -- and once reassembly arrived DNSD-160 said so, correctly, on
+# a previously-green XFR test. The fixture was wrong, not the
+# detector. Only ever advances, so a fresh Engine anchors its stream
+# base wherever the conversation happens to be.
+_F5_SEQ = {}
+
+
 def f5(payload, l3, sport, dport, tcp=False):
     from scapy.all import TCP
     if tcp:
-        l4 = TCP(sport=sport, dport=dport) / (len(payload).to_bytes(2, "big") + payload)
+        framed = len(payload).to_bytes(2, "big") + payload
+        key = (getattr(l3, "src", "?"), getattr(l3, "dst", "?"), sport, dport)
+        seq = _F5_SEQ.get(key, 1000)
+        _F5_SEQ[key] = seq + len(framed)
+        l4 = TCP(sport=sport, dport=dport, seq=seq, flags="PA") / framed
     else:
         l4 = UDP(sport=sport, dport=dport) / payload
     return raw(Ether() / l3 / l4)
@@ -1160,8 +1175,14 @@ def xresp(zone, qt, rrsets, rcode=0, with_question=True):
 def xf(payload, l3, sport, dport, tcp=True):
     from scapy.all import TCP
     if tcp:
-        return raw(Ether() / l3 / TCP(sport=sport, dport=dport)
-                   / (len(payload).to_bytes(2, "big") + payload))
+        # Sequence advances per conversation -- see _F5_SEQ above for
+        # why a fixed sequence number is a contradicting stream.
+        framed = len(payload).to_bytes(2, "big") + payload
+        key = (getattr(l3, "src", "?"), getattr(l3, "dst", "?"), sport, dport)
+        seq = _F5_SEQ.get(key, 1000)
+        _F5_SEQ[key] = seq + len(framed)
+        return raw(Ether() / l3 / TCP(sport=sport, dport=dport, seq=seq, flags="PA")
+                   / framed)
     return raw(Ether() / l3 / UDP(sport=sport, dport=dport) / payload)
 
 
@@ -1307,6 +1328,514 @@ class TestAxfrStructureAndTransport(unittest.TestCase):
             eng = Engine(Config())
             self.assertNotIn("DNSD-064", codes(eng.handle_frame(
                 xf(xq("example.com.", "AXFR"), l3, 50000, 53), now=1.0)), label)
+
+
+class TestSpfParserTier(unittest.TestCase):
+    """SPF parser tier (libspf2): DNSD-150..153.
+
+    The thresholds here are the libspf2 source constants, not advisory
+    prose. Four CVEs, three of which are reachable only through a
+    specific shape of record:
+
+      150  CVE-2021-33912  uppercase macro letter       (URL-encode)
+      151  CVE-2021-33913  uppercase + 'r' transformer  (reverse+URL)
+      152  CVE-2021-20314  budget-filling exp= literal  (<1.2.11)
+      153  CVE-2023-42118  4-byte budget underflow      (>=1.2.11)
+    """
+
+    def _resp(self, owner, strings, l3=None):
+        import struct
+        from scapy.all import Ether, IP, UDP, raw
+        rd = b"".join(bytes([len(s)]) + s for s in strings)
+        rr = dn5(owner) + struct.pack("!HHIH", parse.T_TXT, 1, 300, len(rd)) + rd
+        q = dn5(owner) + struct.pack("!HH", parse.T_TXT, 1)
+        pay = struct.pack("!HHHHHH", 0x3131, 0x8180, 1, 1, 0, 0) + q + rr
+        l3 = l3 if l3 is not None else IP(src="10.0.0.1", dst="10.0.0.9")
+        return raw(Ether() / l3 / UDP(sport=53, dport=50000) / pay)
+
+    @staticmethod
+    def _split(blob):
+        return [blob[i:i + 255] for i in range(0, len(blob), 255)]
+
+    def _codes(self, frames, cfg=None, start=1.0):
+        eng = Engine(cfg or Config())
+        out = []
+        for i, f in enumerate(frames):
+            out += eng.handle_frame(f, now=start + i * 0.01)
+        return [f["code"] for f in out], eng
+
+    # -- the model, against the constants it was read from ------------
+    def test_source_constants(self):
+        self.assertEqual(spf_tier.SPF_MAX_MECH_LEN, 511)
+        self.assertEqual(spf_tier.SPF_MAX_MOD_LEN, 511)
+        self.assertEqual(spf_tier.SPF_DATA_T_SIZE, 4)
+        # A TXT string is length-prefixed by one octet. That it cannot
+        # reach the 511-byte compile budget is what makes the
+        # multi-string split a NECESSARY condition for CVE-2021-20314
+        # rather than a heuristic about how PoCs happen to be written.
+        self.assertLess(spf_tier.TXT_STRING_MAX, spf_tier.SPF_MAX_MOD_LEN)
+
+    def test_budget_window_boundaries(self):
+        # Each macro variable costs align_sz(sizeof(SPF_data_t)) = 4.
+        for n, rem in ((1, 507), (100, 111), (126, 7), (127, 3)):
+            self.assertEqual(spf_tier.compile_budget(b"%{i}" * n)["remaining"], rem,
+                             f"{n} macros")
+        # The underflow arms when the remaining budget at a literal
+        # initialisation drops below sizeof(SPF_data_t).
+        self.assertFalse(spf_tier.compile_budget(b"%{i}" * 126)["underflow"])
+        self.assertTrue(spf_tier.compile_budget(b"%{i}" * 127)["underflow"])
+
+    def test_align_sz_is_not_the_identity(self):
+        # spf_internal.h defines _align_sz under `#if 1`, so the
+        # rounding version always compiles and the identity is dead
+        # code. This module modelled the identity and called it
+        # conservative; the library refused 126 variables plus a
+        # one-byte literal as "SPF domainspec too long (509 chars,
+        # 511 max)", which only adds up with the rounding.
+        self.assertEqual([spf_tier.align_sz(n) for n in (0, 1, 4, 5, 8, 9)],
+                         [0, 4, 4, 8, 8, 12])
+        self.assertEqual(
+            spf_tier.compile_budget(b"%{i}" * 126 + b"A")["stopped_at"], "too-long")
+
+    def test_underflow_is_written_through_only_with_a_literal(self):
+        # The write loop is `SPF_ENSURE_STRING_AVAIL(1); *dst++ = c;`
+        # -- per byte, right after the guard that a wrapped ds_avail
+        # can no longer fail. So literal text after the 127th
+        # variable is written past the buffer, and nothing after it
+        # means nothing is written.
+        self.assertEqual(
+            spf_tier.compile_budget(b"%{i}" * 127 + b".x")["bytes_past_buffer"], 2)
+        self.assertEqual(
+            spf_tier.compile_budget(b"%{i}" * 127)["bytes_past_buffer"], 0)
+
+    def test_the_upper_bound_is_real(self):
+        # This needed the VULNERABLE build to establish. At 128
+        # variables SPF_ADD_LEN_TO refuses the next variable before
+        # any write -- the vulnerable build says "SPF domainspec too
+        # long (512 chars, 511 max)". HEAD returns its floor-check
+        # error for 127 and for 1000 alike, because nothing after the
+        # 127th variable runs, and reading that identical error as the
+        # vulnerability briefly produced a model with no upper bound.
+        for n in (128, 200, 1000):
+            r = spf_tier.compile_budget(b"%{i}" * n + b".x")
+            self.assertEqual(r["bytes_past_buffer"], 0, f"{n} macros")
+            self.assertEqual(r["macro_count"], 127, f"{n} macros")
+
+    # -- expansion: case is the whole discriminator -------------------
+    def test_uppercase_macro_is_the_trigger(self):
+        c, _ = self._codes([self._resp("e.com", [b"v=spf1 include:%{D}.x -all"])])
+        self.assertIn("DNSD-150", c)
+        self.assertNotIn("DNSD-151", c)
+
+    def test_uppercase_plus_reverse_is_the_other_cve(self):
+        c, _ = self._codes([self._resp("e.com", [b"v=spf1 include:%{Dr}.x -all"])])
+        self.assertIn("DNSD-151", c)
+        self.assertNotIn("DNSD-150", c)
+
+    def test_lowercase_macro_is_silent(self):
+        # The real-world case. libspf2 only enters the vulnerable
+        # URL-encode block when d->dv.url_encode is set, which only an
+        # uppercase letter does (RFC 7208 s7.1).
+        for rec in (b"v=spf1 include:%{d}.x -all",
+                    b"v=spf1 exists:%{ir}.%{l}.rbl.x ~all",
+                    b"v=spf1 include:%{dr}.x -all"):
+            c, _ = self._codes([self._resp("e.com", [rec])])
+            self.assertEqual([x for x in c if x in ("DNSD-150", "DNSD-151")], [],
+                             rec.decode())
+
+    def test_ordinary_records_are_silent(self):
+        for rec in (b"v=spf1 include:_spf.google.com ~all",
+                    b"v=spf1 ip4:192.0.2.0/24 ip6:2001:db8::/32 -all",
+                    b"v=spf1 mx a -all", b"v=spf1 redirect=_spf.x.com"):
+            c, _ = self._codes([self._resp("e.com", [rec])])
+            self.assertEqual(c, [], rec.decode())
+
+    # -- the underflow window ----------------------------------------
+    def test_underflow_fires_at_and_above_the_arming_point(self):
+        # The condition exists from 127 variables up; the evidence
+        # says whether it is written through, which is the difference
+        # between a probe and a hit.
+        for n, want in ((100, False), (126, False), (127, True),
+                        (128, True), (300, True)):
+            c, _ = self._codes([self._resp(
+                "e.com",
+                self._split(b"v=spf1 include:" + b"%{i}" * n + b".x -all"))])
+            self.assertEqual("DNSD-153" in c, want, f"{n} macros")
+
+    def test_underflow_reports_the_window_it_found(self):
+        eng = Engine(Config())
+        out = eng.handle_frame(self._resp(
+            "e.com", self._split(b"v=spf1 include:" + b"%{i}" * 127 + b".x -all")))
+        f = [x for x in out if x["code"] == "DNSD-153"][0]
+        self.assertTrue(0 <= f["evidence"]["min_remaining"] < 4)
+        self.assertEqual(f["evidence"]["bytes_past_buffer"], 2)
+        self.assertEqual(f["evidence"]["macro_count"], 127)
+        self.assertEqual(f["evidence"]["budget"], 511)
+        self.assertIn("1.2.11", f["evidence"]["affected"])
+
+    # -- exp= correlation --------------------------------------------
+    def test_exp_requires_the_correlation(self):
+        # 508 bytes, the bottom of the four-byte window: a literal
+        # that fits the pre-1.2.11 ds_avail (= _avail = 511) but not
+        # the corrected one (= 507). 500 bytes fits both and
+        # overflows nothing.
+        big = self._split(b"A" * 508)
+        # Target not named by any exp= -> silent. Without this the
+        # detector would fire on every large TXT record on the network.
+        c, _ = self._codes([self._resp("other.com", big)])
+        self.assertNotIn("DNSD-152", c)
+        # Named -> reported, on the explanation record.
+        c, eng = self._codes([self._resp("e.com", [b"v=spf1 exp=x.e.com -all"]),
+                              self._resp("x.e.com", big)])
+        self.assertIn("DNSD-152", c)
+
+    def test_exp_short_explanation_is_silent(self):
+        c, _ = self._codes([self._resp("e.com", [b"v=spf1 exp=x.e.com -all"]),
+                            self._resp("x.e.com", [b"Rejected: see e.com/spf"])])
+        self.assertNotIn("DNSD-152", c)
+
+    def test_exp_macro_target_is_not_remembered(self):
+        # Its real name depends on the mail transaction. Storing the
+        # unexpanded form would create a key no later record can match
+        # -- coverage that cannot fire.
+        _, eng = self._codes([self._resp("e.com",
+                                         [b"v=spf1 exp=%{i}.x.e.com -all"])])
+        self.assertEqual(len(eng.exp_targets), 0)
+
+    def test_exp_table_is_bounded(self):
+        _, eng = self._codes([self._resp(f"z{i}.com",
+                                         [b"v=spf1 exp=e%d.com -all" % i])
+                              for i in range(30)], cfg=Config(spf_max_exp_targets=4))
+        self.assertEqual(len(eng.exp_targets), 4)
+        self.assertEqual(eng.exp_targets.evictions, 26)
+
+    # -- plumbing -----------------------------------------------------
+    def test_suppression_is_per_owner_and_macro(self):
+        f = self._resp("e.com", [b"v=spf1 include:%{Dr}.x -all"])
+        c, _ = self._codes([f, f, f])
+        self.assertEqual(c.count("DNSD-151"), 1)
+
+    def test_kill_switch(self):
+        c, _ = self._codes([self._resp("e.com", [b"v=spf1 include:%{Dr}.x -all"])],
+                           cfg=Config(spf_enabled=False))
+        self.assertEqual(c, [])
+
+    def test_query_side_is_silent(self):
+        # A TXT query carries no rdata. The first wiring of this tier
+        # landed in the query branch and reported nothing at all.
+        import dns.message
+        from scapy.all import Ether, IP, UDP, raw
+        q = dns.message.make_query("e.com.", "TXT").to_wire()
+        fr = raw(Ether() / IP(src="10.0.0.9", dst="10.0.0.1")
+                 / UDP(sport=50000, dport=53) / q)
+        c, _ = self._codes([fr])
+        self.assertEqual([x for x in c if x.startswith("DNSD-15")], [])
+
+    def test_parser_is_total(self):
+        for junk in (b"", b"%", b"%{", b"%{%{", bytes(range(256)), b"}" * 60,
+                     b"v=spf1 " + b"%" * 500):
+            spf_tier.parse_macros(junk)
+            spf_tier.compile_budget(junk)
+            spf_tier.spf_terms(junk)
+            spf_tier.spf_record_text([junk])
+
+    def test_dual_stack_parity(self):
+        from scapy.all import IP, IPv6
+        rec = [b"v=spf1 include:%{Dr}.x -all"]
+        c4, _ = self._codes([self._resp("e.com", rec, IP(src="10.0.0.1", dst="10.0.0.9"))])
+        c6, _ = self._codes([self._resp("e.com", rec, IPv6(src="fd00::1", dst="fd00::9"))])
+        self.assertEqual(c4, c6)
+        self.assertEqual(c4, ["DNSD-151"])
+        # And for the record-shaped CVEs too.
+        big = self._split(b"v=spf1 include:" + b"%{i}" * 127 + b" -all")
+        for l3 in (IP(src="10.0.0.1", dst="10.0.0.9"), IPv6(src="fd00::1", dst="fd00::9")):
+            c, _ = self._codes([self._resp("e.com", big, l3)])
+            self.assertIn("DNSD-153", c)
+
+
+class TestTcpReassembly(unittest.TestCase):
+    """TCP stream reassembly (tcpreasm.py) and DNSD-160.
+
+    Reassembly is the one part of this module that could invent a DNS
+    message nobody sent, so most of these assert what it refuses to
+    do rather than what it does.
+    """
+
+    K = ("v4", b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02", 53, 50000)
+
+    @staticmethod
+    def _fr(payload):
+        return len(payload).to_bytes(2, "big") + payload
+
+    @staticmethod
+    def _dmsg(n=500, txid=0x1234, fill=b"Y"):
+        """A PLAUSIBLE DNS message of n bytes.
+
+        A stream with no SYN does not know where message boundaries
+        are, so the reassembler requires the head of its buffer to
+        look like a length prefix in front of a DNS header before it
+        frames anything. These fixtures used b"Y" * 500 until that
+        gate existed; something that could actually be framed is the
+        right amount of realism rather than an inconvenience.
+        """
+        import struct
+        n = max(n, 12)
+        return struct.pack("!HHHHHH", txid, 0x8180, 0, 0, 0, 0) + fill * (n - 12)
+
+    @staticmethod
+    def _open(r, key, seq=1000, now=0.9):
+        """Open a stream with a bare SYN, so offset `seq` is known to
+        be the first byte of the first message. A SYN consumes its own
+        sequence number, hence seq - 1."""
+        r.add(key, (seq - 1) & 0xFFFFFFFF, b"", 0x02, now)
+
+    @staticmethod
+    def _r(cfg=None):
+        from tcpreasm import Reassembler
+        return Reassembler(cfg or Config())
+
+    @staticmethod
+    def _frame(seq, data, l3=None, flags="PA", sport=53, dport=50000):
+        from scapy.all import Ether, IP, TCP, raw
+        l3 = l3 if l3 is not None else IP(src="10.0.0.1", dst="10.0.0.9")
+        return raw(Ether() / l3
+                   / TCP(sport=sport, dport=dport, seq=seq, flags=flags) / data)
+
+    @staticmethod
+    def _sigred():
+        import struct
+        hdr = struct.pack("!HHHHHH", 0x5151, 0x8180, 1, 1, 0, 0)
+        question = b"\x00" + struct.pack("!HH", 1, 1)
+        fixed = struct.pack("!HBBIIIH", 1, 8, 2, 3600, 1800000000, 1700000000, 0x003f)
+        rdata = fixed + struct.pack("!H", 0xC000 | 46) + b"\x3f" * 65260
+        rr = b"\xc0\x0c" + struct.pack("!HHIH", parse.T_RRSIG, 1, 3600,
+                                       len(rdata)) + rdata
+        return hdr + question + rr
+
+    # -- sequence arithmetic -----------------------------------------
+    def test_seq_delta_wraps(self):
+        from tcpreasm import seq_delta
+        self.assertEqual(seq_delta(100, 50), 50)
+        self.assertEqual(seq_delta(50, 100), -50)
+        # The case naive subtraction gets wrong, and the reason every
+        # comparison in the module goes through this function.
+        self.assertEqual(seq_delta(5, 0xFFFFFFFE), 7)
+        self.assertEqual(seq_delta(0xFFFFFFFE, 5), -7)
+        for a in (0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF):
+            for b in (0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF):
+                self.assertTrue(-(1 << 31) <= seq_delta(a, b) < (1 << 31))
+
+    # -- framing ------------------------------------------------------
+    def test_pipelined_messages(self):
+        r = self._r()
+        a, b, cc = self._dmsg(16, 1), self._dmsg(20, 2), self._dmsg(32, 3)
+        m, _ = r.add(self.K, 1000,
+                     self._fr(a) + self._fr(b) + self._fr(cc), 0x18, 1.0)
+        self.assertEqual(m, [a, b, cc])
+
+    def test_split_length_prefix(self):
+        whole = self._fr(self._dmsg(600))
+        for split in (1, 2, 3):
+            r = self._r()
+            out = []
+            for off, end in ((0, split), (split, len(whole))):
+                mm, _ = r.add(self.K, 1000 + off, whole[off:end], 0x18, 1.0)
+                out += mm
+            self.assertEqual([len(x) for x in out], [600], f"split at {split}")
+
+    def test_zero_length_frame_abandons(self):
+        r = self._r()
+        # On a SYNCHRONISED stream offset zero really is a boundary,
+        # so a zero length there is a framing error. On an
+        # unsynchronised one it just means "not a boundary".
+        self._open(r, self.K, 1000)
+        m, _ = r.add(self.K, 1000, b"\x00\x00" + self._fr(self._dmsg(16)),
+                     0x18, 1.0)
+        self.assertEqual(m, [])
+        self.assertEqual(r.stats.framing_errors, 1)
+        r2 = self._r()
+        m2, _ = r2.add(self.K, 1000, b"\x00\x00" + self._fr(self._dmsg(16)),
+                       0x18, 1.0)
+        self.assertEqual((m2, r2.stats.framing_errors), ([], 0))
+        self.assertGreaterEqual(r2.stats.unsynced_waits, 1)
+
+    # -- ordering -----------------------------------------------------
+    def test_every_segment_order(self):
+        whole = self._fr(self._dmsg(500))
+        offs = [(0, 200), (200, 200), (400, 102)]
+        import itertools
+        for perm in itertools.permutations(offs):
+            r = self._r()
+            out = []
+            for off, ln in perm:
+                mm, _ = r.add(self.K, 1000 + off, whole[off:off + ln], 0x18, 1.0)
+                out += mm
+            self.assertEqual([len(x) for x in out], [500], f"order {perm}")
+
+    def test_gap_is_never_filled(self):
+        whole = self._fr(self._dmsg(500))
+        r = self._r()
+        m1, _ = r.add(self.K, 1000, whole[:100], 0x18, 1.0)
+        m2, _ = r.add(self.K, 1300, whole[300:], 0x18, 1.1)
+        self.assertEqual((m1, m2), ([], []))
+        # Nothing is delivered until the hole closes.
+        m3, _ = r.add(self.K, 1100, whole[100:300], 0x18, 1.2)
+        self.assertEqual([len(x) for x in m3], [500])
+
+    def test_stalled_stream_ages_out(self):
+        whole = self._fr(self._dmsg(500))
+        r = self._r()
+        r.add(self.K, 1000, whole[:100], 0x18, 1.0)
+        r.add(("v4", b"z", b"z", 53, 1), 1, b"", 0x02, 1000.0)
+        self.assertEqual(r.stats.aged_streams, 1)
+        self.assertGreaterEqual(r.stats.dropped_bytes, 100)
+
+    # -- overlap, DNSD-160 -------------------------------------------
+    def test_identical_retransmission_is_silent(self):
+        r = self._r()
+        seg = self._fr(self._dmsg(600, 7))[:300]
+        r.add(self.K, 1000, seg, 0x18, 1.0)
+        _, e = r.add(self.K, 1000, seg, 0x18, 1.1)
+        self.assertEqual(e, [])
+        self.assertEqual(r.stats.overlaps_identical, 1)
+
+    def test_contradictory_overlap_is_reported_once(self):
+        r = self._r()
+        r.add(self.K, 1000, self._fr(self._dmsg(600, 8, b"A"))[:300], 0x18, 1.0)
+        n = 0
+        for i in range(5):
+            _, e = r.add(self.K, 1100, b"EVIL" + b"A" * 96, 0x18, 1.1 + i * 0.01)
+            n += len(e)
+        self.assertEqual(n, 1)
+        self.assertEqual(r.stats.overlaps_mismatch, 5)
+
+    def test_first_wins(self):
+        whole = self._fr(self._dmsg(600, 9, b"A"))
+        r = self._r()
+        r.add(self.K, 1000, whole[:300], 0x18, 1.0)
+        r.add(self.K, 1100, b"EVIL" + b"A" * 96, 0x18, 1.1)
+        m, _ = r.add(self.K, 1300, whole[300:], 0x18, 1.2)
+        self.assertEqual(len(m), 1)
+        self.assertNotIn(b"EVIL", m[0])
+
+    def test_overlap_window_is_bounded_and_counted(self):
+        # With no shadow a contradiction arriving after framing is
+        # outside what can be checked, and says so rather than
+        # pretending to have looked.
+        r = self._r(Config(tcp_reasm_shadow_bytes=0))
+        r.add(self.K, 1000, self._fr(self._dmsg(16, 11, b"A")), 0x18, 1.0)
+        _, e = r.add(self.K, 1000, self._fr(self._dmsg(16, 11, b"Z")), 0x18, 1.1)
+        self.assertEqual(e, [])
+        self.assertEqual(r.stats.before_window, 1)
+        # With one, it is caught.
+        r = self._r(Config(tcp_reasm_shadow_bytes=2048))
+        r.add(self.K, 1000, self._fr(self._dmsg(16, 12, b"A")), 0x18, 1.0)
+        _, e = r.add(self.K, 1000, self._fr(self._dmsg(16, 12, b"Z")), 0x18, 1.1)
+        self.assertEqual(len(e), 1)
+
+    def test_dnsd160_end_to_end_dual_stack(self):
+        from scapy.all import IP, IPv6
+        whole = self._fr(self._dmsg(600, 13, b"\x00"))
+        for l3 in (IP(src="10.0.0.1", dst="10.0.0.9"),
+                   IPv6(src="fd00::1", dst="fd00::9")):
+            eng = Engine(Config())
+            eng.handle_frame(self._frame(1000, whole[:300], l3), now=1.0)
+            out = eng.handle_frame(self._frame(1100, b"EVIL" + b"\x00" * 96, l3),
+                                   now=1.01)
+            self.assertIn("DNSD-160", [f["code"] for f in out])
+
+    # -- teardown -----------------------------------------------------
+    def test_rst_abandons(self):
+        r = self._r()
+        r.add(self.K, 1000, self._fr(self._dmsg(500))[:100], 0x18, 1.0)
+        m, _ = r.add(self.K, 1000, b"", 0x04, 1.1)
+        self.assertEqual((m, len(r), r.stats.reset_streams), ([], 0, 1))
+
+    def test_tuple_reuse_does_not_splice(self):
+        r = self._r()
+        r.add(self.K, 1000, self._fr(self._dmsg(500))[:100], 0x18, 1.0)
+        r.add(self.K, 5000, b"", 0x02, 1.1)
+        new = self._dmsg(28, 21)
+        m, _ = r.add(self.K, 5001, self._fr(new), 0x18, 1.2)
+        self.assertEqual(m, [new])
+        self.assertEqual(r.stats.reused_keys, 1)
+
+    def test_midflight_stream_without_syn(self):
+        r = self._r()
+        mid = self._dmsg(40, 22)
+        m, _ = r.add(self.K, 777777, self._fr(mid), 0x18, 1.0)
+        self.assertEqual(m, [mid])
+
+    def test_directions_are_separate_streams(self):
+        r = self._r()
+        r.add(("v4", b"\x01", b"\x02", 53, 50000), 1000,
+              self._fr(self._dmsg(16, 30)), 0x18, 1.0)
+        r.add(("v4", b"\x02", b"\x01", 50000, 53), 9000,
+              self._fr(self._dmsg(16, 31)), 0x18, 1.0)
+        self.assertEqual(len(r), 2)
+
+    # -- bounds -------------------------------------------------------
+    def test_bounds_hold(self):
+        from tcpreasm import Reassembler
+        r = Reassembler(Config(tcp_reasm_max_streams=4))
+        for i in range(20):
+            r.add(("v4", b"a", bytes([i]), 53, 50000), 1000,
+                  b"\xff\xff" + b"A" * 50, 0x18, 1.0 + i * 0.001)
+        self.assertEqual(len(r), 4)
+        self.assertEqual(r.stats.evicted_streams, 16)
+
+        r = Reassembler(Config(tcp_reasm_max_bytes=20000))
+        for i in range(40):
+            r.add(("v4", b"b", bytes([i]), 53, 50000), 1000,
+                  b"\xff\xff" + b"A" * 1000, 0x18, 1.0 + i * 0.001)
+        self.assertLessEqual(r.total_bytes, 20000)
+
+    # -- what it unlocks ---------------------------------------------
+    def test_sigred_across_realistic_segments(self):
+        from scapy.all import IP, IPv6
+        stream = self._fr(self._sigred())
+        for l3 in (IP(src="10.0.0.1", dst="10.0.0.9"),
+                   IPv6(src="fd00::1", dst="fd00::9")):
+            eng = Engine(Config())
+            got = []
+            for off in range(0, len(stream), 1400):
+                got += eng.handle_frame(
+                    self._frame(1000 + off, stream[off:off + 1400], l3),
+                    now=1.0 + off * 1e-6)
+            self.assertIn("DNSD-044", [f["code"] for f in got])
+            self.assertEqual(eng.reasm.stats.messages, 1)
+
+    def test_sigred_is_invisible_without_reassembly(self):
+        # The negative control, and the whole argument for this tier.
+        from scapy.all import IP
+        stream = self._fr(self._sigred())
+        eng = Engine(Config(tcp_reasm_enabled=False))
+        got = []
+        for off in range(0, len(stream), 1400):
+            got += eng.handle_frame(
+                self._frame(1000 + off, stream[off:off + 1400],
+                            IP(src="10.0.0.1", dst="10.0.0.9")),
+                now=1.0 + off * 1e-6)
+        codes = {f["code"] for f in got}
+        self.assertNotIn("DNSD-044", codes)
+        self.assertIn("DNSD-007", codes)
+
+    def test_udp_never_enters_the_reassembler(self):
+        from scapy.all import Ether, IP, UDP, raw
+        import dns.message
+        eng = Engine(Config())
+        q = dns.message.make_query("u.example.", "A").to_wire()
+        eng.handle_frame(raw(Ether() / IP(src="10.0.0.9", dst="10.0.0.1")
+                             / UDP(sport=50000, dport=53) / q), now=1.0)
+        self.assertEqual(len(eng.reasm), 0)
+        self.assertEqual(eng.reasm.stats.segments, 0)
+
+    def test_parser_is_total_on_segments(self):
+        r = self._r()
+        for junk in (b"", b"\x00", b"\xff", b"\xff\xff", bytes(range(256)),
+                     b"\x00\x00\x00\x00", b"\xff\xff" + b"A" * 3):
+            r.add(self.K, 1000, junk, 0x18, 1.0)
+            r.add(self.K, 2000, junk, 0x18, 1.0)
 
 
 if __name__ == "__main__":

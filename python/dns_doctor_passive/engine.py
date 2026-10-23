@@ -35,10 +35,14 @@ import ddns as ddns_tier
 import rdns as rdns_tier
 import llmnr as llmnr_tier
 import nbns as nbns_tier
+import tcpreasm
+import findings as findings_mod
 import encrypted as enc_tier
+import spf as spf_tier
 from bailiwick import zone_of_query
 from state import (Config, ZoneTable, InFlight, XferTable, CensusTable,
-                   UpdatePending, WalkTable, CounterTable)
+                   UpdatePending, WalkTable, CounterTable,
+                   ExpTargetTable)
 from findings import (FINDINGS, BASELINE_DEPENDENT, PREFIX_DEPENDENT,
                       PREFIX_CONFIG_KEY)
 
@@ -69,6 +73,16 @@ PREFIX_CLI_FLAG = {
     "ddns_allowed_updater_prefixes": "--ddns-updater-prefix",
     "rdns_internal_prefixes": "--rdns-internal-prefix",
 }
+
+
+def _fmt_addr(raw):
+    """Raw address bytes to text. Only called when a finding actually
+    fires -- formatting on the hot path is pure cost."""
+    import ipaddress
+    try:
+        return str(ipaddress.ip_address(bytes(raw)))
+    except ValueError:
+        return bytes(raw).hex()
 
 
 class Stats:
@@ -102,6 +116,10 @@ class Engine:
         # first-sighting set so a steady-state posture fact is not
         # re-reported on every update a DHCP server sends.
         self.pending = UpdatePending(self.cfg)
+        # TCP stream reassembly. Its counters live on the
+        # reassembler, not on Stats, because they are about bytes
+        # refused rather than frames seen.
+        self.reasm = tcpreasm.Reassembler(self.cfg)
         self.ddns_allowed_nets, bad_d = netscope.parse_prefixes(
             self.cfg.ddns_allowed_updater_prefixes)
         self.ddns_bad_prefixes = bad_d
@@ -126,6 +144,10 @@ class Engine:
         self.posture = CensusTable(self.cfg.posture_seen_max)
         self.nbstat = CounterTable(cap=self.cfg.walk_max_sources,
                                    window=self.cfg.nbstat_window_seconds)
+        # SPF exp= targets, so an explanation TXT can be joined to the
+        # SPF record that named it -- CVE-2021-20314's artifact is the
+        # explanation record, not the SPF record.
+        self.exp_targets = ExpTargetTable(self.cfg.spf_max_exp_targets)
         self.own_resolver_nets, bad_o = netscope.parse_prefixes(
             self.cfg.dns_own_resolver_prefixes)
         self.own_resolver_bad_prefixes = bad_o
@@ -142,10 +164,21 @@ class Engine:
         self.stats.frames += 1
 
         r = parse.parse_l3_l4(frame)
+        # LAB-ONLY FRAME LOG, off unless something sets _lab_frame_log
+        # to a list. Production never does, so this costs one attribute
+        # lookup per frame and allocates nothing. It exists because a
+        # lab phase reported "3 of 6 frames" and the counters could not
+        # say which three.
+        log = getattr(self, "_lab_frame_log", None)
+        if log is not None:
+            log.append((len(frame),
+                        "not-dns" if r is None
+                        else "%s:%d -> %s:%d %s" % (r[0], r[2], r[1], r[3], r[4])))
         if r is None:
             self.stats.not_dns += 1
             return []
-        src, dst, sport, dport, proto, payload, ip_ttl = r
+        (src, dst, sport, dport, proto, payload, ip_ttl,
+         tcp_seq, tcp_flags, tcp_payload) = r
         is_tcp = proto == "tcp"
 
         # PORT ROUTING. mDNS and unicast DNS share a wire format but
@@ -237,6 +270,81 @@ class Engine:
                 self._emit(f)
             return out
 
+        # ============ TCP REASSEMBLY ============
+        # A DNS message over TCP is length-prefixed and need not fit
+        # in one segment -- and the messages that matter here
+        # specifically do not. SIGRed is ~64 kB and a zone transfer is
+        # a stream. Until this existed, the TCP path handed the DNS
+        # parser the first segment of every message and never compared
+        # the length prefix against what had actually arrived, so a
+        # large response was judged on its first 1460 bytes and the
+        # second and later messages of a pipelined stream were never
+        # seen at all.
+        #
+        # One segment in, zero or more complete messages out.
+        if is_tcp and self.cfg.tcp_reasm_enabled and tcp_seq is not None:
+            fam = "v6" if len(src) == 16 else "v4"
+            key = (fam, bytes(src), bytes(dst), sport, dport)
+            msgs, events = self.reasm.add(key, tcp_seq, tcp_payload or b"",
+                                          tcp_flags, now)
+            out = []
+            for ev in events:
+                out += self._reasm_event(ev, now)
+            for raw_msg in msgs:
+                out += self._handle_dns_message(raw_msg, src, dst, sport, dport,
+                                                proto, ip_ttl, now)
+            return out
+
+        # Reassembly off, or UDP. parse.py's position-5 payload is the
+        # single-segment view, which is correct for every datagram and
+        # for any TCP message that happens to fit in one segment.
+        return self._handle_dns_message(payload, src, dst, sport, dport,
+                                        proto, ip_ttl, now)
+
+    def _reasm_event(self, ev, now):
+        """Turn a reassembly event into a finding."""
+        if ev["event"] != "overlap_mismatch":
+            return []
+        fam, src, dst, sport, dport = ev["key"]
+        zone = "."
+        f = findings_mod.finding(
+            "DNSD-160", zone,
+            "two TCP segments on the same DNS stream covered sequence offset "
+            "%d with DIFFERENT bytes. Reassembly keeps the first copy, so this "
+            "reports the attempt rather than being misled by it -- a resolver "
+            "resolving overlap last-wins and a sensor resolving it first-wins "
+            "parse different DNS messages out of one stream"
+            % ev["rel_offset"],
+            {"source": _fmt_addr(src), "destination": _fmt_addr(dst),
+             "sport": sport, "dport": dport, "family": fam,
+             "rel_offset": ev["rel_offset"], "segment_length": ev["length"],
+             "first_bytes": ev["first_bytes"].hex(),
+             "later_bytes": ev["later_bytes"].hex(),
+             "tcp_seq": ev["seq"],
+             "stream_age_s": round(ev["stream_age"], 3),
+             "policy": "first-wins; the first bytes seen are what this sensor "
+                       "parsed",
+             "detection_window": "bytes still buffered, plus a %d-byte trailing "
+                                 "shadow of bytes already framed"
+                                 % self.cfg.tcp_reasm_shadow_bytes},
+        )
+        self.stats.findings += 1
+        self._emit(f)
+        return [f]
+
+
+    def _handle_dns_message(self, payload, src, dst, sport, dport,
+                            proto, ip_ttl, now):
+        """Everything that happens to ONE complete DNS message on
+        port 53.
+
+        Split out of handle_frame when TCP reassembly arrived,
+        because a single TCP segment can now yield zero, one or
+        several complete messages and each must go through the
+        identical path. Nothing in here knows or cares whether its
+        bytes came from a datagram or from six segments.
+        """
+        is_tcp = proto == "tcp"
         msg = parse.parse_dns(payload)
         self.stats.parsed += 1
         if msg.malformed:
@@ -319,6 +427,12 @@ class Engine:
             out += detect.detect_dnssd_fanout(msg, cfg, zone)
             out += enc_tier.handle_encrypted_dns_query(msg, cfg, self.posture,
                                                        src, dst, now)
+            # SPF records are TXT records, so the libspf2 parser tier
+            # reads rdata this module already decodes. RESPONSE PATH
+            # ONLY: a TXT query carries no rdata, so there is no record
+            # in a question for any of it to read.
+            out += spf_tier.handle_spf(msg, cfg, self.posture,
+                                       self.exp_targets, src, now)
             out += detect.detect_dnsbomb(msg, cfg, zone, zstate, now)
             out += detect.detect_nsec3_encloser(msg, cfg, zone, zstate, now)
             out += detect.detect_water_torture(msg, cfg, zone, zstate, now)
@@ -552,6 +666,8 @@ def main():
     p.add_argument("--no-nbns", action="store_true", help="disable the NBT-NS tier")
     p.add_argument("--no-encrypted-dns", action="store_true",
                    help="disable the encrypted-DNS transport tier (DoT/DoQ/DDR)")
+    p.add_argument("--no-spf", action="store_true",
+                   help="disable the SPF parser tier (libspf2 CVEs)")
     p.add_argument("--no-dnssd", action="store_true",
                    help="disable unicast DNS-SD enumeration detection")
     p.add_argument("--print-codes", action="store_true",
@@ -592,6 +708,7 @@ def main():
     cfg.nbns_enabled = not args.no_nbns
     cfg.encrypted_dns_enabled = not args.no_encrypted_dns
     cfg.dnssd_enabled = not args.no_dnssd
+    cfg.spf_enabled = not args.no_spf
 
     stats = run(args.iface, cfg, timeout=args.timeout)
     print(f"frames={stats.frames} parsed={stats.parsed} findings={stats.findings} "

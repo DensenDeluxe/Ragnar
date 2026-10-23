@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **350 CVEs detected from the wire.** 413 distinct CVE IDs are named across Ragnar's
-  code; 350 of them a passive detector actually identifies. The rest are named, not detected:
+- **354 CVEs detected from the wire.** 417 distinct CVE IDs are named across Ragnar's
+  code; 354 of them a passive detector actually identifies. The rest are named, not detected:
   54 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -83,6 +83,15 @@ behind them is Solarflere's work.
   service enumeration, **LLMNR** (UDP/TCP 5355), **NBT-NS** (UDP 137), the **encrypted-DNS
   transport** census (DoT/DoQ on 853, DDR/DNR discovery, DoH-endpoint resolution — with a
   correlation hook for TLS Watch), and **TSIG/SIG(0)** posture (weak HMAC, excessive fudge).
+  **DNS Watch v9** adds the **SPF/libspf2 parser** tier — SPF records are the one piece of DNS
+  content a mail server *compiles*, and these are the TXT-record shapes that reach libspf2's
+  parser bugs: an uppercase macro letter that routes expansion through the `url_encode` `sprintf`
+  (**CVE-2021-33912**) or its reversing variant (**CVE-2021-33913**), an `exp=` explanation TXT
+  large enough to exhaust the 511-byte compile budget (**CVE-2021-20314**), and a term packing
+  ~127 macro variables to underflow the budget arithmetic (**CVE-2023-42118**). v9 also adds
+  **TCP stream reassembly**, which catches a Ptacek-Newsham **segment-overlap mismatch** (two
+  segments giving different bytes for one sequence range, so a first-wins sensor and a last-wins
+  resolver see different DNS messages) — carries no CVE but is a classic passive-tap evasion.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

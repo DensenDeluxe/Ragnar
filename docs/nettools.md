@@ -536,6 +536,23 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   record TLS Watch can later join on an SNI). *TSIG / SIG(0):* `DNSD-140` a deprecated TSIG algorithm
   (hmac-md5 / hmac-sha1), `DNSD-141` a TSIG fudge far above RFC 8945's 300 s (the fudge is the replay
   window), `DNSD-142` a SIG(0) transaction signature observed.
+- **SPF / libspf2 parser tier (v9)** — SPF records are the one piece of DNS content a mail server
+  *compiles*, so an SPF TXT record whose shape reaches a known libspf2 parser bug is a finding; every
+  threshold here was read out of libspf2's own source (the record supplies the syntax, the mail
+  transaction supplies the attacker byte a DNS tap never sees, so these are high-severity *exposure*
+  shapes, not confirmed exploitation). `DNSD-150` an **uppercase** macro letter — the flag that routes
+  expansion through the `url_encode` `sprintf("%%%02x", …)` sign-extension (`CVE-2021-33912`); `DNSD-151`
+  the same with the `r` reversal transformer (`CVE-2021-33913`); `DNSD-152` a TXT record named by an
+  earlier `exp=` modifier carrying a literal large enough to exhaust the 511-byte compile budget —
+  reported only on the correlated `exp=` target, never on a large TXT alone (`CVE-2021-20314`); `DNSD-153`
+  a term packing ~127 macro variables so the budget subtraction underflows a `size_t` (`CVE-2023-42118`).
+- **TCP stream reassembly (v9)** — the TCP path now reassembles DNS streams (bounded: 4 MB total,
+  128 KB/stream, 256 streams), which both de-truncates large/zone-transfer messages and adds `DNSD-160`
+  a **segment-overlap mismatch** — two TCP segments covering one sequence range with **different** bytes.
+  Reassembly keeps the first copy and reports the attempt, because a first-wins sensor and a last-wins
+  resolver would otherwise parse different DNS messages out of one stream — the classic Ptacek-Newsham
+  (1998) passive-tap insertion/evasion, whose only benign causes are a rewriting middlebox or a broken
+  stack. Reassembly is internal to the engine, so the in-app capture is unchanged (still feeds frames).
 
 The stateless detectors (KeyTrap, NSEC3 iteration, bailiwick, algorithm) fire on a single
 response; the **baseline-gated** ones (DNSBomb, NXNS burst, NSEC3-encloser, water-torture,
