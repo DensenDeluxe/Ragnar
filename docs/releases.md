@@ -2,6 +2,19 @@
 
 ## Releases
 
+### 2026-10-23
+
+#### [#1007](https://github.com/PierreGode/Ragnar/pull/1007) — feat(net): DNS Watch v9 — SPF/libspf2 parser tier + TCP stream reassembly
+*branch `feature/dns-poison-v9`*
+
+- **DNS Watch v9** refreshes the vendored `python/dns_doctor_passive/` engine with two new modules (`spf.py`, `tcpreasm.py`) and four new **detected** CVEs, plus a TCP-evasion detector:
+  - **SPF / libspf2 parser tier (`DNSD-150..153`)** — SPF records are the one piece of DNS content a mail server *compiles*, so an SPF TXT record whose shape reaches a known libspf2 parser bug is the finding (every threshold read from libspf2's own source). `DNSD-150` an **uppercase** macro letter routing expansion through the `url_encode` `sprintf("%%%02x", …)` sign-extension (`CVE-2021-33912`); `DNSD-151` the same with the `r` reversal transformer (`CVE-2021-33913`); `DNSD-152` a TXT named by an earlier `exp=` modifier carrying a literal large enough to exhaust the 511-byte compile budget — reported only on the correlated target, never a large TXT alone (`CVE-2021-20314`); `DNSD-153` a term packing ~127 macro variables so the budget subtraction underflows a `size_t` (`CVE-2023-42118`). The record supplies the syntax and the mail transaction supplies the attacker byte a DNS tap never sees, so these are exposure shapes, not confirmed exploitation.
+  - **TCP stream reassembly + `DNSD-160`** — the TCP path now reassembles DNS streams (bounded: 4 MB total / 128 KB per stream / 256 streams), de-truncating large and zone-transfer messages, and flags a **segment-overlap mismatch**: two TCP segments covering one sequence range with **different** bytes. Reassembly keeps the first copy and reports the attempt — a first-wins sensor and a last-wins resolver would otherwise parse different DNS messages out of one stream (the classic Ptacek-Newsham 1998 passive-tap insertion/evasion; benign causes are a rewriting middlebox or a broken stack). No CVE.
+- **Adapter:** no change beyond the version note — reassembly and the SPF tier are internal to the engine's `handle_frame`, so the in-app capture still just feeds frames; the BPF is unchanged (SPF is TXT over port 53, already captured), and the capture already uses a 65535-byte snaplen so segments are never truncated.
+- **CVE index +4 named / +4 detected → 417 named / 354 detected** (DNS Watch 40 → 44); all four attribute to DNS Watch, none deduped elsewhere. CREDITS.md / README.md counts synced.
+- **Self-test:** the vendored `dns_passive` suite grows **91 → 132** scenarios. Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token → card prose only, no JS/cache-bust.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
 ### 2026-10-22
 
 #### [#1006](https://github.com/PierreGode/Ragnar/pull/1006) — feat(site): /os Ulfberht card red + Huginn flasher link on the Forge page

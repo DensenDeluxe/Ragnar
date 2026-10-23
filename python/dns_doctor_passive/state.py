@@ -58,7 +58,11 @@ class Config:
                  "llmnr_enabled", "nbns_enabled", "encrypted_dns_enabled",
                  "dns_own_resolver_prefixes", "dnssd_enabled",
                  "dnssd_max_instances", "nbstat_window_seconds",
-                 "nbstat_min_queries", "tsig_max_fudge", "posture_seen_max")
+                 "nbstat_min_queries", "tsig_max_fudge", "posture_seen_max",
+                 "spf_enabled", "spf_exp_literal_min", "spf_max_exp_targets",
+                 "tcp_reasm_enabled", "tcp_reasm_max_bytes",
+                 "tcp_reasm_stream_max_bytes", "tcp_reasm_max_streams",
+                 "tcp_reasm_timeout", "tcp_reasm_shadow_bytes")
 
     def __init__(self, **kw):
         # LRU cap. MEASURED per-zone cost after lazy ring allocation:
@@ -223,6 +227,40 @@ class Config:
         # Shared first-sighting cap for every posture code that
         # reports a STATE rather than an event.
         self.posture_seen_max = 4096
+
+        # --- SPF parser tier (libspf2) ----------------------------
+        # ---- TCP stream reassembly (tcpreasm.py) ----
+        # The only genuinely memory-hungry part of the module: a
+        # single SIGRed message is ~64 kB and needs a buffer that
+        # size. Every number here is a ceiling, and every byte
+        # refused is counted.
+        self.tcp_reasm_enabled = True
+        # 4 MB across all streams, which keeps the module near its
+        # stated ~10 MB envelope on the Pi Zero 2W floor. Eviction is
+        # least-recently-used and counted.
+        self.tcp_reasm_max_bytes = 4 * 1024 * 1024
+        # Per stream: a 64 kB message plus its prefix plus room for
+        # out-of-order segments around it.
+        self.tcp_reasm_stream_max_bytes = 128 * 1024
+        self.tcp_reasm_max_streams = 256
+        # A stream whose gap never closes is reclaimed after this.
+        self.tcp_reasm_timeout = 30.0
+        # Trailing bytes kept after framing, so a late contradicting
+        # retransmission can still be compared for DNSD-160. This is
+        # the documented bound on that detection.
+        self.tcp_reasm_shadow_bytes = 2048
+
+        self.spf_enabled = True
+        # Concatenated explanation-literal length at which a TXT record
+        # named by exp= is reported (DNSD-152). libspf2's compile
+        # budget is 511 and the overflow needs a literal that fills
+        # it; 480 leaves room for the surrounding term while staying
+        # far above anything a real explanation string contains --
+        # RFC 7208 s6.2 explanations are short human-readable text.
+        self.spf_exp_literal_min = 508
+        # Bounded set of exp= targets remembered from SPF records, so
+        # the explanation TXT can be recognised when it arrives.
+        self.spf_max_exp_targets = 1024
 
         # --- zone transfer ----------------------------------------
         # CIDRs of secondaries permitted to pull your zones. DNSD-061
@@ -752,3 +790,43 @@ class CounterTable:
 
     def __len__(self):
         return len(self.entries)
+
+
+class ExpTargetTable:
+    """
+    Domains named by an SPF `exp=` modifier, remembered so that the
+    EXPLANATION record can be recognised when it arrives.
+
+    CVE-2021-20314's artifact is not the SPF record -- it is the
+    separate TXT record that `exp=` points at, fetched later and
+    compiled through the same macro path. A detector that looked only
+    at the SPF record would see a perfectly ordinary `exp=` modifier
+    and nothing else, so the two halves have to be joined, and the
+    only thing linking them is a domain name.
+
+    Bounded and LRU-evicted. Eviction costs one correlation: an
+    explanation record whose SPF record has aged out is not reported,
+    which is silence rather than a false alarm.
+    """
+    __slots__ = ("cap", "targets", "evictions")
+
+    def __init__(self, cap=1024):
+        self.cap = cap
+        self.targets = OrderedDict()
+        self.evictions = 0
+
+    def note(self, name, zone, now):
+        key = name.lower().rstrip(".")
+        if key in self.targets:
+            self.targets.move_to_end(key)
+        elif len(self.targets) >= self.cap:
+            self.targets.popitem(last=False)
+            self.evictions += 1
+        self.targets[key] = (zone, now)
+
+    def lookup(self, name):
+        got = self.targets.get(name.lower().rstrip("."))
+        return got[0] if got else None
+
+    def __len__(self):
+        return len(self.targets)

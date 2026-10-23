@@ -363,13 +363,34 @@ class DNSMessage:
         return self.answers + self.authority + self.additional
 
 
+# TCP flags, for reassembly. Only the three that end or restart a
+# stream matter here; this module never tracks congestion state.
+TCP_FIN = 0x01
+TCP_SYN = 0x02
+TCP_RST = 0x04
+
+# The DNS-over-TCP length prefix (RFC 1035 s4.2.2) is two octets, so a
+# single message cannot exceed this however many segments carry it.
+# It is a protocol ceiling, not a tunable.
+DNS_TCP_MAX_MESSAGE = 0xFFFF
+
+
 def parse_l3_l4(frame):
     """
     Dual-stack. Returns
-    (src_ip, dst_ip, sport, dport, proto, payload, ttl)
+    (src_ip, dst_ip, sport, dport, proto, payload, ttl,
+     tcp_seq, tcp_flags, tcp_payload)
     or None if this frame isn't DNS-shaped. src/dst are returned as
     raw bytes -- formatting them costs CPU on the hot path and only
     matters when a finding actually fires.
+
+    The first SEVEN positions mean exactly what they always did, so
+    callers that index r[5] or r[6] are unaffected. The last three are
+    TCP-only and are (None, 0, None) for UDP:
+
+      tcp_seq      the segment's sequence number
+      tcp_flags    the flags byte (FIN 0x01, SYN 0x02, RST 0x04)
+      tcp_payload  the raw TCP payload WITH the DNS length prefix
 
     `ttl` is the IPv4 TTL or the IPv6 hop limit, read from the SAME
     position in meaning if not in offset. It is carried because RFC
@@ -441,20 +462,41 @@ def parse_l3_l4(frame):
             return None
         sport = int.from_bytes(frame[l4:l4 + 2], "big")
         dport = int.from_bytes(frame[l4 + 2:l4 + 4], "big")
-        return (src, dst, sport, dport, "udp", frame[l4 + 8:], ip_ttl)
+        return (src, dst, sport, dport, "udp", frame[l4 + 8:], ip_ttl, None, 0, None)
     if proto == 6:  # TCP
         if len(frame) < l4 + 20:
             return None
         sport = int.from_bytes(frame[l4:l4 + 2], "big")
         dport = int.from_bytes(frame[l4 + 2:l4 + 4], "big")
+        seq = int.from_bytes(frame[l4 + 4:l4 + 8], "big")
         doff = (frame[l4 + 12] >> 4) * 4
+        flags = frame[l4 + 13]
         if doff < 20 or len(frame) < l4 + doff:
             return None
         payload = frame[l4 + doff:]
-        # DNS over TCP prefixes a 2-byte length.
+        # A pure ACK, SYN or FIN with no payload is not a parse
+        # failure -- it is how a stream opens, closes and keeps time,
+        # and reassembly needs to see those flags. It is returned with
+        # an EMPTY dns payload rather than rejected, which is why this
+        # no longer bails out when the segment is shorter than the
+        # 2-byte length prefix.
         if len(payload) < 2:
-            return None
-        return (src, dst, sport, dport, "tcp", payload[2:], ip_ttl)
+            return (src, dst, sport, dport, "tcp", b"", ip_ttl, seq, flags,
+                    payload)
+        # POSITION 5 KEEPS ITS OLD MEANING -- the 2-byte DNS/TCP
+        # length prefix stripped -- so every existing caller and test
+        # is unaffected. It is also WRONG for any stream whose message
+        # does not fit in one segment, which is the whole reason
+        # tcpreasm.py exists: this field believes the first segment is
+        # the whole message and never checks the prefix against what
+        # actually arrived. The engine uses it only when reassembly is
+        # switched off.
+        #
+        # Position 9 is the RAW TCP payload, prefix included, which is
+        # what reassembly needs: the prefix itself can be split across
+        # segments, and one segment can carry several messages.
+        return (src, dst, sport, dport, "tcp", payload[2:], ip_ttl, seq, flags,
+                payload)
     return None
 
 

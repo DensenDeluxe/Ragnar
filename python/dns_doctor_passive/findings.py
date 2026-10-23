@@ -34,6 +34,8 @@ Code ranges by detector class:
   120-129  NBNS / NBT-NS (RFC 1001/1002): posture, WPAD, NBSTAT recon
   130-139  encrypted-DNS transport (DoT/DoQ/DDR): resolver bypass
   140-149  TSIG / SIG(0) posture: weak algorithm, replay window
+  150-159  SPF parser (libspf2): macro-expansion and compile-budget
+           overflow shapes in TXT records
 
 CONFIDENCE is separate from SEVERITY on purpose (LESSON T): severity
 says how bad it would be if real, confidence says how sure the wire
@@ -420,6 +422,50 @@ FINDINGS = {
         "cve": None, "klass": "tsig-posture", "stateful": True,
         "desc": "A SIG(0) transaction signature was observed (RFC 2931). SIG(0) was largely abandoned in favour of TSIG and brings public-key management into the transaction path; its presence is worth knowing about rather than alarming over",
     },
+
+    # --- SPF parser / libspf2 (150-159) ---------------------------
+    # Four CVEs, all reached by feeding libspf2 a crafted record -- and
+    # an SPF record is a DNS TXT record, so the artifact travels in
+    # cleartext DNS where this module already looks.
+    #
+    # THE TWO PAIRS HAVE DIFFERENT EVIDENCE CEILINGS, and the
+    # severities say so. For the expansion bugs (150, 151) the record
+    # supplies the macro SYNTAX but the mail transaction supplies the
+    # expanded VALUE -- sender, HELO, client IP -- which a DNS tap
+    # never sees. So those report a record that can REACH the
+    # vulnerable path. For the compile bugs (152, 153) the record IS
+    # the whole attack: a 500-byte literal and 127 macros in one term
+    # are not things a legitimate record contains.
+    "DNSD-150": {
+        "name": "SPF_MACRO_URLENCODE_SPRINTF", "severity": "warning", "confidence": "high",
+        "cve": "CVE-2021-33912", "klass": "spf-parser", "stateful": True,
+        "desc": "An SPF record uses an UPPERCASE macro letter, which RFC 7208 s7.1 URL-escapes -- the libspf2 block whose sprintf printed eight hex digits for any byte above 0x7f because *p_read was a signed char, writing ten bytes where four were budgeted. Reports a record that can reach the path; the high byte itself comes from the mail transaction, which a DNS tap does not see",
+    },
+    "DNSD-151": {
+        "name": "SPF_MACRO_REVERSE_URLENCODE", "severity": "warning", "confidence": "high",
+        "cve": "CVE-2021-33913", "klass": "spf-parser", "stateful": True,
+        "desc": "An SPF record combines an UPPERCASE macro letter with the 'r' reverse transformer -- e.g. %{Dr}. libspf2's reversal block overwrote the length variable with a single LABEL's length, which then sized the URL-encode allocation for the entire reversed string. Strictly worse than DNSD-150: the allocation is undersized rather than overrun by four bytes",
+    },
+    "DNSD-152": {
+        "name": "SPF_EXP_LITERAL_STACK_OVERFLOW", "severity": "critical", "confidence": "high",
+        "cve": "CVE-2021-20314", "klass": "spf-parser", "stateful": True,
+        "desc": "A TXT record named by an observed SPF exp= modifier carries a string literal long enough to fill libspf2's 511-byte compile budget, split across multiple TXT strings. SPF_INIT_STRING_LITERAL never subtracted the 4-byte SPF_data_t header it had just written, so the literal overflows the stack buffer by exactly four bytes. The split is not incidental -- one TXT string caps at 255 bytes, so reaching 511 requires several",
+    },
+    "DNSD-153": {
+        "name": "SPF_MACRO_BUDGET_UNDERFLOW", "severity": "critical", "confidence": "high",
+        "cve": "CVE-2023-42118", "klass": "spf-parser", "stateful": True,
+        "desc": "An SPF term carries enough macro variables to leave libspf2's compile budget between 0 and 3 bytes when the next string literal is initialised. The 2021 fix subtracted sizeof(SPF_data_t) from an unsigned count with no floor, so that subtraction UNDERFLOWS to roughly SIZE_MAX and every later bounds check passes. A regression of the CVE-2021-20314 fix, in the same macro in the same function",
+    },
+
+    # ---------------- 160-169: TCP stream reassembly ----------------
+    # Reassembly is plumbing, not a detector, so it gets exactly one
+    # code: the case where the plumbing is being attacked.
+    "DNSD-160": {
+        "name": "TCP_SEGMENT_OVERLAP_MISMATCH", "severity": "warning",
+        "confidence": "high", "cve": None, "klass": "tcp-reassembly",
+        "stateful": True,
+        "desc": "Two TCP segments on the same DNS stream covered the same sequence range with DIFFERENT bytes. Reassembly keeps the first copy, so this reports the attempt rather than being fooled by it. The technique is Ptacek and Newsham's: a resolver that resolves overlap last-wins and a sensor that resolves it first-wins end up parsing different DNS messages from one stream, which is how an attacker makes a passive tap see something other than what the resolver acted on. Healthy stacks never retransmit different payload bytes for a sequence range, so the benign explanations are a rewriting middlebox or a broken stack -- both worth knowing about",
+    },
 }
 
 # Codes whose detector needs a LEARNED per-zone baseline before it can
@@ -441,7 +487,8 @@ CENSUS_CODES = {"DNSD-070", "DNSD-071", "DNSD-072", "DNSD-073", "DNSD-078",
 # value, so a window opening and closing re-reports once per state
 # change rather than once per announcement packet.
 INSTANCE_SUPPRESSED = {"DNSD-077", "DNSD-110", "DNSD-112", "DNSD-120",
-                       "DNSD-121", "DNSD-122", "DNSD-100", "DNSD-132", "DNSD-133"}
+                       "DNSD-121", "DNSD-122", "DNSD-100", "DNSD-132", "DNSD-133",
+                       "DNSD-150", "DNSD-151", "DNSD-152", "DNSD-153"}
 
 # The two scope codes that cannot run without operator-supplied local
 # prefixes. Named here so the engine can report them as disabled
@@ -480,7 +527,8 @@ def _validate():
         assert m["klass"] in ("structural", "posture", "behavioural", "integrity",
                               "dnssec-integrity", "protocol-abuse", "transfer", "mdns",
                               "ddns", "rdns", "dns-sd", "llmnr", "nbns",
-                              "encrypted-transport", "tsig-posture")
+                              "encrypted-transport", "tsig-posture",
+                              "spf-parser", "tcp-reassembly")
     assert BASELINE_DEPENDENT <= set(FINDINGS), "BASELINE_DEPENDENT names an unknown code"
     assert PREFIX_DEPENDENT <= set(FINDINGS), "PREFIX_DEPENDENT names an unknown code"
     assert CENSUS_CODES <= set(FINDINGS), "CENSUS_CODES names an unknown code"
