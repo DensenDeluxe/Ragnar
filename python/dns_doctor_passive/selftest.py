@@ -348,12 +348,15 @@ class TestMdnsTier(unittest.TestCase):
         self.assertIn("DNSD-079", codes(eng.handle_frame(f, now=1.0)))
         self.assertNotIn("DNSD-079", codes(eng.handle_frame(f, now=2.0)),
                          "re-announcement must be suppressed")
-        # Bare presence: no Matter/Thread fingerprint attached.
+        # A bare PTR (no TXT) yields the device type from the instance
+        # label, but no TXT keys and -- the point -- no device name.
         eng = Engine(Config())
         out = eng.handle_frame(
             self._frame(self._v4(), [self._ptr("_z-wave._udp", "ZIPGateway-02")]))
         ev = [x["evidence"] for x in out if x["code"] == "DNSD-079"][0]
-        self.assertEqual(ev["fingerprint"], {})
+        self.assertEqual(ev["fingerprint"].get("device_type"), "ZIPGateway-02")
+        self.assertNotIn("device_name", ev["fingerprint"])
+        self.assertNotIn("product_id", ev["fingerprint"])
 
     def test_thread_border_router_census(self):
         eng = Engine(Config())
@@ -776,6 +779,29 @@ class TestMatterFingerprint(unittest.TestCase):
                           "DNSD-070")
             self.assertEqual(fp.get("compressed_fabric_id"), "2906c908d115d362", label)
             self.assertEqual(fp.get("node_id"), "8fc7772401cd0696", label)
+            got[label] = fp
+        self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
+
+    def test_zwave_fingerprint_both_stacks(self):
+        # Identity by product and network position -- and crucially
+        # NO device name, because Z-Wave does not put one on the wire.
+        ZI = "Static Controller [d24ac4700200]"
+        TXT = [b"txtvers=1", b"productID=0x0301:0x0001", b"epid=0",
+               b"icon=4096", b"info=" + bytes([0x25, 0x00, 0x13]),
+               b"securityClasses=" + bytes([0x80, 0x01])]
+        got = {}
+        for label, l3 in (("IPv4", MV4), ("IPv6", MV6)):
+            fp = self._fp(Config(mdns_local_prefixes=MPFX), l3,
+                          [mdns_ptr("_z-wave._udp", ZI),
+                           mdns_txt("_z-wave._udp", ZI, TXT)],
+                          "DNSD-079")
+            self.assertEqual(fp.get("device_type"), "Static Controller", label)
+            self.assertEqual(fp.get("home_id"), "d24ac470", label)
+            self.assertEqual(fp.get("product_id"), "0x0301:0x0001", label)
+            self.assertEqual(fp.get("endpoint_id"), "0", label)
+            self.assertEqual(fp.get("security_classes_hex"), "8001", label)
+            self.assertNotIn("device_name", fp)
+            self.assertFalse(any("info" in k for k in fp), f"info leaked: {fp}")
             got[label] = fp
         self.assertEqual(got["IPv4"], got["IPv6"], f"dual-stack divergence: {got}")
 

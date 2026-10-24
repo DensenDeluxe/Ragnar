@@ -493,8 +493,13 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   border router (`_meshcop._udp`), `DNSD-078` a Thread border agent advertising the ephemeral-key
   commissioning endpoint (`_meshcop-e._udp`), and (v10) `DNSD-079` a Silicon Labs **Z-Wave Z/IP
   Gateway** (`_z-wave._udp`, IANA UDP 4123 / DTLS 41230) — wired evidence of a Z-Wave mesh on the
-  IP side without any 800–900 MHz radio, like the Matter/Thread entries. These are the only plane
-  that names those fabrics on the IP side, never an alarm. And the RFC 6762 / CERT **VU#550620** scope family — `DNSD-074` an mDNS
+  IP side without any 800–900 MHz radio, like the Matter/Thread entries. **(v11)** the Z/IP entry
+  now carries a fingerprint parsed from the announcement — device type, the Z-Wave **home ID** (the
+  leading 32 bits of the `[hex]` instance token), the multichannel **endpoint**, **product ID** and
+  the raw **security-class hex** (S0/S2 not decoded — the hex is reported verbatim, never guessed) —
+  but **no user-set device name**: Z-Wave node names are set in the controller and live inside the
+  encrypted Z/IP tunnel (DTLS 41230), which a passive tap cannot read. These are the only plane that
+  names those fabrics on the IP side, never an alarm. And the RFC 6762 / CERT **VU#550620** scope family — `DNSD-074` an mDNS
   packet whose IP TTL / hop-limit is not 255 (it crossed a router or was not link-local;
   config-free), `DNSD-075` an mDNS source outside the capture interface's own subnets (off-link),
   and `DNSD-076` an mDNS responder answering an off-link **unicast** destination — an open

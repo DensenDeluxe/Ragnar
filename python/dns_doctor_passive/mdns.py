@@ -70,6 +70,7 @@ CENSUS_SERVICES = {
 # record.
 MATTER_SERVICES = ("_matter._tcp", "_matterc._udp", "_matterd._udp")
 THREAD_SERVICES = ("_meshcop._udp", "_meshcop-e._udp")
+ZWAVE_SERVICES = ("_z-wave._udp",)
 
 # Matter DNS-SD TXT keys, lowercased (RFC 6763 s6.4 makes key
 # comparison case-insensitive; Matter publishes them uppercase).
@@ -102,6 +103,32 @@ THREAD_TXT = {
     "id": "border_agent_id",
 }
 
+# Z-Wave Z/IP Gateway DNS-SD TXT keys (Silicon Labs SDS11756). Keys
+# are lowercase here because the parser lowercases every TXT key per
+# RFC 6763 s6.4; the gateway publishes several mixed-case ('productID',
+# 'securityClasses').
+#
+# THERE IS NO USER-SET DEVICE NAME ON THE WIRE. Unlike Matter's 'dn',
+# the Z/IP announcement carries no human-chosen name -- the friendly
+# name someone types in their hub is set in the controller and lives
+# inside the encrypted Z/IP tunnel (DTLS 41230), which a passive tap
+# cannot read. So this fingerprint identifies the node by PRODUCT and
+# NETWORK POSITION, not by label, and nothing here is called a device
+# name.
+ZWAVE_TXT = {
+    "productid":       "product_id",            # product identity
+    "epid":            "endpoint_id",           # multichannel endpoint
+    "securityclasses": "security_classes_hex",  # raw hex; S0/S2 decode NOT attempted
+    "mode":            "mode",
+    "txtvers":         "txt_version",
+    "icon":            "icon_type",             # device-type icon ID
+    # 'info' is deliberately NOT read. Silicon Labs' doc lists the key
+    # but does not define its contents, and this build will not guess
+    # at a field it has not seen decoded on the wire -- the same
+    # discipline applied to Thread's 'sb' and 'omr'. Left for a live
+    # capture to settle.
+}
+
 # Keys the spec defines as INTEGERS, rendered as ints so a consumer
 # does not have to know which TXT values are numeric. An unparseable
 # value falls back to its raw text rather than being dropped: a
@@ -120,7 +147,7 @@ TXT_INT_KEYS = {"dt", "d", "cm"}
 # rendered, and no finding is raised on either. A detector built on a
 # guessed bit layout is worse than no detector, because it is
 # confidently wrong on every border router on the link.
-TXT_BINARY_KEYS = {"xp", "xa", "sb", "id", "ri", "omr"}
+TXT_BINARY_KEYS = {"xp", "xa", "sb", "id", "ri", "omr", "securityclasses"}
 
 
 def _addr_text(raw):
@@ -225,6 +252,48 @@ def detect_census(msg, cfg, census_table, src_raw, now):
     return out
 
 
+def split_zwave_instance(instance):
+    """
+    A Z/IP Gateway instance label is a generic device TYPE followed by
+    a bracketed hex token, e.g. "Static Controller [d24ac4700200]".
+    The hex concatenates the home ID, node ID and multichannel
+    endpoint (Silicon Labs SDS11756, the Z/IP DNS-SD support doc).
+
+    This extracts what is UNAMBIGUOUS and no more:
+      - device_type: the label text before the bracket
+      - network_hex:  the full bracketed hex token, verbatim
+      - home_id:      the first 8 hex digits. The Z-Wave home ID is a
+                      fixed 32-bit value, so this split is safe.
+
+    The node ID / endpoint split WITHIN the remaining hex is NOT
+    attempted. Classic Z-Wave uses an 8-bit node ID and Z-Wave Long
+    Range a 16-bit one, so the boundary is not decidable from the
+    hostname alone -- guessing it would mislabel every Long Range
+    node. The endpoint is taken from the 'epid' TXT key instead, which
+    states it outright.
+
+    Returns a dict (possibly with only device_type), or None.
+    """
+    if not instance:
+        return None
+    out = {}
+    lb, rb = instance.rfind("["), instance.rfind("]")
+    if lb != -1 and rb > lb:
+        dtype = instance[:lb].strip()
+        hexpart = instance[lb + 1:rb].strip()
+        if dtype:
+            out["device_type"] = dtype
+        if hexpart and all(ch in "0123456789abcdefABCDEF" for ch in hexpart):
+            out["network_hex"] = hexpart.lower()
+            if len(hexpart) >= 8:
+                out["home_id"] = hexpart[:8].lower()
+    else:
+        dtype = instance.strip()
+        if dtype:
+            out["device_type"] = dtype
+    return out or None
+
+
 def _summarise(fp):
     """A one-line human summary, for the operator who reads the detail
     string and never opens the evidence dict.
@@ -238,11 +307,14 @@ def _summarise(fp):
     for name, label in (("device_name", None),
                         ("vendor_product", "VID+PID"),
                         ("device_type", "device type"),
+                        ("product_id", "productID"),
                         ("model_name", None),
                         ("vendor_name", None),
                         ("network_name", "Thread network"),
                         ("thread_version", "Thread"),
-                        ("node_id", "node")):
+                        ("node_id", "node"),
+                        ("home_id", "Z-Wave home"),
+                        ("endpoint_id", "endpoint")):
         v = fp.get(name)
         if v in (None, True):
             continue
@@ -427,6 +499,8 @@ def txt_fingerprint(service, pairs, cfg):
         table = MATTER_TXT
     elif service in THREAD_SERVICES:
         table = THREAD_TXT
+    elif service in ZWAVE_SERVICES:
+        table = ZWAVE_TXT
     else:
         return {}
     out = {}
@@ -502,6 +576,10 @@ def describe(msg, service, instance, cfg):
         ids = split_matter_instance(instance)
         if ids:
             fp["compressed_fabric_id"], fp["node_id"] = ids
+    if service == "_z-wave._udp":
+        zi = split_zwave_instance(instance)
+        if zi:
+            fp.update(zi)
     srv = _srv_for(msg, service, instance)
     if srv:
         fp["srv"] = srv
