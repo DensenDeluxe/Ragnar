@@ -2,6 +2,16 @@
 
 ## Releases
 
+### 2026-10-24
+
+#### [#1009](https://github.com/PierreGode/Ragnar/pull/1009) — docs(net): refresh OSI visibility matrix graphic (DNS Watch coverage)
+*branch `feature/osi-matrix-refresh`*
+
+- Refreshes the **OSI module visibility matrix** graphic to match the current module set — most visibly the **L7 DNS Watch** row, which now advertises its added coverage: the **SPF / libspf2** parser tier, **reverse-DNS (rDNS)** and **dynamic-DNS (DDNS)** posture, and **Thread / Matter** presence inferred over mDNS (all radio-free, from the wired/Wi-Fi tap).
+- Drops in the new `web/images/osi/matrix_full.jpg` (2160×5034) and the docs copy `docs/ragnar_osi_visibility_matrix.jpg` (re-encoded), and **re-cuts all 7 per-layer bands** (`matrix_l1..l7.jpg`) — band edges shift each revision, so they were re-detected from the row-brightness gap profile and verified clipping-free against a contact sheet.
+- Bumps the `?v=` cache-bust on all **16** matrix image URLs in `web/index_modern.html` so the refreshed graphic loads for existing clients. No code or behaviour change — graphic/docs only; the DNS Watch detectors themselves shipped across #1003 / #1004 / #1008.
+- **Docs:** [nettools.md › Module visibility matrix](nettools.md#module-visibility-matrix).
+
 ### 2026-10-23
 
 #### [#1007](https://github.com/PierreGode/Ragnar/pull/1007) — feat(net): DNS Watch v9 — SPF/libspf2 parser tier + TCP stream reassembly
