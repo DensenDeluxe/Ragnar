@@ -55,6 +55,12 @@ CENSUS_SERVICES = {
     # one that would be wrong on every Thread border router in the
     # building if the former is true.
     "_meshcop-e._udp": ("DNSD-078", "Thread border agent, ephemeral-key endpoint"),
+    # Silicon Labs Z/IP Gateway. No Matter/Thread fingerprint
+    # vocabulary applies -- Z-Wave publishes no VP/vn-style identity
+    # keys this tier reads -- so it censuses as bare presence with the
+    # instance name, like the simplest Matter entry does when a PTR
+    # arrives without its TXT.
+    "_z-wave._udp":    ("DNSD-079", "Z-Wave Z/IP Gateway"),
 }
 
 # Which fingerprint vocabulary applies to each service type. Matter

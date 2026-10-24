@@ -284,6 +284,11 @@ FINDINGS = {
         "cve": None, "klass": "mdns", "stateful": True,
         "desc": "A Thread border agent is advertising the ephemeral-key commissioning service (_meshcop-e._udp) -- an epskc endpoint alongside the ordinary PSKc one. Census only: reported as presence because this tier could not establish from the wire whether the endpoint is advertised continuously or only while a session is live",
     },
+    "DNSD-079": {
+        "name": "MDNS_ZWAVE_ZIP_PRESENT", "severity": "notice", "confidence": "high",
+        "cve": None, "klass": "mdns", "stateful": True,
+        "desc": "A Z-Wave Z/IP Gateway is advertising _z-wave._udp on this LAN. Silicon Labs' Z/IP Gateway announces every Z-Wave node and endpoint over mDNS (IANA registers the service on UDP 4123, DTLS on 41230), so the announcement is wired evidence of a Z-Wave mesh behind the gateway, visible on the IP side without any 800-900 MHz radio. Census only -- never an alarm; like the Matter and Thread census codes, it reports presence rather than a vulnerability",
+    },
 
     # --- DDNS tier (080-089) --------------------------------------
     # RFC 2136 UPDATE, opcode 5. Both posture codes report an OUTCOME
@@ -478,6 +483,7 @@ BASELINE_DEPENDENT = {"DNSD-020", "DNSD-021", "DNSD-022"}
 # re-announce constantly -- without this the census would emit on
 # every announcement packet and drown the feed it is meant to inform.
 CENSUS_CODES = {"DNSD-070", "DNSD-071", "DNSD-072", "DNSD-073", "DNSD-078",
+                "DNSD-079",
                 "DNSD-130", "DNSD-131", "DNSD-142"}
 
 # Codes suppressed per instance like the census, but which are NOT

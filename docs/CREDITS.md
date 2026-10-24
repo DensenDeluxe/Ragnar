@@ -92,6 +92,9 @@ behind them is Solarflere's work.
   **TCP stream reassembly**, which catches a Ptacek-Newsham **segment-overlap mismatch** (two
   segments giving different bytes for one sequence range, so a first-wins sensor and a last-wins
   resolver see different DNS messages) — carries no CVE but is a classic passive-tap evasion.
+  **DNS Watch v10** extends the mDNS census to **Z-Wave**: a Silicon Labs Z/IP Gateway advertising
+  `_z-wave._udp` is wired evidence of a Z-Wave mesh on the IP side (radio-free, like the
+  Matter/Thread census) — informational, carries no CVE.
 - **SSDP / UPnP** — a passive SSDP/UPnP protocol detector for **CallStranger** (**CVE-2020-12695**),
   the lone spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device
   into a reflector / data-exfiltration relay, independent of device age. 25 codes across discovery

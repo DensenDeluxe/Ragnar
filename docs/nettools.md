@@ -490,8 +490,11 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   **Matter/Thread census**, informational and once per instance — `DNSD-070` a Matter
   operational node (`_matter._tcp`), `DNSD-071` a commissionable device (`_matterc._udp`, open
   to pairing right now), `DNSD-072` a commissioner (`_matterd._udp`), `DNSD-073` a Thread
-  border router (`_meshcop._udp`) — the only plane that names those fabrics on the IP side,
-  never an alarm. And the RFC 6762 / CERT **VU#550620** scope family — `DNSD-074` an mDNS
+  border router (`_meshcop._udp`), `DNSD-078` a Thread border agent advertising the ephemeral-key
+  commissioning endpoint (`_meshcop-e._udp`), and (v10) `DNSD-079` a Silicon Labs **Z-Wave Z/IP
+  Gateway** (`_z-wave._udp`, IANA UDP 4123 / DTLS 41230) — wired evidence of a Z-Wave mesh on the
+  IP side without any 800–900 MHz radio, like the Matter/Thread entries. These are the only plane
+  that names those fabrics on the IP side, never an alarm. And the RFC 6762 / CERT **VU#550620** scope family — `DNSD-074` an mDNS
   packet whose IP TTL / hop-limit is not 255 (it crossed a router or was not link-local;
   config-free), `DNSD-075` an mDNS source outside the capture interface's own subnets (off-link),
   and `DNSD-076` an mDNS responder answering an off-link **unicast** destination — an open

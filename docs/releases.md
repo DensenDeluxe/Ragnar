@@ -4,6 +4,15 @@
 
 ### 2026-10-24
 
+#### [#1012](https://github.com/PierreGode/Ragnar/pull/1012) — feat(net): DNS Watch v10 — Z-Wave Z/IP Gateway mDNS presence census
+*branch `feature/dns-poison-v10`*
+
+- **DNS Watch** (`do_dns_watch`) gains a Z-Wave entry in its mDNS census — `DNSD-079` **`MDNS_ZWAVE_ZIP_PRESENT`**: a Silicon Labs **Z/IP Gateway** advertising `_z-wave._udp` (IANA UDP 4123, DTLS 41230) on the LAN. Like the Matter / Thread census codes it reports **presence**, not a vulnerability — wired evidence of a Z-Wave mesh behind the gateway, visible on the IP side **without any 800–900 MHz radio**. Notice severity, census-suppressed (once per instance), **no CVE**.
+- Pure drop-in refresh of the vendored `python/dns_doctor_passive/` engine — only `findings.py` (the `DNSD-079` registry entry + `CENSUS_CODES`), `mdns.py` (the `_z-wave._udp` service mapping) and `selftest.py` changed; `engine.py` / `state.py` (Config) / `parse.py` / `detect.py` are byte-identical, so **no BPF, config or frame-loop change** and no adapter rewiring (the header comment + `do_dns_watch` docstring note v10).
+- **CVE index unchanged — 418 named / 355 detected** (DNSD-079 carries no CVE); CREDITS.md / README.md counts untouched (coverage bullet extended for the Z-Wave census).
+- **Self-test:** the vendored `dns_passive` suite gains the Z-Wave census scenario (IPv4/IPv6 parity, once-per-instance suppression, bare-presence fingerprint) — **132 → 133** checks; aggregate `do_routing_selftest` stays **60 suites**, all green.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch) mDNS tier updated (DNSD-078 / DNSD-079).
+
 #### [#1011](https://github.com/PierreGode/Ragnar/pull/1011) — feat(net): SSDP / UPnP Watch — passive CallStranger + discovery/GENA/IGD scanner
 *branch `feature/ssdp-upnp-watch`*
 
