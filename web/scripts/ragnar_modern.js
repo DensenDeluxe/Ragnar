@@ -1578,6 +1578,7 @@ function showNetworkSubtab(name, layer) {
         _isisFillIfaces();
         _fhrpFillIfaces();
         _bgpFillIfaces();
+        _ssdpFillIfaces();
     } else if (name === 'interfaces') {
         loadNetworkIdentity();
         loadInterfaces();
@@ -11774,6 +11775,80 @@ async function runPimWatch() {
                     <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
                     <td class="px-2 py-1 ${kl}">${escapeHtml(f.class || '')}</td>
                     <td class="px-2 py-1 text-gray-400">${escapeHtml(String(af))}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.title || '')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- SSDP / UPnP Watch (passive discovery + GENA eventing + IGD scanner) ----
+const _SSDP_VERDICT_STYLE = {
+    clean:   ['bg-green-950/40 border-green-900 text-green-400', '✓ SSDP/UPnP healthy — no CallStranger, reflection/amplifier or IGD-abuse shape'],
+    anomaly: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SSDP/UPnP posture issue — scope/TTL escape, advert spoof, byebye flood or unbounded GENA timeout'],
+    attack:  ['bg-red-950/60 border-red-800 text-red-300', '🛑 SSDP/UPnP attack / exposure — CallStranger off-link CALLBACK, reflection/amplifier, or WAN-side / third-party IGD control'],
+    unknown: ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _SSDP_SEV_COLOR = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-400' };
+function _ssdpFillIfaces() {
+    const sel = document.getElementById('ssdp-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runSsdpWatch() {
+    const out = document.getElementById('ssdp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ssdp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ssdp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing SSDP / UPnP on the segment…</p>';
+    try {
+        _ssdpFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/ssdp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runSsdpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _SSDP_VERDICT_STYLE[d.verdict] || _SSDP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.ssdp_messages || 0} SSDP / ${d.gena || 0} GENA / ${d.igd || 0} IGD msg(s) · ${d.high || 0} high, ${d.medium || 0} med, ${d.low || 0} low</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Tier</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _SSDP_SEV_COLOR[f.severity] || 'text-gray-400';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(f.tier || '')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(f.af || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.cve || '')}</td>
                     <td class="px-2 py-1">${escapeHtml(f.title || '')}</td>
                 </tr>`;
             });

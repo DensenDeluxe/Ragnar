@@ -4,6 +4,18 @@
 
 ### 2026-10-24
 
+#### [#1011](https://github.com/PierreGode/Ragnar/pull/1011) — feat(net): SSDP / UPnP Watch — passive CallStranger + discovery/GENA/IGD scanner
+*branch `feature/ssdp-upnp-watch`*
+
+- New **L7 passive watcher**: **SSDP / UPnP Watch** (`do_ssdp_watch`, `GET /api/net/ssdp-watch`) — a detection-only scanner for the UPnP Device Architecture **discovery** plane (SSDP, HTTPU over UDP/1900 + IPv6 `FF0X::C`), **GENA** eventing (TCP `SUBSCRIBE`/`UNSUBSCRIBE`) and **IGD** port-mapping control (TCP SOAP). It opens a receive socket and nothing else — never probes, never M-SEARCHes.
+- **CVE-2020-12695 (CallStranger)** — the one qualifying *protocol* CVE, a spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device into a reflector / data-exfiltration relay, independent of device age. Carried by `SSDP-001..003`. Vendor / implementation bugs (libupnp, MiniUPnPd, the Windows SSDP service) are out of scope by design.
+- **25 codes** across tier A (discovery — off-link M-SEARCH reflection, unicast `ssdp:all` sweeps, amplifier / response-storm, TTL / IPv6-scope escape, advert spoof, byebye floods, malformed), tier B (GENA — CallStranger plus odd-scheme / sensitive-port callbacks and unbounded `TIMEOUT`) and tier C (IGD — third-party `AddPortMapping` pinhole, WAN-side control, admin-port mapping, foreign delete, unbounded lease). **Dual-stack** with proven IPv4/IPv6 parity; **CGNAT 100.64/10 is treated as off-link**; no learning period. Engine vendored at `python/ssdpwatch.py` (+ `ssdpwatch_selftest.py`).
+- **Diagnostics UI:** new SSDP/UPnP Watch card in the **L7 Application** panel (Passive · network services); the verdict reuses the shared `attack` / `anomaly` / `clean` styling (no new paging token). `ragnar_modern.js` cache-bust bumped.
+- **CVE index +1 named / +1 detected → 418 named / 355 detected** (SSDP/UPnP Watch = 1). CREDITS.md / README.md counts synced.
+- **Self-test:** new `ssdp` suite — the vendored engine's 89-check suite plus focused CallStranger / clean-traffic / dual-stack / IGD scenarios and a Scapy pcap end-to-end leg. Aggregate `do_routing_selftest` **59 → 60 suites**, all green.
+- **Visibility matrix:** refreshed graphic (2160×5184) adds the SSDP/UPnP Watch card to the **L7** band — `matrix_full.jpg` + the docs copy replaced and all 7 bands re-cut (only L7 changed), with the 16 matrix cache-bust URLs bumped.
+- **Docs:** [nettools.md › SSDP / UPnP Watch](nettools.md#ssdp--upnp-watch).
+
 #### [#1010](https://github.com/PierreGode/Ragnar/pull/1010) — chore(pages): retire the /os download mirror
 *branch `chore/remove-os-web-mirror`*
 
