@@ -19,7 +19,6 @@ on:
       - 'espnow_bridge_firmware/espnow_bridge_s3_lcd/**'
       - 'roomscan_firmware/**'
       - 'cyd_firmware/flasher/**'
-      - 'web/os/**'
       - '.github/workflows/build-rusense-flasher.yml'
   workflow_dispatch:
 
@@ -200,15 +199,6 @@ jobs:
 
           echo "=== Firmware binaries ==="
           ls -lhR site/firmware
-
-      # Ragnar OS download page, served as a subpage at /os/ alongside the
-      # flasher. Self-contained HTML; its download buttons point at the images
-      # hosted on https://ragnar.life/images/, so nothing large lands on Pages.
-      - name: Stage the Ragnar OS download subpage (/os)
-        run: |
-          mkdir -p site/os
-          cp web/os/index.html site/os/index.html
-          echo "staged site/os:"; ls -l site/os
 
       - uses: actions/configure-pages@v5
 

@@ -4,6 +4,13 @@
 
 ### 2026-10-24
 
+#### [#1010](https://github.com/PierreGode/Ragnar/pull/1010) — chore(pages): retire the /os download mirror
+*branch `chore/remove-os-web-mirror`*
+
+- The Ragnar OS download page is maintained in **PierreGode/RagnarOS** (`site/`) and deployed to **ragnar.life**. Mirroring the same page here as a GitHub Pages `/os` subpage meant two copies to keep in sync.
+- Removes `web/os/index.html` and the `build-rusense-flasher.yml` step that staged it at `site/os/`, plus its `web/os/**` path trigger. The download page now lives **only** in the RagnarOS repo and is served **only** from ragnar.life.
+- After merge, once the flasher Pages workflow next runs, `…/os/` is no longer published. The flasher/firmware Pages site and all runtime behaviour are unchanged.
+
 #### [#1009](https://github.com/PierreGode/Ragnar/pull/1009) — docs(net): refresh OSI visibility matrix graphic (DNS Watch coverage)
 *branch `feature/osi-matrix-refresh`*
 
