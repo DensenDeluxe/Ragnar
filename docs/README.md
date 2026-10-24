@@ -62,6 +62,7 @@ browse than search.
 ## Platform & safety
 - [Cellular Uplink Fallback](cellular-uplink.md) — USB-tethered hotspot / phone / LTE modem as a backup uplink with heartbeat failover + failback hysteresis, never scanned
 - [Security & Authentication](SECURITY.md) — hardware-bound login, encryption at rest
+- [Files](files.md) — file manager (create/move/rename across every tree), in-browser editor, phone uploads
 - [Vault](vault.md) — encrypted file store
 - [Kill Switch](KILL_SWITCH.md) — wipe all data
 

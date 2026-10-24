@@ -4,6 +4,17 @@
 
 ### 2026-10-24
 
+#### feat(web): Files tab becomes a full file manager + fixes iPhone upload
+*branch `feature/files-tab-manager`*
+
+- The **Files** tab is reworked into a general file manager in response to it being *"badly structured… hard to move files between folders, no possibility to create text files or change file format, and uploading from iPhone does not work."* Four concrete changes:
+  - **iPhone/iPad uploads now work.** Every file picker created an `<input type=file>` and clicked it **while it was detached from the DOM** — which iOS Safari garbage-collects before the `change` event fires, so the upload silently did nothing. A new shared `pickFiles()` helper keeps the input in the document (visually hidden) until the user has chosen or cancelled, and all five pickers (Files upload, Vault upload, Mesh Share, remote-share send, unit transfer) now route through it. The two static `<input>`-driven uploaders (console-script / rubber-ducky) were already DOM-resident and unaffected.
+  - **Create text files, pick the format.** A **New file** action (`POST /api/files/create`) creates a file with whatever name/extension you type (`notes.txt`, `hosts.csv`, `run.sh`, …) and opens it straight in the inline editor. Duplicate names and writes to the synthetic roots are rejected.
+  - **Move / rename / create anywhere.** `move`, `rename` and `mkdir` previously only accepted the Uploads/Backups trees; they now resolve through `_resolve_readable_path`, so files and folders can be moved and renamed **across every browsable tree** — Uploads, Backups, the script libraries and the per-network loot/scan/log folders. The move picker browses all folders and offers **Move here** in any real folder. Renaming can change a file's extension (e.g. `capture.bin` → `capture.pcap`). Per-row **Move**/**Rename** and the **New file / New folder / Upload here** toolbar now appear in every real folder, and the button row wraps for phone width.
+  - **Bounds unchanged.** Both ends of every operation still pass through the existing per-root traversal guards, so nothing can escape Ragnar's data tree; the virtual root `/` and the loot *category* roots (which only list networks) remain non-writable targets.
+- **Verification:** headless app-level smoke test (mkdir → create → list → cross-folder move → rename-with-new-extension → duplicate/loot-root/`/` rejections → cleanup) **9/9**. `webapp_modern.py` and `ragnar_modern.js` syntax-checked.
+- **Docs:** new [Files](files.md) page; README "File manager & in-browser editor" bullet and `docs/README.md` index updated. JS cache-bust bumped to `?v=20261024-files-manager`.
+
 #### [#1013](https://github.com/PierreGode/Ragnar/pull/1013) — feat(net): DNS Watch v11 — Z-Wave Z/IP announcement fingerprint
 *branch `feature/dns-poison-v11`*
 
