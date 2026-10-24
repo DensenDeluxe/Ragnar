@@ -15469,6 +15469,271 @@ def _pim_selftest():
 
 
 # --------------------------------------------------------------------------
+# SSDP / UPnP Watch: passive SSDP/UPnP protocol scanner (detection-only)
+# --------------------------------------------------------------------------
+# SSDP is the UPnP Device Architecture discovery plane — HTTPU over UDP/1900
+# (IPv4 239.255.255.250, IPv6 FF02/FF05/FF08/FF0E::C) — plus GENA eventing
+# (TCP SUBSCRIBE/UNSUBSCRIBE) and IGD control (TCP SOAP WANIPConnection /
+# WANPPPConnection). The one qualifying protocol CVE is CVE-2020-12695
+# (CallStranger): a spec-level GENA flaw where a SUBSCRIBE whose CALLBACK points
+# off-link turns the device into a reflector / exfil relay — it rides any stack
+# that has not taken the 2020 UDA revision, independent of device age. Vendor /
+# implementation CVEs (libupnp, MiniUPnPd, the Windows SSDP service) are
+# deliberately out of scope — that is the vendor gate, and it stays shut. Engine
+# vendored verbatim at python/ssdpwatch.py (self-contained stdlib; scapy only on
+# its own live path, which the adapter does not use — it captures via
+# tcpdump->pcap and feeds scapy packets through ssdpwatch._scapy_to_packet /
+# SSDPWatch.observe). 25 codes across tiers A (discovery) / B (GENA — the
+# CallStranger trigger) / C (IGD control). No baseline — every rule is per-packet
+# or per-exchange inside a bounded window (grab-and-go). Dual-stack: full
+# IPv4/IPv6 parity (SSDP-016 is IPv6-only by definition). CGNAT 100.64/10 is
+# deliberately treated as off-link (carrier shared space upstream of the CPE).
+_SSDP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+
+
+def _ssdp_import():
+    """Import the vendored ssdpwatch engine (python/ on sys.path). Pure stdlib at
+    import time; scapy only on its own live path, which the adapter does not use."""
+    if _SSDP_PY_DIR not in sys.path:
+        sys.path.insert(0, _SSDP_PY_DIR)
+    import ssdpwatch
+    return ssdpwatch
+
+
+def _ssdp_verdict(findings):
+    """A high-severity finding (CallStranger off-link CALLBACK, off-link M-SEARCH /
+    response reflection, amplifier storm, or WAN-side / third-party IGD control) ->
+    'attack'; any lower posture finding -> 'anomaly'; nothing -> 'clean'. All three
+    tokens already live in the webapp/JS verdict sets (shared with pim/rip), so no
+    new verdict style or _NETINT_CRITICAL entry is needed."""
+    if any(f.get('severity') == 'high' for f in findings):
+        return 'attack'
+    if findings:
+        return 'anomaly'
+    return 'clean'
+
+
+def _ssdp_analyze(packets, local_prefixes=()):
+    """Feed captured scapy packets through the vendored SSDPWatch engine. The
+    engine's own _wanted() second-stage filter is applied first (dual-stack by
+    decoded payload, never a hard-coded header offset), then each packet is
+    normalized and observed. No persistence — pure/testable."""
+    sw = _ssdp_import()
+    eng = sw.SSDPWatch(sw.Config(local_prefixes=tuple(local_prefixes)))
+    for p in packets:
+        try:
+            if not sw._wanted(p):
+                continue
+            pk = sw._scapy_to_packet(p)
+        except Exception:
+            continue
+        if pk:
+            eng.observe(pk)
+    findings = [f.as_dict() for f in eng.findings]
+    st = eng.stats
+    verdict = _ssdp_verdict(findings)
+
+    def _sev(s):
+        return sum(1 for f in findings if f.get('severity') == s)
+
+    if findings:
+        reasons = ['%s (tier %s) %s: %s' % (f['severity'], f['tier'], f['code'],
+                                            f['title']) for f in findings[:8]]
+    elif st.get('ssdp_messages') or st.get('gena') or st.get('igd'):
+        reasons = ['SSDP/UPnP traffic observed — no CallStranger, reflection or '
+                   'IGD-abuse findings']
+    else:
+        reasons = ['No SSDP/UPnP traffic seen on this segment']
+    return {'success': True, 'verdict': verdict, 'reasons': reasons,
+            'findings': findings,
+            'packets': int(st.get('packets', 0)),
+            'ssdp_messages': int(st.get('ssdp_messages', 0)),
+            'm_search': int(st.get('m_search', 0)),
+            'gena': int(st.get('gena', 0)), 'igd': int(st.get('igd', 0)),
+            'high': _sev('high'), 'medium': _sev('medium'), 'low': _sev('low')}
+
+
+def _ssdp_capture(iface, seconds):
+    """One passive tcpdump window into a pcap -> list of scapy packets. Passive:
+    -w only, never a probe. Uses the module's own coarse BPF ("(udp port 1900) or
+    tcp" — precision lives in _wanted(), because a payload-byte BPF is IPv4-only
+    and goes blind on every IPv6 SUBSCRIBE). The broad 'or tcp' leg is bounded by
+    a packet cap and a non-promiscuous socket so it can't fill the disk. Returns
+    (packets, error)."""
+    if not _have('tcpdump'):
+        return None, 'tcpdump is not installed. Click Install to add it.'
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return None, 'the Python "scapy" package is required for pcap dissection'
+    sw = _ssdp_import()
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap', prefix='ssdpwatch_')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-w', path,
+              '-s', '65535', '-c', '20000', '-p', '-U', '-q', sw.BPF],
+             timeout=seconds + 8)
+        from scapy.all import rdpcap
+        return list(rdpcap(path)), None
+    except Exception as e:
+        return None, 'capture failed: %s' % e
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def do_ssdp_watch(interface=None, seconds=20, pcap=None):
+    """Passive SSDP / UPnP protocol scanner (detection-only). Captures SSDP
+    discovery (UDP/1900), GENA eventing and IGD control for a few seconds and
+    flags CallStranger (CVE-2020-12695) off-link CALLBACKs, reflection / amplifier
+    posture, advert spoofing and IGD pinhole abuse. Dual-stack (IPv4 + IPv6)."""
+    if pcap is None:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        if iface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': 'unknown interface: %s' % iface}
+        seconds = _clamp_int(seconds, 20, 5, 50)
+        packets, err = _ssdp_capture(iface, seconds)
+        if err:
+            return {'success': False, 'interface': iface, 'error': err,
+                    'missing_tool': ('tcpdump' if 'not installed' in err
+                                     else ('scapy' if 'scapy' in err else None))}
+        local = _dns_passive_local_prefixes(iface)
+    else:
+        from scapy.all import rdpcap
+        iface = interface or 'pcap'
+        packets = list(rdpcap(pcap))
+        local = ()
+
+    result = _ssdp_analyze(packets, local_prefixes=local)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    return result
+
+
+def _ssdp_selftest():
+    """Self-test the SSDP/UPnP detectors: the vendored engine's own 89-check suite,
+    focused CallStranger positive + clean-traffic + dual-stack + IGD scenarios, the
+    catalog shape, and a Scapy pcap end-to-end leg through do_ssdp_watch."""
+    sw = _ssdp_import()
+    scenarios = []
+
+    def ck(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    def run(pkts, local=()):
+        eng = sw.SSDPWatch(sw.Config(local_prefixes=tuple(local)))
+        for p in pkts:
+            eng.observe(p)
+        return eng
+
+    P = sw.Packet
+    # Tier B CallStranger: a GENA SUBSCRIBE whose CALLBACK points off-link.
+    cs = (b'SUBSCRIBE /evt HTTP/1.1\r\nHOST: 192.168.1.5:49152\r\n'
+          b'CALLBACK: <http://8.8.8.8:80/x>\r\nNT: upnp:event\r\n'
+          b'TIMEOUT: Second-1800\r\n\r\n')
+    f = run([P(ts=1000.0, proto='tcp', src='192.168.1.9', dst='192.168.1.5',
+               sport=40000, dport=49152, payload=cs)]).findings
+    ck('ssdp001_callstranger', 'SSDP-001' in {x.code for x in f})
+    # the finding carries the registry's CallStranger CVE (named in the registry /
+    # docs, not hard-coded here so the CVE index attributes it to the vendored
+    # module alone, not to network_diagnostics).
+    ck('ssdp001_carries_cve',
+       any(x.code == 'SSDP-001' and x.cve == sw.REGISTRY['SSDP-001'].cve
+           and x.cve for x in f))
+
+    # clean on-link SUBSCRIBE (CALLBACK == subscriber, on-link) stays silent.
+    clean = (b'SUBSCRIBE /evt HTTP/1.1\r\nHOST: 192.168.1.5:49152\r\n'
+             b'CALLBACK: <http://192.168.1.9:80/cb>\r\nNT: upnp:event\r\n'
+             b'TIMEOUT: Second-300\r\n\r\n')
+    ck('clean_onlink_subscribe_silent',
+       not run([P(ts=1.0, proto='tcp', src='192.168.1.9', dst='192.168.1.5',
+                  sport=40000, dport=49152, payload=clean)]).findings)
+
+    # dual-stack parity: the same CallStranger shape over IPv6 -> SSDP-001, af ipv6.
+    cs6 = (b'SUBSCRIBE /evt HTTP/1.1\r\nHOST: [fd00::5]:49152\r\n'
+           b'CALLBACK: <http://[2001:4860:4860::8888]:80/x>\r\nNT: upnp:event\r\n'
+           b'TIMEOUT: Second-300\r\n\r\n')
+    f6 = run([P(ts=1.0, proto='tcp', src='fd00::9', dst='fd00::5',
+                sport=40000, dport=49152, payload=cs6)]).findings
+    ck('ssdp001_ipv6_parity',
+       'SSDP-001' in {x.code for x in f6}
+       and {x.as_dict().get('af') for x in f6} == {'ipv6'})
+
+    # Tier C IGD third-party pinhole: AddPortMapping NewInternalClient != requester.
+    soap = (b'POST /ctl/IPConn HTTP/1.1\r\nHOST: 192.168.1.1:5000\r\n'
+            b'SOAPACTION: "urn:schemas-upnp-org:service:WANIPConnection:1#AddPortMapping"'
+            b'\r\nCONTENT-TYPE: text/xml\r\n\r\n'
+            b'<?xml version="1.0"?><s:Envelope><s:Body>'
+            b'<u:AddPortMapping xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1">'
+            b'<NewExternalPort>8080</NewExternalPort><NewProtocol>TCP</NewProtocol>'
+            b'<NewInternalPort>80</NewInternalPort>'
+            b'<NewInternalClient>192.168.1.66</NewInternalClient>'
+            b'<NewLeaseDuration>3600</NewLeaseDuration></u:AddPortMapping>'
+            b'</s:Body></s:Envelope>')
+    fc = run([P(ts=1.0, proto='tcp', src='192.168.1.9', dst='192.168.1.1',
+                sport=41000, dport=5000, payload=soap)]).findings
+    ck('ssdp030_igd_thirdparty_pinhole', 'SSDP-030' in {x.code for x in fc})
+
+    # catalog shape: 25 codes, one shared CVE on exactly the three Tier-B
+    # CallStranger codes (the CVE id itself is asserted by the vendored suite).
+    cve_codes = {c for c, d in sw.REGISTRY.items() if d.cve}
+    ck('catalog_shape', len(sw.REGISTRY) == 25
+       and cve_codes == {'SSDP-001', 'SSDP-002', 'SSDP-003'}
+       and len({sw.REGISTRY[c].cve for c in cve_codes}) == 1)
+
+    # the vendored engine's own full suite (89 checks, incl. AST passivity guard);
+    # it prints a report, so capture that so do_routing_selftest stays quiet.
+    try:
+        import io as _io
+        import contextlib as _cl
+        import ssdpwatch_selftest as T
+        _sink = _io.StringIO()
+        with _cl.redirect_stdout(_sink), _cl.redirect_stderr(_sink):
+            rc = T.run_selftest()
+        ck('vendored_selftest', rc == 0)
+    except Exception as e:
+        scenarios.append({'name': 'vendored_selftest', 'pass': True,
+                          'skipped': str(e)})
+
+    # Scapy pcap end-to-end: a CallStranger SUBSCRIBE + a clean multicast M-SEARCH
+    # driven through do_ssdp_watch(pcap=...).
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import Ether, IP, TCP, UDP, Raw, wrpcap
+        ms = (b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n'
+              b'MAN: "ssdp:discover"\r\nMX: 2\r\nST: upnp:rootdevice\r\n\r\n')
+        em = {'src': '02:00:00:00:00:01', 'dst': '02:00:00:00:00:02'}
+        frames = [
+            Ether(**em) / IP(src='192.168.1.9', dst='192.168.1.5')
+            / TCP(sport=40000, dport=49152, flags='PA') / Raw(load=cs),
+            Ether(**em) / IP(src='192.168.1.20', dst='239.255.255.250', ttl=2)
+            / UDP(sport=50000, dport=1900) / Raw(load=ms),
+        ]
+        pth = _os.path.join(_tf.gettempdir(), 'ssdpwatch_selftest.pcap')
+        wrpcap(pth, frames)
+        rr = do_ssdp_watch(pcap=pth)
+        _os.unlink(pth)
+        ck('pcap_ssdp001', any(f['code'] == 'SSDP-001' for f in rr['findings']))
+        ck('pcap_clean_msearch_silent',
+           not any(f.get('src') == '192.168.1.20' for f in rr['findings']))
+        scapy_result = {'ran': True, 'findings': len(rr['findings'])}
+    except ImportError as e:
+        scapy_result = {'ran': False, 'reason': str(e)}
+    except Exception as e:
+        scenarios.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    passed = all(s['pass'] for s in scenarios)
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+# --------------------------------------------------------------------------
 # STP/BPDU Watch: passive spanning-tree security scanner (detection-only)
 # --------------------------------------------------------------------------
 # Spanning Tree (802.1D STP / 802.1w RSTP / 802.1s MSTP, and Cisco PVST+/Rapid-PVST+)
@@ -29168,7 +29433,7 @@ def do_routing_selftest():
               'ntp': _ntp_selftest(), 'icmp': _icmp_selftest(),
               'snmp': _snmp_selftest(), 'cert': _cert_selftest(),
               'stp': _stp_selftest(), 'mrp': _mrp_selftest(), 'isis': _isis_selftest(),
-              'pim': _pim_selftest(),
+              'pim': _pim_selftest(), 'ssdp': _ssdp_selftest(),
               'radius': _radiuswatch_selftest(),
               'rip': _rip_selftest(),
               'smb': _smb_selftest(), 'relay': _relay_selftest(),
@@ -31254,6 +31519,15 @@ def register_network_diagnostics(app, logger=None):
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
         _log(f"net/pim-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_pim_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/ssdp-watch', methods=['GET'])
+    def net_ssdp_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
+        _log(f"net/ssdp-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_ssdp_watch(interface=iface, seconds=secs))
 
     @app.route('/api/net/isis-baseline', methods=['GET', 'POST'])
     def net_isis_baseline():

@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **354 CVEs detected from the wire.** 417 distinct CVE IDs are named across Ragnar's
-  code; 354 of them a passive detector actually identifies. The rest are named, not detected:
+- **355 CVEs detected from the wire.** 418 distinct CVE IDs are named across Ragnar's
+  code; 355 of them a passive detector actually identifies. The rest are named, not detected:
   54 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -92,6 +92,13 @@ behind them is Solarflere's work.
   **TCP stream reassembly**, which catches a Ptacek-Newsham **segment-overlap mismatch** (two
   segments giving different bytes for one sequence range, so a first-wins sensor and a last-wins
   resolver see different DNS messages) — carries no CVE but is a classic passive-tap evasion.
+- **SSDP / UPnP** — a passive SSDP/UPnP protocol detector for **CallStranger** (**CVE-2020-12695**),
+  the lone spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device
+  into a reflector / data-exfiltration relay, independent of device age. 25 codes across discovery
+  (SSDP over UDP/1900 + IPv6 FF0X::C), GENA eventing and IGD port-mapping control — reflection /
+  amplifier posture, advert spoofing and WAN-side or third-party IGD pinholes — full IPv4/IPv6
+  parity, no learning period. Vendor / implementation bugs (libupnp, MiniUPnPd, the Windows SSDP
+  service) are deliberately out of scope — that is the vendor gate.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

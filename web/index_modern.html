@@ -1869,7 +1869,7 @@
                 <div class="glass rounded-xl p-3 sm:p-4 mb-6">
                     <div id="net-layer-bar" class="flex flex-wrap items-center gap-1">
                         <button id="net-layer-btn-overview" data-layer="overview" onclick="showNetLayer('overview')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap bg-Ragnar-600 text-white">Overview</button>
-                        <button id="net-layer-btn-l7" data-layer="l7" onclick="showNetLayer('l7')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L7 Application <span class="opacity-60 font-normal">30</span></button>
+                        <button id="net-layer-btn-l7" data-layer="l7" onclick="showNetLayer('l7')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L7 Application <span class="opacity-60 font-normal">31</span></button>
                         <button id="net-layer-btn-l6" data-layer="l6" onclick="showNetLayer('l6')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L6 Presentation <span class="opacity-60 font-normal">2</span></button>
                         <button id="net-layer-btn-l5" data-layer="l5" onclick="showNetLayer('l5')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L5 Session <span class="opacity-60 font-normal">2</span></button>
                         <button id="net-layer-btn-l4" data-layer="l4" onclick="showNetLayer('l4')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L4 Transport <span class="opacity-60 font-normal">2</span></button>
@@ -1886,8 +1886,8 @@
                         <!-- Visibility matrix reference (overview) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Module visibility matrix <span class="text-xs font-normal text-gray-500">— reference guide · every module by OSI layer × vantage tier</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">A clean verdict is only as wide as the tap: check a module's vantage tier before reading silence as safety. Each layer button above shows its own band of this matrix. Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image to open it full-size.</p>
                         </details>
@@ -2019,8 +2019,8 @@
                         <!-- Visibility matrix reference (l7) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L7 Application <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261024-ssdp" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2051,6 +2051,20 @@
                                 <button onclick="runDnsWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan DNS</button>
                             </div>
                             <div id="dnswatch-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                        </div>
+                        <!-- SSDP / UPnP Watch (passive discovery + GENA eventing + IGD control) -->
+                        <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                            <h3 class="text-lg font-semibold mb-1">SSDP / UPnP Watch <span class="text-xs font-normal text-gray-500">(passive · SSDP 1900 · GENA eventing · IGD control · IPv4 + IPv6)</span></h3>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive SSDP / UPnP protocol detector — <strong>detection-only</strong>, opens a receive socket and nothing else (never probes, never M-SEARCHes). UPnP's discovery plane (<strong>SSDP</strong>, HTTPU over <span class="font-mono">UDP/1900</span> + IPv6 <span class="font-mono">FF0X::C</span>), its <strong>GENA</strong> eventing and <strong>IGD</strong> port-mapping control run in the clear on every IoT segment. The one spec-level protocol CVE is <strong>CallStranger</strong> (<code>CVE-2020-12695</code>): a GENA <span class="font-mono">SUBSCRIBE</span> whose <span class="font-mono">CALLBACK</span> points <em>off-link</em> turns the device into a reflector / data-exfiltration relay — it rides any stack that never took the 2020 UDA revision, independent of device age. Vendor / implementation bugs (libupnp, MiniUPnPd, the Windows SSDP service) are deliberately out of scope — that is the vendor gate.</p>
+                            <p class="text-sm text-gray-400 mb-3">One short passive capture (put the Pi on the IoT VLAN or a SPAN/mirror). Flags <strong>attack / exposure</strong> (CallStranger off-link <span class="font-mono">CALLBACK</span>, off-link M-SEARCH reflection probes, amplifier storms, WAN-side or third-party IGD <span class="font-mono">AddPortMapping</span> pinholes) and <strong>posture</strong> (multicast scope / TTL escape, advert spoofing, byebye floods, unbounded GENA timeouts) — <strong>25 codes</strong> across tiers A (discovery) / B (GENA) / C (IGD). <strong>Dual-stack</strong>: full IPv4 / IPv6 parity, verdicts proven identical in both families. No learning period — every rule is per-packet or per-exchange in a bounded window. <strong>CGNAT</strong> (<span class="font-mono">100.64/10</span>) is treated as off-link (carrier space upstream of the CPE); on-link otherwise is RFC1918 / ULA / link-local, extended with the capture interface's own subnets.</p>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <select id="ssdp-iface" title="Interface for the SSDP/UPnP capture — pick the IoT/LAN NIC or a SPAN/mirror port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                                    <option value="">Auto (wired first)</option>
+                                </select>
+                                <input id="ssdp-secs" type="number" min="5" max="50" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                                <button onclick="runSsdpWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan SSDP / UPnP</button>
+                            </div>
+                            <div id="ssdp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
                         <!-- NTP Watch (rogue time source / clock injection) -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
@@ -2537,8 +2551,8 @@
                         <!-- Visibility matrix reference (l6) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L6 Presentation <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261024-ssdp" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2589,8 +2603,8 @@
                         <!-- Visibility matrix reference (l5) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L5 Session <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261024-ssdp" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2634,8 +2648,8 @@
                         <!-- Visibility matrix reference (l4) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L4 Transport <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261024-ssdp" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2681,8 +2695,8 @@
                         <!-- Visibility matrix reference (l3) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L3 Network <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261024-ssdp" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2925,8 +2939,8 @@
                         <!-- Visibility matrix reference (l2) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L2 Data Link <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261024-ssdp" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -3231,8 +3245,8 @@
                         <!-- Visibility matrix reference (l1) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L1 Physical <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-dns-matrix" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261024-dns-matrix" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261024-ssdp" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -9804,7 +9818,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261019-ulfberht-wireless"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261024-ssdp-watch"></script>
 
 
 

@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **417** distinct CVE IDs
-- **354** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **418** distinct CVE IDs
+- **355** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **54** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -36,7 +36,7 @@ detector works is in [nettools.md](nettools.md).
 | 2017 | 18 |
 | 2018 | 13 |
 | 2019 | 20 |
-| 2020 | 33 |
+| 2020 | 34 |
 | 2021 | 42 |
 | 2022 | 32 |
 | 2023 | 50 |
@@ -88,6 +88,7 @@ detector works is in [nettools.md](nettools.md).
 | SMTP Watch | 4 |
 | SNMP Watch | 5 |
 | SR-MPLS Watch | 17 |
+| SSDP/UPnP Watch | 1 |
 | SSH Watch | 11 |
 | Telnet Watch | 10 |
 | TLS Watch | 11 |
@@ -231,6 +232,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2020-11901](https://nvd.nist.gov/vuln/detail/CVE-2020-11901) | Ripple20 DNS resolver RCE | detected | APC Guard | — |
 | [CVE-2020-11902](https://nvd.nist.gov/vuln/detail/CVE-2020-11902) | Ripple20 IPv6-in-IPv4 OOB read | detected | APC Guard | — |
 | [CVE-2020-12243](https://nvd.nist.gov/vuln/detail/CVE-2020-12243) | OpenLDAP nested-filter DoS | detected | LDAP Watch | — |
+| [CVE-2020-12695](https://nvd.nist.gov/vuln/detail/CVE-2020-12695) | CallStranger | detected | SSDP/UPnP Watch | — |
 | [CVE-2020-16898](https://nvd.nist.gov/vuln/detail/CVE-2020-16898) | Bad Neighbor | detected | ICMP Watch | — |
 | [CVE-2020-16899](https://nvd.nist.gov/vuln/detail/CVE-2020-16899) | RA DNSSL DoS | detected | ICMP Watch | — |
 | [CVE-2020-22845](https://nvd.nist.gov/vuln/detail/CVE-2020-22845) |  | detected | MikroTik Guard | — |

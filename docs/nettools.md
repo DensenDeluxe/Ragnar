@@ -47,6 +47,7 @@ matrix to zoom (`/web/images/osi/`).
 | [On-Screen Network Diagnostic Mode](#-on-screen-network-diagnostic-mode) | Diagnostics · Overview (toggle) | config `network_diagnostic_mode` |
 | [DHCP Guardian](#dhcp-guardian) | Diagnostics · L7 | `GET /api/net/dhcp-guardian`, `POST /api/net/dhcp-baseline` |
 | [DNS Watch (passive)](#dns-watch) | Diagnostics · L7 | `GET /api/net/dns-watch` |
+| [SSDP / UPnP Watch](#ssdp--upnp-watch) | Diagnostics · L7 | `GET /api/net/ssdp-watch` |
 | [NTP Watch](#ntp-watch) | Diagnostics · L7 | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
 | [SNMP Watch](#snmp-watch) | Diagnostics · L7 | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
 | [RADIUS Watch](#radius-watch) | Diagnostics · L7 | `GET /api/net/radius-watch` |
@@ -610,6 +611,46 @@ alerts, pcap `--replay` and a hardened daemon.
 - Endpoints: `GET /api/net/arp-check`,
   `GET|POST /api/net/arp-baseline` `{action:reset}` · uses `ip neigh` (iproute2) + an
   optional passive `tcpdump ... arp` capture
+
+### SSDP / UPnP Watch
+**Detection-only** passive SSDP / UPnP protocol scanner — it opens a receive socket and
+nothing else (never probes, never M-SEARCHes). SSDP is the UPnP Device Architecture
+**discovery** plane (HTTPU over `UDP/1900`, IPv4 `239.255.255.250` and IPv6 `FF0X::C`), with
+**GENA** eventing (TCP `SUBSCRIBE`/`UNSUBSCRIBE`) and **IGD** port-mapping control (TCP SOAP
+`WANIPConnection`/`WANPPPConnection`) riding whatever description port a device advertised in
+`LOCATION`. All three run in the clear on every home / small-site IoT segment.
+
+The one qualifying **protocol** CVE is **CallStranger** (`CVE-2020-12695`): a spec-level GENA
+flaw, not an implementation bug — a `SUBSCRIBE` whose `CALLBACK` URL points **off-link** turns
+the device into a reflector or data-exfiltration relay. Because it lives in the specification it
+persists in any stack that has not taken the 2020 UDA revision, independent of device age.
+Vendor / implementation CVEs (libupnp, MiniUPnPd, the Windows SSDP service) are deliberately out
+of scope — that is the vendor gate.
+
+**25 finding codes** across three tiers:
+- **Tier A — discovery** (`SSDP-010..024`): off-link unicast M-SEARCH reflection probes,
+  unicast `ssdp:all` inventory sweeps, responses sent off-link, per-responder duplicate and
+  response-storm amplification, multicast TTL / hop-limit scope escape (above the UDA 2–4 range),
+  wider-than-link IPv6 scope (`FF05/FF08/FF0E`), NOTIFY `LOCATION` advert spoofing, `ssdp:byebye`
+  eviction floods, BOOTID regression, and malformed / oversized messages.
+- **Tier B — GENA eventing** (`SSDP-001..005`): the CallStranger off-link `CALLBACK`
+  (`SSDP-001`), a `CALLBACK` host that differs from the subscriber (`SSDP-002`) and multiple
+  `CALLBACK` URLs (`SSDP-003`) — the three CVE-bearing codes — plus odd-scheme / sensitive-port
+  callbacks and unbounded GENA `TIMEOUT`.
+- **Tier C — IGD control** (`SSDP-030..034`): an `AddPortMapping` whose `NewInternalClient` is a
+  **third party** (a pinhole punched for someone else), control arriving from an **off-link**
+  (WAN-side) source, mappings aimed at an infrastructure / admin port, a `DeletePortMapping` for a
+  mapping the requester never created, and unbounded lease durations.
+
+**Dual-stack** with full IPv4 / IPv6 parity (`SSDP-016` is IPv6-only by definition). The capture
+filter is coarse by design (`(udp port 1900) or tcp`) with the precision in Python, because a
+payload-byte BPF is IPv4-only and would go blind on every IPv6 `SUBSCRIBE`. No baseline / learning
+period — every rule is per-packet or per-exchange in a bounded window. On-link means
+RFC1918 / ULA / link-local / loopback plus the capture interface's own subnets; **CGNAT**
+(`100.64.0.0/10`) is deliberately treated as off-link (carrier space upstream of the CPE). Engine
+vendored at `python/ssdpwatch.py`.
+
+- Endpoint: `GET /api/net/ssdp-watch` (`?interface=<nic>&seconds=5..50`)
 
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or
