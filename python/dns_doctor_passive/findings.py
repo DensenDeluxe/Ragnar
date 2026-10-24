@@ -287,7 +287,7 @@ FINDINGS = {
     "DNSD-079": {
         "name": "MDNS_ZWAVE_ZIP_PRESENT", "severity": "notice", "confidence": "high",
         "cve": None, "klass": "mdns", "stateful": True,
-        "desc": "A Z-Wave Z/IP Gateway is advertising _z-wave._udp on this LAN. Silicon Labs' Z/IP Gateway announces every Z-Wave node and endpoint over mDNS (IANA registers the service on UDP 4123, DTLS on 41230), so the announcement is wired evidence of a Z-Wave mesh behind the gateway, visible on the IP side without any 800-900 MHz radio. Census only -- never an alarm; like the Matter and Thread census codes, it reports presence rather than a vulnerability",
+        "desc": "A Z-Wave Z/IP Gateway is advertising _z-wave._udp on this LAN. Silicon Labs' Z/IP Gateway announces every Z-Wave node and endpoint over mDNS (IANA registers the service on UDP 4123, DTLS on 41230), so the announcement is wired evidence of a Z-Wave mesh behind the gateway, visible on the IP side without any 800-900 MHz radio. Carries a fingerprint from the announcement: device type, home ID, endpoint, product ID and security-class hex. It does NOT carry a user-set device name -- Z-Wave node names live in the controller inside the encrypted Z/IP tunnel (DTLS 41230), not on the wire. Census only -- never an alarm; like the Matter and Thread census codes, it reports presence rather than a vulnerability",
     },
 
     # --- DDNS tier (080-089) --------------------------------------

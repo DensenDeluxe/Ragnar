@@ -94,7 +94,10 @@ behind them is Solarflere's work.
   resolver see different DNS messages) — carries no CVE but is a classic passive-tap evasion.
   **DNS Watch v10** extends the mDNS census to **Z-Wave**: a Silicon Labs Z/IP Gateway advertising
   `_z-wave._udp` is wired evidence of a Z-Wave mesh on the IP side (radio-free, like the
-  Matter/Thread census) — informational, carries no CVE.
+  Matter/Thread census) — informational, carries no CVE. **DNS Watch v11** enriches that census
+  with the fingerprint the Z/IP gateway publishes — device type, home ID, endpoint, product ID and
+  raw security-class hex — while deliberately reading **no on-wire device name** (Z-Wave node names
+  stay inside the encrypted Z/IP tunnel); still informational, still no CVE.
 - **SSDP / UPnP** — a passive SSDP/UPnP protocol detector for **CallStranger** (**CVE-2020-12695**),
   the lone spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device
   into a reflector / data-exfiltration relay, independent of device age. 25 codes across discovery

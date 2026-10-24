@@ -26644,7 +26644,9 @@ def _ipsec_selftest():
 # engine's handle_frame, so the adapter still just feeds frames. v10 extends the mDNS census with
 # a Z-Wave presence code (DNSD-079, no CVE): a Silicon Labs Z/IP Gateway advertising _z-wave._udp
 # is radio-free evidence of a Z-Wave mesh on the IP side, informational like the Matter/Thread
-# census. Dual-stack; the engine never
+# census; v11 enriches it with the Z/IP announcement fingerprint (device type, home ID, endpoint,
+# product ID and security-class hex) but reads NO user-set device name — Z-Wave node names live
+# inside the encrypted Z/IP tunnel (DTLS 41230), off the wire. Dual-stack; the engine never
 # transmits (AST-enforced in its conformance). Complements the ACTIVE do_dns_doctor.
 _DNS_PASSIVE_PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'python', 'dns_doctor_passive')
@@ -26754,8 +26756,9 @@ def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
     v8 LLMNR (5355) / NBT-NS (137, MS16-077 WPAD CVE-2016-3213/3236) / encrypted-DNS (853 DoT-DoQ)
     / DNS-SD / TSIG posture tiers and BIND IXFR CVE-2021-25214, plus the v9 SPF/libspf2 parser
     tier (CVE-2021-33912/33913/20314, CVE-2023-42118) and TCP stream reassembly (segment-overlap
-    evasion), plus the v10 Z-Wave Z/IP Gateway mDNS census (DNSD-079, no CVE). Dual-stack; adapts
-    the vendored dns_doctor_passive engine over a bounded capture."""
+    evasion), plus the v10 Z-Wave Z/IP Gateway mDNS census (DNSD-079, no CVE; v11 enriches it with
+    a device-type / home-ID / product-ID / security-class fingerprint, but no on-wire device name).
+    Dual-stack; adapts the vendored dns_doctor_passive engine over a bounded capture."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}

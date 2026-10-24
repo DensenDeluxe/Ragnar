@@ -4,6 +4,16 @@
 
 ### 2026-10-24
 
+#### [#1013](https://github.com/PierreGode/Ragnar/pull/1013) — feat(net): DNS Watch v11 — Z-Wave Z/IP announcement fingerprint
+*branch `feature/dns-poison-v11`*
+
+- Builds on v10's Z-Wave census (`DNSD-079`): the finding now carries a **fingerprint parsed from the Z/IP announcement** — device type, the Z-Wave **home ID** (the leading 32 bits of the `[hex]` instance token), the multichannel **endpoint**, **product ID** and the raw **security-class hex**. It identifies the node by *product and network position*, not by label.
+- **Privacy-correct by design — no device name on the wire.** Unlike Matter's `dn` key, the Z/IP announcement carries no human-chosen name; the friendly name set in the hub lives inside the encrypted Z/IP tunnel (DTLS 41230), which a passive tap cannot read. The parser reads no `device_name`, and the undefined `info` TXT key is deliberately **not** decoded (same discipline as Thread's `sb`/`omr` — a guessed field is worse than none). Security-class hex is reported verbatim; **S0/S2 is not decoded**.
+- Pure drop-in refresh of the vendored `python/dns_doctor_passive/` engine — only `findings.py` (the `DNSD-079` description), `mdns.py` (`ZWAVE_TXT` key map + `split_zwave_instance()` + fingerprint wiring) and `selftest.py` changed; `engine.py` / `state.py` (Config) / `parse.py` / `detect.py` byte-identical, so **no BPF, config or frame-loop change** and no adapter rewiring (the header comment + `do_dns_watch` docstring note v11).
+- **CVE index unchanged — 418 named / 355 detected** (still no CVE); CREDITS.md / README.md counts untouched (coverage bullet extended).
+- **Self-test:** the `dns_passive` suite adds a dual-stack Z-Wave fingerprint scenario (home ID / product ID / endpoint / security-class parsed, device name absent, `info` not leaked) — **133 → 134** checks; aggregate `do_routing_selftest` stays **60 suites**, all green.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch) mDNS tier updated (DNSD-079 fingerprint).
+
 #### [#1012](https://github.com/PierreGode/Ragnar/pull/1012) — feat(net): DNS Watch v10 — Z-Wave Z/IP Gateway mDNS presence census
 *branch `feature/dns-poison-v10`*
 
