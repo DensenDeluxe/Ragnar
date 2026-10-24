@@ -26068,17 +26068,23 @@ def _resolve_readable_path(file_path):
 
 @app.route('/api/files/upload', methods=['POST'])
 def upload_file_api():
-    """Upload one or more files into a writable folder (Uploads, Backups, the
-    rubber-ducky payload library or the console_scripts library)."""
+    """Upload one or more files into any browsable folder.
+
+    The Files tab is a general file manager: a file can be uploaded into
+    Uploads/Backups, the script libraries, or any per-network loot/scan/log
+    folder. The virtual root ('/') and the loot category roots (which list
+    networks rather than hold files) are rejected by _resolve_readable_path."""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
 
         target_path = request.form.get('path', '/uploads')
         try:
-            actual_dir = _resolve_upload_target(target_path)
+            actual_dir = _resolve_readable_path(target_path)
         except ValueError:
             return jsonify({'error': 'Invalid upload path'}), 400
+        if os.path.isfile(actual_dir):
+            return jsonify({'error': 'Upload target is a file, not a folder'}), 400
 
         # Create the (possibly nested) directory if it doesn't exist.
         os.makedirs(actual_dir, exist_ok=True)
@@ -26111,7 +26117,7 @@ def upload_file_api():
 
 @app.route('/api/files/mkdir', methods=['POST'])
 def mkdir_file_api():
-    """Create a subfolder under /uploads or /backups."""
+    """Create a subfolder inside any browsable folder."""
     try:
         data = request.get_json(silent=True) or {}
         parent = data.get('path', '/uploads') or '/uploads'
@@ -26122,12 +26128,17 @@ def mkdir_file_api():
         if '/' in name or '\\' in name or name in ('.', '..'):
             return jsonify({'error': 'Invalid folder name'}), 400
 
-        target = parent.rstrip('/') + '/' + name
+        # Resolve the parent first (rejects '/' and the loot category roots),
+        # then join the validated single-segment name onto its real path.
         try:
-            actual_dir = _resolve_upload_target(target)
+            parent_dir = _resolve_readable_path(parent)
         except ValueError:
             return jsonify({'error': 'Invalid path'}), 400
+        if not os.path.isdir(parent_dir):
+            return jsonify({'error': 'Parent folder not found'}), 404
 
+        actual_dir = os.path.join(parent_dir, name)
+        target = parent.rstrip('/') + '/' + name
         os.makedirs(actual_dir, exist_ok=True)
         logger.info(f"Created folder: {actual_dir}")
         return jsonify({'success': True, 'path': target, 'name': name})
@@ -26137,9 +26148,53 @@ def mkdir_file_api():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/files/create', methods=['POST'])
+def create_file_api():
+    """Create a new (empty or text-seeded) file in any browsable folder.
+
+    Powers the Files tab "New file" action. The name carries any extension —
+    that is how the operator picks the file's format (notes.txt, hosts.csv,
+    run.sh, …). Optional `content` seeds it; omitted means an empty file the
+    inline editor can then fill in."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('path', '/uploads') or '/uploads'
+        name = (data.get('name') or '').strip()
+        content = data.get('content', '')
+        if not name:
+            return jsonify({'error': 'File name required'}), 400
+        if '/' in name or '\\' in name or name in ('.', '..'):
+            return jsonify({'error': 'Invalid file name'}), 400
+
+        try:
+            parent_dir = _resolve_readable_path(parent)
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 400
+        if not os.path.isdir(parent_dir):
+            return jsonify({'error': 'Folder not found'}), 404
+
+        target = os.path.join(parent_dir, name)
+        if os.path.exists(target):
+            return jsonify({'error': 'A file with that name already exists'}), 400
+
+        with open(target, 'w', encoding='utf-8') as f:
+            f.write(content if isinstance(content, str) else '')
+
+        vpath = parent.rstrip('/') + '/' + name
+        logger.info(f"Created file: {target}")
+        return jsonify({'success': True, 'path': vpath, 'name': name})
+
+    except Exception as e:
+        logger.error(f"Error creating file: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/files/rename', methods=['POST'])
 def rename_file_api():
-    """Rename a file or folder under /uploads or /backups (same directory)."""
+    """Rename a file or folder in place (same directory).
+
+    The new name may carry a different extension — that is how the operator
+    changes a file's format (e.g. capture.bin → capture.pcap)."""
     try:
         data = request.get_json(silent=True) or {}
         path = data.get('path', '')
@@ -26150,7 +26205,7 @@ def rename_file_api():
             return jsonify({'error': 'Invalid name'}), 400
 
         try:
-            actual = _resolve_upload_target(path)   # source; writable trees only
+            actual = _resolve_readable_path(path)   # any browsable file/folder
         except ValueError:
             return jsonify({'error': 'Invalid path'}), 400
         if not os.path.exists(actual):
@@ -26172,7 +26227,12 @@ def rename_file_api():
 
 @app.route('/api/files/move', methods=['POST'])
 def move_file_api():
-    """Move a file or folder to another /uploads|/backups directory."""
+    """Move a file or folder into any other browsable folder.
+
+    Source and destination are each mapped through _resolve_readable_path, whose
+    per-root traversal guards keep both ends inside Ragnar's data tree — so a
+    file can be moved freely across Uploads, Backups, the script libraries and
+    the per-network loot/scan/log folders, but never outside them."""
     try:
         data = request.get_json(silent=True) or {}
         src = data.get('path', '')
@@ -26180,12 +26240,14 @@ def move_file_api():
         if not src or not dest_dir:
             return jsonify({'error': 'Source and destination are required'}), 400
         try:
-            src_actual = _resolve_upload_target(src)      # writable trees only
-            dest_actual = _resolve_upload_target(dest_dir)
+            src_actual = _resolve_readable_path(src)
+            dest_actual = _resolve_readable_path(dest_dir)
         except ValueError:
-            return jsonify({'error': 'Files can only be moved within Uploads or Backups'}), 400
+            return jsonify({'error': 'Invalid source or destination path'}), 400
         if not os.path.exists(src_actual):
             return jsonify({'error': 'File not found'}), 404
+        if os.path.isfile(dest_actual):
+            return jsonify({'error': 'Destination is a file, not a folder'}), 400
 
         src_real = os.path.realpath(src_actual)
         dest_real = os.path.realpath(dest_actual)

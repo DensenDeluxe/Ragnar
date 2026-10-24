@@ -25904,6 +25904,59 @@ function isUploadablePath(p) {
            p === '/engagement_playbooks' || p.startsWith('/engagement_playbooks/');
 }
 
+// The loot "category" virtual roots list networks rather than hold files — you
+// descend into a network before reaching a real folder.
+const LOOT_ROOTS = ['/data_stolen', '/scan_results', '/crackedpwd', '/vulnerabilities'];
+
+// A "real" directory on disk: anything that is not the synthetic top-level
+// listing ('/') and not a loot category root. Files sitting in a real folder
+// can be created, uploaded, moved, renamed and deleted — the Files tab behaves
+// as a general file manager across every browsable tree.
+function isRealDir(p) {
+    return !!p && p !== '/' && LOOT_ROOTS.indexOf(p) === -1;
+}
+
+// Open the OS file picker safely on every platform, including iOS Safari.
+//
+// iOS Safari garbage-collects a file <input> that is clicked while detached
+// from the DOM, so its `change` event never fires and the upload silently does
+// nothing — the root cause of "uploading from iPhone doesn't work". Keeping the
+// input in the document (visually hidden) until the user has chosen or
+// cancelled fixes it. `onPick` receives the FileList.
+function pickFiles(opts, onPick) {
+    opts = opts || {};
+    const input = document.createElement('input');
+    input.type = 'file';
+    if (opts.multiple) input.multiple = true;
+    if (opts.accept) input.accept = opts.accept;
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.style.top = '0';
+    input.style.opacity = '0';
+    input.setAttribute('aria-hidden', 'true');
+    input.tabIndex = -1;
+
+    let handled = false;
+    const cleanup = () => { if (input.parentNode) input.parentNode.removeChild(input); };
+
+    input.addEventListener('change', () => {
+        handled = true;
+        try { onPick(input.files); }
+        finally { setTimeout(cleanup, 0); }
+    });
+
+    // The picker being dismissed fires no `change`. The window regains focus
+    // when it closes, so use that to tidy up a cancelled, still-detached input.
+    const onFocus = () => {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(() => { if (!handled) cleanup(); }, 1500);
+    };
+    window.addEventListener('focus', onFocus);
+
+    document.body.appendChild(input);
+    input.click();
+}
+
 // ── File-explorer navigation (Back = history, Up = parent folder) ────────────
 let fileHistory = [];   // stack of previously-visited locations
 
@@ -26031,14 +26084,15 @@ function moveModalLoad(dir, isBack) {
         return;
     }
 
-    // Filesystem: only Uploads/Backups are writable move targets.
-    if (pathEl) pathEl.textContent = dir;
-    if (hereBtn) hereBtn.classList.toggle('hidden', dir === '/');   // '/' is not a real folder
+    // Filesystem: browse every tree. A move target is any real folder — the
+    // root listing and the loot category roots only list networks, so "Move
+    // here" stays hidden there until you descend into an actual folder.
+    if (pathEl) pathEl.textContent = dir === '/' ? 'Choose a folder' : dir;
+    if (hereBtn) hereBtn.classList.toggle('hidden', !isRealDir(dir));
     networkAwareFetch('/api/files/list?path=' + encodeURIComponent(dir))
         .then(r => r.json())
         .then(files => {
             let dirs = (Array.isArray(files) ? files : []).filter(f => f.is_directory);
-            if (dir === '/') dirs = dirs.filter(f => f.path === '/uploads' || f.path === '/backups');
             // Don't allow descending into the folder being moved.
             if (_moveCtx.src.isDir) dirs = dirs.filter(f => f.path !== _moveCtx.src.path);
             dirs.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
@@ -26127,14 +26181,16 @@ function displayFiles(files, path, highlightFile = null) {
     // into the folder being browsed (and, in the general-purpose writable
     // trees, create folders too). Shown even when the folder is empty — so a
     // freshly created folder, or an empty script library, can be filled.
-    const newFolderBtn = isWritablePath(path)
-        ? `<button onclick="newFolder()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New folder</button>`
-        : '';
-    const toolbar = isUploadablePath(path) ? `
+    // A contextual toolbar for any real folder: create a text file, create a
+    // subfolder, or upload straight into the folder being browsed. Shown even
+    // when the folder is empty — so a fresh/empty folder can be filled. The
+    // button row wraps so it stays usable at phone width.
+    const toolbar = isRealDir(path) ? `
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 mb-1 bg-slate-800/60 border border-slate-700 rounded-lg">
             <span class="text-sm text-gray-300 truncate">📁 ${escapeHtml(path)}</span>
-            <div class="flex items-center gap-2 flex-shrink-0">
-                ${newFolderBtn}
+            <div class="flex flex-wrap items-center gap-2 sm:flex-shrink-0">
+                <button onclick="newTextFile()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New file</button>
+                <button onclick="newFolder()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New folder</button>
                 <button onclick="uploadFile()" class="bg-green-700 hover:bg-green-800 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">⬆ Upload here</button>
             </div>
         </div>` : '';
@@ -26190,24 +26246,28 @@ function displayFiles(files, path, highlightFile = null) {
         const size = file.is_directory ? '' : formatBytes(file.size);
         const date = file.modified ? new Date(file.modified * 1000).toLocaleDateString() : '';
         const fileKey = encodeURIComponent(file.name);
-        const writable = isWritablePath(path);
+        // Everything inside a real folder is fully manageable (move/rename/
+        // delete work across every browsable tree). The loot category roots
+        // ('/data_stolen' etc.) only list networks, so their rows stay
+        // navigate-only.
+        const canModify = isRealDir(path);
         const openAction = file.is_directory
             ? `navFs('${escapeAttr(file.path)}')`
             : `previewFile('${escapeAttr(file.path)}')`;
 
-        // Row actions: download (files), rename (writable), delete (files always,
-        // folders only in writable locations).
+        // Row actions: download + send (files); move/rename (files & folders in
+        // a real folder); delete (files always, folders in a real folder).
         let actions = '';
         if (!file.is_directory) {
             actions += `<button onclick="downloadFile('${escapeAttr(file.path)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg></button>`;
             actions += `<button onclick="sendFsFile(event,'${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit">${ICON_SEND}</button>`;
         }
-        if (writable) {
+        if (canModify) {
             actions += `<button onclick="moveFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}',${file.is_directory ? 'true' : 'false'})" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>`;
             actions += `<button onclick="renameFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>`;
         }
-        if (!file.is_directory || writable) {
+        if (!file.is_directory || canModify) {
             actions += `<button onclick="deleteFile('${escapeAttr(file.path)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>`;
         }
@@ -26384,7 +26444,8 @@ function _setEditBtns(editing, editable) {
     if (statusEl) statusEl.classList.add('hidden');
 }
 
-function previewFile(filePath) {
+function previewFile(filePath, opts) {
+    opts = opts || {};
     const modal = document.getElementById('file-preview-modal');
     const content = document.getElementById('preview-content');
     const filename = document.getElementById('preview-filename');
@@ -26444,6 +26505,8 @@ function previewFile(filePath) {
                 } else {
                     content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(data.content)}</pre>`;
                 }
+                // Opened via "New file" — drop straight into edit mode.
+                if (opts.edit && _editState.editable) toggleFileEdit();
             } else if (data.type === 'too_large') {
                 content.innerHTML = `<div class="text-center text-gray-400 py-12">
                     <p class="mb-3">File is too large to preview (${formatBytes(data.size)})</p>
@@ -26663,26 +26726,19 @@ function deleteFile(filePath) {
 }
 
 function uploadFile() {
-    // Create file input
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    
-    input.onchange = function(event) {
-        const files = event.target.files;
-        if (files.length === 0) return;
-        
-        const formData = new FormData();
+    // iOS-safe picker (see pickFiles) — a detached <input> never fires 'change'
+    // on iPhone, which is why uploading from iPhone used to do nothing.
+    pickFiles({ multiple: true }, function (files) {
+        if (!files || files.length === 0) return;
 
-        // Add all selected files
+        const formData = new FormData();
         for (let file of files) {
             formData.append('file', file);
         }
 
-        // Upload into the folder currently being browsed when it accepts
-        // uploads (an /uploads or /backups subfolder, or a script library);
-        // otherwise default to /uploads.
-        const target = isUploadablePath(currentDirectory) ? currentDirectory : '/uploads';
+        // Upload into the folder currently being browsed when it's a real
+        // folder; otherwise default to /uploads.
+        const target = isRealDir(currentDirectory) ? currentDirectory : '/uploads';
         formData.append('path', target);
 
         let totalBytes = 0;
@@ -26720,7 +26776,7 @@ function uploadFile() {
             try { data = JSON.parse(xhr.responseText); } catch (_) { /* non-JSON */ }
             if (xhr.status >= 200 && xhr.status < 300 && data.success) {
                 progress.finish(true, `Uploaded ${files.length} file(s)`);
-                if (!isUploadablePath(currentDirectory)) currentDirectory = target;
+                if (!isRealDir(currentDirectory)) currentDirectory = target;
                 refreshFiles();
             } else {
                 const msg = (data && data.error) ? data.error : `HTTP ${xhr.status}`;
@@ -26734,15 +26790,44 @@ function uploadFile() {
         };
 
         xhr.send(formData);
-    };
-
-    input.click();
+    });
 }
 
-// Create a subfolder in the current /uploads or /backups location.
+// Create a new text file in the current folder, then open it in the editor.
+function newTextFile() {
+    if (!isRealDir(currentDirectory)) {
+        showFileError('Open a folder first (e.g. Uploads), then create a file');
+        return;
+    }
+    const name = (prompt('New file name (include an extension, e.g. notes.txt):', 'notes.txt') || '').trim();
+    if (!name) return;
+    if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+        showFileError('Name cannot contain / or \\');
+        return;
+    }
+    networkAwareFetch('/api/files/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentDirectory, name })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) {
+            showFileSuccess(`Created "${d.name}"`);
+            refreshFiles();
+            // Jump straight into the inline editor for the new (empty) file.
+            previewFile(d.path, { edit: true });
+        } else {
+            showFileError(d.error || 'Could not create file');
+        }
+    })
+    .catch(err => showFileError(err.message));
+}
+
+// Create a subfolder in the current folder.
 function newFolder() {
-    if (!isWritablePath(currentDirectory)) {
-        showFileError('Folders can be created under Uploads or Backups');
+    if (!isRealDir(currentDirectory)) {
+        showFileError('Open a folder first, then create a subfolder');
         return;
     }
     const name = (prompt('New folder name:') || '').trim();
@@ -27258,11 +27343,7 @@ function afterSafeChange() {
 }
 
 function uploadToSafe() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.onchange = function(event) {
-        const files = event.target.files;
+    pickFiles({ multiple: true }, function (files) {
         if (!files.length) return;
         const formData = new FormData();
         for (let file of files) formData.append('file', file);
@@ -27276,8 +27357,7 @@ function uploadToSafe() {
                 else showFileError(d.error || 'Upload failed');
             })
             .catch(err => showFileError(err.message));
-    };
-    input.click();
+    });
 }
 
 function downloadSafeFile(id) {
@@ -27745,12 +27825,10 @@ function removeRemoteShare(id, name) {
 }
 
 function sendToRemote(id, name) {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.onchange = ev => {
-        if (!ev.target.files.length) return;
+    pickFiles({}, function (files) {
+        if (!files.length) return;
         const fd = new FormData();
-        fd.append('file', ev.target.files[0]);
+        fd.append('file', files[0]);
         showFileLoading(`Sending to ${name}…`);
         networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id) + '/send', { method: 'POST', body: fd })
             .then(r => r.json()).then(d => {
@@ -27758,8 +27836,7 @@ function sendToRemote(id, name) {
                 showNotification(`Sending to ${name} — watch Transfers for progress`, 'success');
                 if (typeof loadXferTransfers === 'function') loadXferTransfers();
             }).catch(e => { showNotification('Send failed: ' + e.message, 'error'); });
-    };
-    input.click();
+    });
 }
 
 // ---- Outside-mesh sharing: share tokens (let someone send TO me) ------------
@@ -27873,19 +27950,16 @@ function revokeShareToken(id, label) {
 }
 
 function shareUploadFiles() {
-    const input = document.createElement('input');
-    input.type = 'file'; input.multiple = true;
-    input.onchange = ev => {
-        if (!ev.target.files.length) return;
+    pickFiles({ multiple: true }, function (files) {
+        if (!files.length) return;
         const fd = new FormData();
-        for (const f of ev.target.files) fd.append('file', f);
+        for (const f of files) fd.append('file', f);
         showFileLoading('Publishing to Mesh Share…');
         networkAwareFetch('/api/mesh/share/add', { method: 'POST', body: fd })
             .then(r => r.json())
             .then(d => { if (d.success) { showFileSuccess(`Shared ${d.stored || 1} file(s)`); loadMeshShare(); } else showFileError(d.error || 'Share failed'); })
             .catch(e => showFileError(e.message));
-    };
-    input.click();
+    });
 }
 
 function shareUnshare(name) {
@@ -27978,10 +28052,7 @@ document.getElementById('share-dest-modal')?.addEventListener('click', function 
 function xferPickComputerFile() {
     const target = document.getElementById('xfer-dest')?.value;
     if (!target) { showFileError('Pick an online destination unit first'); return; }
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.onchange = ev => { if (ev.target.files.length) _xferUploadAndSend(ev.target.files[0], target); };
-    input.click();
+    pickFiles({}, function (files) { if (files.length) _xferUploadAndSend(files[0], target); });
 }
 function _xferUploadAndSend(file, target) {
     const fd = new FormData();
