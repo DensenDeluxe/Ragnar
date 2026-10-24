@@ -334,6 +334,27 @@ class TestMdnsTier(unittest.TestCase):
             got = codes(eng.handle_frame(self._frame(l3, [self._ptr("_matter._tcp")])))
             self.assertIn("DNSD-070", got, f"{label}: {got}")
 
+    def test_zwave_zip_gateway_census(self):
+        # DNSD-079: a Silicon Labs Z/IP Gateway advertising _z-wave._udp.
+        # Bare presence, both stacks, once per instance.
+        for label, l3 in (("IPv4", self._v4()), ("IPv6", self._v6())):
+            eng = Engine(Config())
+            got = codes(eng.handle_frame(
+                self._frame(l3, [self._ptr("_z-wave._udp", "ZIPGateway-01")])))
+            self.assertIn("DNSD-079", got, f"{label}: {got}")
+        # Once per instance.
+        eng = Engine(Config())
+        f = self._frame(self._v4(), [self._ptr("_z-wave._udp", "ZIPGateway-01")])
+        self.assertIn("DNSD-079", codes(eng.handle_frame(f, now=1.0)))
+        self.assertNotIn("DNSD-079", codes(eng.handle_frame(f, now=2.0)),
+                         "re-announcement must be suppressed")
+        # Bare presence: no Matter/Thread fingerprint attached.
+        eng = Engine(Config())
+        out = eng.handle_frame(
+            self._frame(self._v4(), [self._ptr("_z-wave._udp", "ZIPGateway-02")]))
+        ev = [x["evidence"] for x in out if x["code"] == "DNSD-079"][0]
+        self.assertEqual(ev["fingerprint"], {})
+
     def test_thread_border_router_census(self):
         eng = Engine(Config())
         got = codes(eng.handle_frame(
