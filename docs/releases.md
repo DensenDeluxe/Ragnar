@@ -4,6 +4,16 @@
 
 ### 2026-10-25
 
+#### [#1021](https://github.com/PierreGode/Ragnar/pull/1021) — fix(auth): recover from a hardware-fingerprint change without reinstalling (#1002)
+*branch `fix/hardware-rebind-recovery`*
+
+- Fixes [#1002](https://github.com/PierreGode/Ragnar/issues/1002): a user running Ragnar in a **Proxmox LXC** was locked out with *"Hardware mismatch detected"* after a **host kernel update**. Root cause: when no `/etc/machine-id` or CPU serial is available (common in containers), the hardware fingerprint fell back to `hostname + platform.platform()` — and `platform.platform()` **embeds the kernel release**, which in a container is the host's and changes on a host kernel update, silently changing the fingerprint.
+- **Fingerprint fallback is now kernel-independent:** if no machine-id / CPU serial is present, it uses a random ID **persisted once** to `data/hwid` instead of the platform/kernel string. Installs that have a real machine-id or Pi CPU serial are **unchanged** (identical fingerprint — no mass lockout).
+- **Recovery codes now rebind across a hardware change:** `recover()` no longer hard-fails on a hardware mismatch. A valid recovery code decrypts the key with the *stored* fingerprint and **rebinds** to the current hardware (new Pi, migrated VM, container kernel update) — **no data loss, no reinstall**. Because the other codes were tied to the old fingerprint, a **fresh set is issued and shown on the login page** to save. Normal password login stays strictly hardware-bound (anti-theft intact) — only a recovery code can rebind.
+- **Login UI:** the "Hardware mismatch" banner now links straight to the recovery flow and explains the common causes; the recovery screen shows the new recovery codes after a rebind and waits for you to save them before continuing (mobile-friendly).
+- Verified end-to-end against the real `AuthManager` (13 assertions): mismatch blocks password login; a recovery code rebinds and recovers the **same** data key; new-hardware login then works; old codes invalidated, new codes work; the persisted fallback ID is stable and kernel-independent.
+- **Docs:** [SECURITY.md](SECURITY.md) corrected (fingerprint no longer claims MAC address) and documents the rebind flow + container caveat.
+
 #### [#1020](https://github.com/PierreGode/Ragnar/pull/1020) — fix(ci): token validation now really verifies Contents: write
 *branch `ci/release-token-write-probe`*
 
