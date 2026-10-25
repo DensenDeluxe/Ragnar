@@ -1,0 +1,270 @@
+name: Release OS images
+
+# Manually-triggered release pipeline for the Ragnar OS images. You — and any
+# collaborator with write access to this repo (e.g. solarflere) — can start a
+# fresh release of BOTH images straight from the Actions tab ("Run workflow").
+#
+# What it does, end to end:
+#   1. Works out the next version for each edition — bumps the highest existing
+#      os-v* / os-ulfberht-v* release (minor by default, matching the history),
+#      or uses an explicit version you type in.
+#   2. Creates the matching git tag in the PRIVATE build repo PierreGode/RagnarOS.
+#      That tag push is exactly what the RagnarOS build workflows listen for: they
+#      build the image on the self-hosted Pi runner, upload it to ragnar.life, and
+#      publish the GitHub Release back here on this public repo.
+#   3. Follows each build run to completion, then checks the Release exists here
+#      and the ragnar.life manifest (std.json / ulf.json) shows the new version.
+#   4. Marks the STANDARD release as "Latest" (Ulfberht publishes last, so without
+#      this step it would steal the Latest badge).
+#
+# ── REQUIRED ONE-TIME SETUP: a cross-repo token ──────────────────────────────
+#   This repo has no access to the private RagnarOS repo by default. Add a repo
+#   secret named RAGNAROS_DISPATCH_TOKEN holding a Personal Access Token that can
+#   reach PierreGode/RagnarOS:
+#     • Fine-grained PAT — resource owner PierreGode, repository RagnarOS,
+#       permissions: Contents = Read and write, Actions = Read.  (recommended)
+#     • or a classic PAT with the `repo` scope.
+#   Add it under: Settings ▸ Secrets and variables ▸ Actions ▸ New repository
+#   secret. Without it the pipeline stops immediately with an explanatory error.
+#
+# The build itself runs on the self-hosted `ragnar-os-builder` runner (the Pi),
+# so that box must be powered on with its Actions runner service running, or the
+# builds just queue until this job times out.
+#
+# See docs/releasing-os-images.md for the full walkthrough.
+
+on:
+  workflow_dispatch:
+    inputs:
+      which:
+        description: 'Which image(s) to release'
+        type: choice
+        options: [both, standard, ulfberht]
+        default: both
+      bump:
+        description: 'Version bump (ignored for an edition given an explicit version below)'
+        type: choice
+        options: [minor, patch, major]
+        default: minor
+      std_version:
+        description: 'Explicit STANDARD version, e.g. 1.8.0 (blank = auto-bump)'
+        type: string
+        default: ''
+      ulf_version:
+        description: 'Explicit ULFBERHT version, e.g. 1.5.0 (blank = auto-bump)'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Only show the versions that WOULD be released — create no tags'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # read this repo's releases + set the Latest badge
+
+# One release run at a time; never cancel an in-flight release (builds are long).
+concurrency:
+  group: release-os-images
+  cancel-in-progress: false
+
+env:
+  PRIV: PierreGode/RagnarOS
+  STD_WF: build-os-image.yml
+  ULF_WF: build-ulfberht-image.yml
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Two ~75–90 min builds run back-to-back on the single Pi runner, plus queue.
+    timeout-minutes: 350
+    steps:
+      - name: Preflight — cross-repo token present and valid
+        env:
+          PRIV_TOKEN: ${{ secrets.RAGNAROS_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PRIV_TOKEN:-}" ]; then
+            echo "::error title=Missing token::Add a repo secret RAGNAROS_DISPATCH_TOKEN — a PAT that can reach $PRIV (Contents: write + Actions: read). See the header of this workflow file / docs/releasing-os-images.md."
+            exit 1
+          fi
+          if ! GH_TOKEN="$PRIV_TOKEN" gh repo view "$PRIV" --json nameWithOwner >/dev/null 2>&1; then
+            echo "::error title=Token cannot reach RagnarOS::RAGNAROS_DISPATCH_TOKEN could not read $PRIV. Check the PAT's resource owner, repository access and expiry."
+            exit 1
+          fi
+          echo "Token OK — can reach $PRIV."
+
+      - name: Compute versions
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Highest X.Y.Z among THIS repo's releases for an exact tag prefix.
+          latest() { # $1 = prefix, e.g. 'os-v' or 'os-ulfberht-v'
+            gh api "repos/$REPO/releases" --paginate --jq '.[].tag_name' 2>/dev/null \
+              | grep -E "^$1[0-9]+\.[0-9]+\.[0-9]+$" \
+              | sed "s/^$1//" | sort -V | tail -1
+          }
+          bump() { # $1 = X.Y.Z  $2 = level
+            local X Y Z; IFS=. read -r X Y Z <<<"$1"
+            case "$2" in
+              major) X=$((X+1)); Y=0; Z=0;;
+              minor) Y=$((Y+1)); Z=0;;
+              patch) Z=$((Z+1));;
+            esac
+            echo "$X.$Y.$Z"
+          }
+          norm() { echo "$1" | sed -E 's/^os-ulfberht-v//; s/^os-v//; s/^v//'; }
+
+          WHICH='${{ inputs.which }}'; LEVEL='${{ inputs.bump }}'
+          STD_TAG=''; ULF_TAG=''
+
+          if [ "$WHICH" = both ] || [ "$WHICH" = standard ]; then
+            IN='${{ inputs.std_version }}'
+            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-v')" "$LEVEL")"; fi
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed standard version '$V' is not X.Y.Z"; exit 1; }
+            STD_TAG="os-v$V"
+          fi
+          if [ "$WHICH" = both ] || [ "$WHICH" = ulfberht ]; then
+            IN='${{ inputs.ulf_version }}'
+            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-ulfberht-v')" "$LEVEL")"; fi
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed ulfberht version '$V' is not X.Y.Z"; exit 1; }
+            ULF_TAG="os-ulfberht-v$V"
+          fi
+
+          echo "std_tag=$STD_TAG" >> "$GITHUB_OUTPUT"
+          echo "ulf_tag=$ULF_TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release plan"
+            echo ""
+            echo "| Edition | New tag |"
+            echo "|---|---|"
+            [ -n "$STD_TAG" ] && echo "| Standard | \`$STD_TAG\` |"
+            [ -n "$ULF_TAG" ] && echo "| Ulfberht | \`$ULF_TAG\` |"
+            echo ""
+            [ "${{ inputs.dry_run }}" = "true" ] && echo "_Dry run — no tags created._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Planned: STANDARD='$STD_TAG'  ULFBERHT='$ULF_TAG'"
+
+      - name: Create release tags in RagnarOS
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.RAGNAROS_DISPATCH_TOKEN }}
+          STD_TAG: ${{ steps.ver.outputs.std_tag }}
+          ULF_TAG: ${{ steps.ver.outputs.ulf_tag }}
+        run: |
+          set -euo pipefail
+          SHA="$(gh api "repos/$PRIV/commits/main" --jq .sha)"
+          echo "RagnarOS main @ $SHA"
+          mktag() {
+            local TAG="$1"
+            [ -z "$TAG" ] && return 0
+            if gh api "repos/$PRIV/git/ref/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error title=Tag exists::$TAG already exists in $PRIV — that version was already released. Pick a higher version."
+              exit 1
+            fi
+            gh api -X POST "repos/$PRIV/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
+            echo "Created tag $TAG -> $SHA"
+          }
+          mktag "$STD_TAG"
+          mktag "$ULF_TAG"
+
+      - name: Follow builds and verify
+        if: ${{ inputs.dry_run == false }}
+        env:
+          PRIV_TOKEN: ${{ secrets.RAGNAROS_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          STD_TAG: ${{ steps.ver.outputs.std_tag }}
+          ULF_TAG: ${{ steps.ver.outputs.ulf_tag }}
+        run: |
+          set -uo pipefail
+
+          # Locate the tag-triggered run in RagnarOS (head_branch == tag name).
+          find_run() { # $1 tag  $2 workflow-file
+            local TAG="$1" WF="$2" id='' i
+            for i in $(seq 1 48); do   # up to ~8 min for the run to register
+              id="$(GH_TOKEN="$PRIV_TOKEN" gh run list -R "$PRIV" --workflow "$WF" \
+                     --event push --limit 50 --json databaseId,headBranch \
+                     --jq "[.[] | select(.headBranch==\"$TAG\") | .databaseId] | first // empty" 2>/dev/null)"
+              [ -n "$id" ] && { echo "$id"; return 0; }
+              sleep 10
+            done
+            return 1
+          }
+
+          # Block until a run completes; echo its conclusion.
+          wait_run() { # $1 run id
+            local id="$1" out st cc
+            while :; do
+              out="$(GH_TOKEN="$PRIV_TOKEN" gh run view "$id" -R "$PRIV" \
+                      --json status,conclusion --jq '.status+" "+(.conclusion // "-")' 2>/dev/null)"
+              st="${out%% *}"; cc="${out##* }"
+              [ "$st" = completed ] && { echo "$cc"; return 0; }
+              sleep 30
+            done
+          }
+
+          FAIL=0; SID=''; UID_=''; SCC='n/a'; UCC='n/a'
+
+          if [ -n "$STD_TAG" ]; then
+            echo "Locating standard build for $STD_TAG ..."
+            SID="$(find_run "$STD_TAG" "$STD_WF")" || { echo "::error::No build run appeared for $STD_TAG — is the self-hosted ragnar-os-builder runner online?"; FAIL=1; }
+          fi
+          if [ -n "$ULF_TAG" ]; then
+            echo "Locating ulfberht build for $ULF_TAG ..."
+            UID_="$(find_run "$ULF_TAG" "$ULF_WF")" || { echo "::error::No build run appeared for $ULF_TAG — is the runner online?"; FAIL=1; }
+          fi
+          [ "$FAIL" = 1 ] && exit 1
+
+          [ -n "$SID" ] && echo "Standard build: https://github.com/$PRIV/actions/runs/$SID"
+          [ -n "$UID_" ] && echo "Ulfberht build: https://github.com/$PRIV/actions/runs/$UID_"
+
+          # Builds share one runner, so they run back-to-back; waiting in order is fine.
+          if [ -n "$SID" ]; then echo "Waiting on standard build ..."; SCC="$(wait_run "$SID")"; echo "standard -> $SCC"; fi
+          if [ -n "$UID_" ]; then echo "Waiting on ulfberht build ..."; UCC="$(wait_run "$UID_")"; echo "ulfberht -> $UCC"; fi
+
+          # Verify the release + the ragnar.life manifest for a successful build.
+          verify() { # $1 tag  $2 conclusion  $3 manifest-url  $4 label
+            local TAG="$1" CC="$2" MAN="$3" L="$4" mv
+            [ -z "$TAG" ] && return 0
+            if [ "$CC" != success ]; then echo "::error::$L build ($TAG) concluded '$CC'"; FAIL=1; return 0; fi
+            if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+              echo "OK: release $TAG present on $REPO"
+            else
+              echo "::error::$L release $TAG is missing on $REPO"; FAIL=1
+            fi
+            mv="$(curl -fsSL "$MAN" 2>/dev/null | sed -nE 's/.*"version":"([^"]+)".*/\1/p' | head -1)"
+            if [ "$mv" = "$TAG" ]; then
+              echo "OK: ragnar.life $L manifest = $TAG"
+            else
+              echo "::warning::ragnar.life $L manifest shows '${mv:-<none>}' (expected $TAG) — a CDN cache may still be catching up"
+            fi
+          }
+          verify "$STD_TAG" "$SCC" "https://ragnar.life/images/std.json" "standard"
+          verify "$ULF_TAG" "$UCC" "https://ragnar.life/images/ulf.json" "ulfberht"
+
+          # Keep the STANDARD edition as "Latest" (Ulfberht publishes last).
+          if [ -n "$STD_TAG" ] && [ "$SCC" = success ]; then
+            RID="$(gh api "repos/$REPO/releases/tags/$STD_TAG" --jq .id 2>/dev/null)"
+            if [ -n "$RID" ]; then
+              gh api -X PATCH "repos/$REPO/releases/$RID" -f make_latest=true >/dev/null \
+                && echo "OK: set $STD_TAG as Latest"
+            fi
+          fi
+
+          {
+            echo "### Result"
+            echo ""
+            echo "| Edition | Tag | Build | Release |"
+            echo "|---|---|---|---|"
+            [ -n "$STD_TAG" ] && echo "| Standard | \`$STD_TAG\` | $SCC | https://github.com/$REPO/releases/tag/$STD_TAG |"
+            [ -n "$ULF_TAG" ] && echo "| Ulfberht | \`$ULF_TAG\` | $UCC | https://github.com/$REPO/releases/tag/$ULF_TAG |"
+            echo ""
+            echo "Download page: https://ragnar.life/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$FAIL" = 0 ] || { echo "One or more editions did not finish cleanly."; exit 1; }
+          echo "Release pipeline complete."

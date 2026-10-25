@@ -37,7 +37,7 @@ Prefer containers? Run the headless web UI on any Linux host with `docker compos
 
 Don't want to run the installer at all? Flash **[Ragnar OS](docs/ragnar-os.md)** — a prebuilt Raspberry Pi image with Ragnar already installed and enabled. Write it with Raspberry Pi Imager, boot, open the web UI. For an offensive/red-team build with onboard-Wi-Fi monitor mode and the full toolset, flash **[Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md)** (built on a Kali ARM base).
 
-More: [Install Guide](docs/INSTALL.md) · [Ragnar OS image](docs/ragnar-os.md) · [Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md) · [AP Mode / getting on a network](docs/RagnarAP.md) · [Updating Ragnar](docs/updates.md) · [Releases (per-PR log)](docs/releases.md) · [Release Notes](docs/RELEASE_NOTES.md).
+More: [Install Guide](docs/INSTALL.md) · [Ragnar OS image](docs/ragnar-os.md) · [Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md) · [Releasing OS images](docs/releasing-os-images.md) · [AP Mode / getting on a network](docs/RagnarAP.md) · [Updating Ragnar](docs/updates.md) · [Releases (per-PR log)](docs/releases.md) · [Release Notes](docs/RELEASE_NOTES.md).
 
 ---
 
