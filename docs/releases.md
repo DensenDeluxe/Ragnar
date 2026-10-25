@@ -4,6 +4,14 @@
 
 ### 2026-10-25
 
+#### [#1018](https://github.com/PierreGode/Ragnar/pull/1018) — fix(ci): token-validation step aborted under the runner's `bash -e`
+*branch `ci/release-token-validate-fix`*
+
+- The token-validation step added in #1017 **failed every run with a bare `exit 1` and no output**. Root cause: GitHub runs step shells as `bash -e {0}`, and `set -uo pipefail` does **not** undo that inherited `-e`. The step reads response headers with `grep`, and an **absent** header (notably `x-oauth-scopes`, which a *fine-grained* PAT — the recommended kind — never sends) makes the `scopes="$(…)"` assignment non-zero, so `-e` aborted the whole step before it could check anything.
+- **Fix:** the two steps that intentionally continue past non-zero exits (*Validate cross-repo token* and *Follow builds and verify*) now explicitly `set +e`, and `hdr()` ends in `|| true` so a missing header is just an empty string. The two steps that *should* fail hard (*Compute versions*, *Create release tags*) keep `set -euo pipefail` unchanged.
+- Verified by running the validation step's script under `bash -e` against simulated responses: a valid fine-grained PAT and a classic `repo`-scope PAT both pass; a read-only token, an expired token, and a token lacking Actions:read each fail with their specific error — no more silent abort.
+- No behaviour change on a real release; CI-only bug fix.
+
 #### [#1017](https://github.com/PierreGode/Ragnar/pull/1017) — ci: validate the cross-repo release token (expiry + permissions)
 *branch `ci/release-token-validate`*
 

@@ -86,6 +86,11 @@ jobs:
         env:
           PRIV_TOKEN: ${{ secrets.RAGNAROS_DISPATCH_TOKEN }}
         run: |
+          # GitHub runs step shells as `bash -e {0}`, but this step deliberately
+          # continues past non-zero exits (an absent header, a read-only probe) and
+          # collects problems into `fail`, so turn errexit OFF explicitly — a bare
+          # `set -uo pipefail` does NOT undo the inherited -e.
+          set +e
           set -uo pipefail
           fail=0
 
@@ -108,7 +113,9 @@ jobs:
           # and JSON body (after it).
           awk 'BEGIN{h=1} /^\r?$/{h=0;next} h{print}' "$resp" > "$RUNNER_TEMP/priv.hdr"
           awk 'f; /^\r?$/{f=1}'                       "$resp" > "$RUNNER_TEMP/priv.body"
-          hdr() { grep -i "^$1:" "$RUNNER_TEMP/priv.hdr" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//; s/ *$//'; }
+          # A missing header (e.g. x-oauth-scopes on a fine-grained PAT) is normal —
+          # grep returns empty, never an error.
+          hdr() { grep -i "^$1:" "$RUNNER_TEMP/priv.hdr" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//; s/ *$//' || true; }
 
           login="$(GH_TOKEN="$PRIV_TOKEN" gh api user --jq .login 2>/dev/null || echo '?')"
           exp="$(hdr github-authentication-token-expiration)"
@@ -264,6 +271,10 @@ jobs:
           STD_TAG: ${{ steps.ver.outputs.std_tag }}
           ULF_TAG: ${{ steps.ver.outputs.ulf_tag }}
         run: |
+          # Errexit OFF on purpose (the runner adds -e): this step treats a lagging
+          # manifest / a missing release as a collected problem (FAIL) or a warning,
+          # not an instant abort. `set -uo pipefail` alone would NOT undo the -e.
+          set +e
           set -uo pipefail
 
           # Locate the tag-triggered run in RagnarOS (head_branch == tag name).
