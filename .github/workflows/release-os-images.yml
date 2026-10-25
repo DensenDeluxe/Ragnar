@@ -78,20 +78,104 @@ jobs:
     # Two ~75–90 min builds run back-to-back on the single Pi runner, plus queue.
     timeout-minutes: 350
     steps:
-      - name: Preflight — cross-repo token present and valid
+      - name: Validate cross-repo token (RAGNAROS_DISPATCH_TOKEN)
+        # Runs on every run, dry_run included, so a dry run is a real health check
+        # of the PAT before you commit to a ~3-hour release: is it present, not
+        # expired, and does it actually hold the permissions the pipeline needs
+        # (Contents: write to create the tags, Actions: read to follow the builds)?
         env:
           PRIV_TOKEN: ${{ secrets.RAGNAROS_DISPATCH_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          fail=0
+
+          # 1) Present at all?
           if [ -z "${PRIV_TOKEN:-}" ]; then
             echo "::error title=Missing token::Add a repo secret RAGNAROS_DISPATCH_TOKEN — a PAT that can reach $PRIV (Contents: write + Actions: read). See the header of this workflow file / docs/releasing-os-images.md."
             exit 1
           fi
-          if ! GH_TOKEN="$PRIV_TOKEN" gh repo view "$PRIV" --json nameWithOwner >/dev/null 2>&1; then
+
+          # One authenticated call to RagnarOS, keeping the response headers — the
+          # token's expiry (and classic-PAT scopes) are only exposed via headers.
+          resp="$RUNNER_TEMP/priv.http"
+          if ! GH_TOKEN="$PRIV_TOKEN" gh api "repos/$PRIV" --include > "$resp" 2> "$RUNNER_TEMP/priv.err"; then
             echo "::error title=Token cannot reach RagnarOS::RAGNAROS_DISPATCH_TOKEN could not read $PRIV. Check the PAT's resource owner, repository access and expiry."
+            sed 's/^/  /' "$RUNNER_TEMP/priv.err" || true
             exit 1
           fi
-          echo "Token OK — can reach $PRIV."
+
+          # Split the raw HTTP response into headers (before the first blank line)
+          # and JSON body (after it).
+          awk 'BEGIN{h=1} /^\r?$/{h=0;next} h{print}' "$resp" > "$RUNNER_TEMP/priv.hdr"
+          awk 'f; /^\r?$/{f=1}'                       "$resp" > "$RUNNER_TEMP/priv.body"
+          hdr() { grep -i "^$1:" "$RUNNER_TEMP/priv.hdr" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//; s/ *$//'; }
+
+          login="$(GH_TOKEN="$PRIV_TOKEN" gh api user --jq .login 2>/dev/null || echo '?')"
+          exp="$(hdr github-authentication-token-expiration)"
+          scopes="$(hdr x-oauth-scopes)"
+          push="$(jq -r '.permissions.push    // false' "$RUNNER_TEMP/priv.body" 2>/dev/null || echo false)"
+          admin="$(jq -r '.permissions.admin  // false' "$RUNNER_TEMP/priv.body" 2>/dev/null || echo false)"
+
+          # 2) Expiry — expired is fatal, close-to-expiry is a warning.
+          exp_note="no expiry reported (non-expiring token, or a fine-grained PAT that does not expose one)"
+          if [ -n "$exp" ]; then
+            exp_epoch="$(date -u -d "$exp" +%s 2>/dev/null || echo '')"
+            now_epoch="$(date -u +%s)"
+            if [ -z "$exp_epoch" ]; then
+              exp_note="expires $exp (could not parse to compute days left)"
+            elif [ "$exp_epoch" -le "$now_epoch" ]; then
+              echo "::error title=Token expired::RAGNAROS_DISPATCH_TOKEN expired on $exp. Generate a new PAT and update the repo secret."
+              exp_note="EXPIRED on $exp"
+              fail=1
+            else
+              days=$(( (exp_epoch - now_epoch) / 86400 ))
+              exp_note="expires $exp (~$days day(s) left)"
+              if [ "$days" -le 7 ]; then
+                echo "::warning title=Token expiring soon::RAGNAROS_DISPATCH_TOKEN expires on $exp (~$days day(s) left). Rotate it before it lapses."
+              fi
+            fi
+          fi
+
+          # 3) Contents: write — the pipeline creates tags in RagnarOS. The repo's
+          #    computed permission set tells us whether this token can push.
+          if [ "$push" != true ] && [ "$admin" != true ]; then
+            echo "::error title=No write permission::The token can READ $PRIV but has no write access (needs Contents: write / the classic 'repo' scope). Tag creation would fail — fix the PAT's permissions."
+            fail=1
+          fi
+
+          # 4) Actions: read — the pipeline polls the build runs. Listing workflows
+          #    needs Actions: read (fine-grained) or the 'repo' scope (classic).
+          if GH_TOKEN="$PRIV_TOKEN" gh api "repos/$PRIV/actions/workflows" --jq '.total_count' >/dev/null 2>&1; then
+            actions_note="yes"
+          else
+            actions_note="NO"
+            echo "::error title=No Actions:read::The token cannot list workflows in $PRIV (needs Actions: read / the classic 'repo' scope). Following the builds would fail — fix the PAT's permissions."
+            fail=1
+          fi
+
+          [ -n "$scopes" ] && kind="classic PAT (scopes: $scopes)" || kind="fine-grained PAT"
+
+          {
+            echo "### Token validation — RAGNAROS_DISPATCH_TOKEN"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Token owner | \`$login\` |"
+            echo "| Kind | $kind |"
+            echo "| Reaches \`$PRIV\` | yes |"
+            echo "| Contents: write (create tags) | $([ "$push" = true ] || [ "$admin" = true ] && echo yes || echo '**NO**') |"
+            echo "| Actions: read (follow builds) | $([ "$actions_note" = yes ] && echo yes || echo '**NO**') |"
+            echo "| Expiry | $exp_note |"
+            echo ""
+            [ "$fail" = 0 ] && echo "_Token is valid for a release._" || echo "_Token is NOT usable — see the errors above._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Token owner=$login kind='$kind' push=$push admin=$admin actions=$actions_note expiry='$exp_note'"
+          if [ "$fail" != 0 ]; then
+            echo "::error title=Token invalid::RAGNAROS_DISPATCH_TOKEN failed validation — fix it before releasing (details above)."
+            exit 1
+          fi
+          echo "Token OK — present, unexpired, and holds Contents:write + Actions:read on $PRIV."
 
       - name: Compute versions
         id: ver
