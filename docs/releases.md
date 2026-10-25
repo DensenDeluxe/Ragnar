@@ -4,6 +4,15 @@
 
 ### 2026-10-25
 
+#### [#1020](https://github.com/PierreGode/Ragnar/pull/1020) — fix(ci): token validation now really verifies Contents: write
+*branch `ci/release-token-write-probe`*
+
+- A real release got past validation and then **403'd on tag creation** (`Resource not accessible by personal access token` on `POST .../git/refs`). The validation step had reported "Contents: write ✓" because it read `permissions.push` from `GET /repos` — but that field reflects the **account's role** on the repo, not what a **fine-grained PAT** was actually granted, so a read-only PAT owned by the repo owner showed `push:true` (a false positive).
+- **Fix:** the write check now **attempts an actual write** — it creates a git **blob** in the build repo (`POST .../git/blobs`), which requires Contents: write but produces only a dangling object (no tag/commit/ref/event/notification; git GCs it). A read-only token gets the same 403 up front, in dry runs too, with an actionable message ("edit the fine-grained PAT ▸ Contents ▸ Read and write"). The unreliable `permissions.push`/`admin` parse was removed.
+- The **Create release tags** step also now turns a write 403 into the same actionable message instead of a bare `gh:` error.
+- Verified under `bash -e` with a stubbed API: a read/write token passes, a **read-only token now fails validation** (previously passed), and no-Actions / expired tokens still fail with their specific errors.
+- **Docs:** [Releasing OS images](releasing-os-images.md) notes the harmless write probe. No behaviour change for a correctly-scoped token.
+
 #### [#1019](https://github.com/PierreGode/Ragnar/pull/1019) — ci: Release plan on top of the run summary, token validation below
 *branch `ci/release-summary-order`*
 
