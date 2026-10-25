@@ -25,11 +25,12 @@ tab without needing direct access to the private build repo.
 3. Click **Run workflow** and watch it. The run page (and its summary) shows the
    planned tags, links to each build on the private runner, and the final result.
 
-> **Tip:** run it once with `dry_run` ticked first. The very first step validates
-> `RAGNAROS_DISPATCH_TOKEN` and prints a table showing the token owner, that it can
-> reach RagnarOS, that it holds **Contents: write** + **Actions: read**, and **when
-> it expires** — so you catch an expired or under-scoped token in seconds instead of
-> part-way through a real release.
+> **Tip:** run it once with `dry_run` ticked first. The summary then shows the
+> **Release plan** (the versions it would cut) on top, and below it a **Token
+> validation** section for `RAGNAROS_DISPATCH_TOKEN` — token owner, that it can
+> reach the build repo, that it holds **Contents: write** + **Actions: read**, and
+> **when it expires** — so you catch a wrong version number or an expired /
+> under-scoped token in seconds instead of part-way through a real release.
 
 ## What happens under the hood
 
@@ -38,16 +39,16 @@ Actions tab (this repo)
    │  workflow_dispatch
    ▼
 Release OS images
-   │  0. validate RAGNAROS_DISPATCH_TOKEN (present, unexpired, Contents:write + Actions:read)
-   │  1. compute next versions (or use your overrides)
-   │  2. create tags  os-v<X.Y.Z>  and  os-ulfberht-v<X.Y.Z>  in PierreGode/RagnarOS
+   │  1. compute next versions → print the Release plan (or use your overrides)
+   │  2. validate RAGNAROS_DISPATCH_TOKEN (present, unexpired, Contents:write + Actions:read)
+   │  3. create tags  os-v<X.Y.Z>  and  os-ulfberht-v<X.Y.Z>  in PierreGode/RagnarOS
    ▼
 RagnarOS build workflows (tag-triggered, self-hosted Pi runner)
    │  build image → upload to ragnar.life → publish GitHub Release here
    ▼
 Release OS images (same run, still watching)
-   │  3. wait for both builds, verify the release + ragnar.life manifest
-   │  4. mark the standard release as "Latest"
+   │  4. wait for both builds, verify the release + ragnar.life manifest
+   │  5. mark the standard release as "Latest"
    ▼
 Done — images live at https://ragnar.life/ and on the Releases page
 ```
@@ -69,13 +70,14 @@ needs a Personal Access Token stored as a repo secret named
 - or a **classic PAT** with the `repo` scope.
 
 Add it under **Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret**.
-Until it exists, the pipeline stops on its first step with a clear error.
+Until it exists, the pipeline stops with a clear error before it creates any tags.
 
-The pipeline's first step **validates this token on every run** (dry runs included)
-and fails fast with a specific message if it is missing, **expired**, cannot reach
-RagnarOS, or is missing **Contents: write** or **Actions: read** — so a stale or
-under-scoped PAT is caught up front rather than mid-release. A near-expiry token
-(≤ 7 days left) passes with a warning so you have time to rotate it.
+The pipeline **validates this token on every run** (dry runs included), right after
+it prints the Release plan and before it creates any tags, and fails fast with a
+specific message if the token is missing, **expired**, cannot reach the build repo,
+or is missing **Contents: write** or **Actions: read** — so a stale or under-scoped
+PAT is caught up front rather than mid-release. A near-expiry token (≤ 7 days left)
+passes with a warning so you have time to rotate it.
 
 ## Prerequisites for a build to actually run
 

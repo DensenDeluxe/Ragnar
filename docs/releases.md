@@ -4,6 +4,14 @@
 
 ### 2026-10-25
 
+#### [#1019](https://github.com/PierreGode/Ragnar/pull/1019) — ci: Release plan on top of the run summary, token validation below
+*branch `ci/release-summary-order`*
+
+- Reordered the **Release OS images** job summary so the **Release plan** (the versions it would cut) is **on top**, with the **Token validation — RAGNAROS_DISPATCH_TOKEN** table in a clearly separated section (a `---` rule) **below** it. Achieved by running **Compute versions before the token-validation step** — the job summary always renders in step order. Compute versions is read-only (uses the built-in token, creates nothing), and the real gate is still before tag creation, so validation still blocks a bad token from ever creating a tag.
+- Renamed the summary row **`Reaches PierreGode/RagnarOS` → `Reaches Build`** (no longer prints the private repo path in the table).
+- Verified: step order is now Compute → Validate → Create tags → Follow builds; all steps pass `bash -n`; the validation script re-run under `bash -e` still passes for a good token and fails with its specific error for a read-only/expired/no-Actions token; the rendered summary shows the `---` divider and `Reaches Build`.
+- **Docs:** [Releasing OS images](releasing-os-images.md) flow diagram + dry-run tip updated to the new order. No behaviour change on a real release.
+
 #### [#1018](https://github.com/PierreGode/Ragnar/pull/1018) — fix(ci): token-validation step aborted under the runner's `bash -e`
 *branch `ci/release-token-validate-fix`*
 
