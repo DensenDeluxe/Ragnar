@@ -4,6 +4,14 @@
 
 ### 2026-10-25
 
+#### [#1011](https://github.com/PierreGode/Ragnar/pull/1011) — ci: one-click release pipeline for both OS images
+*branch `ci/release-os-images`*
+
+- Adds **`.github/workflows/release-os-images.yml`** — a manually-triggered (`workflow_dispatch`) pipeline so Pierre or a collaborator (e.g. `solarflere`) can cut a fresh release of **both** OS images from the Actions tab, with no direct access to the private build repo needed.
+- It computes the next version per edition (bumps the highest existing `os-v*` / `os-ulfberht-v*` release — minor by default — or takes an explicit version), **creates the matching tag(s) in the private `PierreGode/RagnarOS` repo** (which is what fires the existing build → ragnar.life → release flow on the self-hosted Pi runner), then **follows each build to completion**, verifies the Release + the ragnar.life manifest, and re-marks the **standard** edition as *Latest*. Inputs: `which` (both/standard/ulfberht), `bump` (minor/patch/major), `std_version` / `ulf_version` overrides, `dry_run`.
+- **One-time setup:** the pipeline needs a repo secret **`RAGNAROS_DISPATCH_TOKEN`** (a PAT that can reach RagnarOS — Contents: write + Actions: read); it fails fast with instructions if missing. The Pi's `ragnar-os-builder` runner must be online for the builds to run.
+- **Docs:** [Releasing OS images](releasing-os-images.md) + README link. No application code or runtime behaviour changes.
+
 #### [#1015](https://github.com/PierreGode/Ragnar/pull/1015) — feat(net): Modbus Watch → Modbus & LoRaWAN Watch (v3) + LoRaWAN backhaul tier + matrix refresh
 *branch `feature/modbus-lorawan-watch-v3`*
 
@@ -15,7 +23,6 @@
 - **Self-test:** the `modbus` suite now covers both tiers — 46 scenarios (Modbus offline + LoRaWAN census / cleartext / fingerprint / DevNonce / FCnt-reset + rollover FP guard / impersonation / rogue-downlink / location) plus Scapy pcap end-to-end for Modbus (v4 / v6 / v6+EH) **and** LoRaWAN (v4 / v6), all green; aggregate `do_routing_selftest` stays **60 suites**.
 - **Visibility matrix refreshed** (2160×5184): the **L7** band now shows the renamed **Modbus & LoRaWAN Watch** card (502/802 · LoRa 1700 · 19 codes) and DNS Doctor's **Z-Wave** addition; only L7 changed (L6–L1 byte-identical). `matrix_full.jpg` + the docs copy replaced, L7 re-cut, 16 matrix cache-bust URLs bumped; `ragnar_modern.js` cache-bust bumped.
 - **Docs:** [nettools.md › Modbus & LoRaWAN Watch](nettools.md#modbus--lorawan-watch) (LoRaWAN tier + fingerprint table).
-
 ### 2026-10-24
 
 #### feat(web): Files tab becomes a full file manager + fixes iPhone upload
