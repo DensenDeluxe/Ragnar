@@ -2,6 +2,20 @@
 
 ## Releases
 
+### 2026-10-25
+
+#### [#1015](https://github.com/PierreGode/Ragnar/pull/1015) — feat(net): Modbus Watch → Modbus & LoRaWAN Watch (v3) + LoRaWAN backhaul tier + matrix refresh
+*branch `feature/modbus-lorawan-watch-v3`*
+
+- **Modbus Watch is renamed Modbus & LoRaWAN Watch** and gains a **LoRaWAN gateway-backhaul tier** — the Semtech **GWMP packet-forwarder** protocol (UDP/1700) between a LoRa gateway and its network server. GWMP has no authentication or encryption, so an 8-byte gateway EUI is the only identity and every uplink / downlink PHYPayload crosses in the clear. This is the **wire side only** (no radio): Ragnar now decodes and IDs **LoRaWAN** on wired / WiFi without an RF front-end, alongside the Matter / Thread / Z-Wave census in DNS Doctor.
+- **Two separate scans / buttons, as requested:** **Scan Modbus** keeps the learn-then-arm baseline + arming timer (Arm now / Re-learn), and **Scan LoRaWAN** has **no arming timer and no baseline** — the server identity is the destination of the gateway's own `PULL_DATA`, so there is no learning window, and LoRa traffic never touches the Modbus baseline.
+- **7 new LoRaWAN codes (MBW-100..106), no CVE** (protocol / spec-level properties): `MBW-100` gateway census carrying a **fingerprint by reference** (gateway + DevEUI vendor via a bundled 35k-entry IEEE OUI snapshot, JoinEUI, DevAddr→NetID→operator, regional band, per-DevAddr datarate / cadence / FPort / ADR — **no device names on the wire**), `MBW-101` recoverable cleartext PHYPayloads, `MBW-102` gateway impersonation (one EUI from two sources), `MBW-103` downlink injection (`PULL_RESP` from a non-server address), `MBW-104` JoinRequest DevNonce replay, `MBW-105` uplink frame-counter reset, `MBW-106` cleartext gateway location.
+- **Registry 12 → 19 codes** (6 high / 7 medium / 3 low / 3 info). New vendored modules `lora.py` (hand-rolled GWMP + PHYPayload decoder — no LoRa library linked in), `fingerprint.py` and the bundled `oui_snapshot.dat`; `parser.py` unchanged. New route `GET /api/net/lorawan-watch`; LoRaWAN verdicts `clean` / `backhaul` / `suspicious` / `lora-abuse`.
+- **CVE index unchanged — 418 named / 355 detected** (LoRaWAN maps to no CVE; the 4 Modbus CVEs are unchanged). CREDITS.md coverage note added; README counts untouched.
+- **Self-test:** the `modbus` suite now covers both tiers — 46 scenarios (Modbus offline + LoRaWAN census / cleartext / fingerprint / DevNonce / FCnt-reset + rollover FP guard / impersonation / rogue-downlink / location) plus Scapy pcap end-to-end for Modbus (v4 / v6 / v6+EH) **and** LoRaWAN (v4 / v6), all green; aggregate `do_routing_selftest` stays **60 suites**.
+- **Visibility matrix refreshed** (2160×5184): the **L7** band now shows the renamed **Modbus & LoRaWAN Watch** card (502/802 · LoRa 1700 · 19 codes) and DNS Doctor's **Z-Wave** addition; only L7 changed (L6–L1 byte-identical). `matrix_full.jpg` + the docs copy replaced, L7 re-cut, 16 matrix cache-bust URLs bumped; `ragnar_modern.js` cache-bust bumped.
+- **Docs:** [nettools.md › Modbus & LoRaWAN Watch](nettools.md#modbus--lorawan-watch) (LoRaWAN tier + fingerprint table).
+
 ### 2026-10-24
 
 #### feat(web): Files tab becomes a full file manager + fixes iPhone upload
@@ -362,7 +376,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 - **New code `MBW-042 CLEARTEXT_NO_SECURE_PEER` (info/exposure):** the cleartext-posture floor — after the learning window, any plaintext `502` to a slave for which **no** `802`/TLS session has ever been seen fires **once per (family, slave)**, the "this PLC has no secure-Modbus option in use" inventory. Orthogonal to the abuse/framing codes (a legitimate learned master still exposes the slave); an `802` session seen during learning suppresses it, and a slave later seen on `802` is reported as `MBW-041` instead, never re-reported as `042`. Registry now **12 codes** (3 high / 4 medium / 3 low / **2 info**).
 - **Self-test:** `modbus` suite updated to **33 scenarios** — the registry assert bumped to 12/info-2, three new MBW-042 cadence cases (fires once per slave; suppressed once the slave is seen on 802), and the focused abuse/framing/enum + e2e assertions now strip the orthogonal cleartext-posture codes (MBW-040/041/042) so they test the abuse detector in isolation. The capture BPF is unchanged (the Ragnar-optimized `tcp port 502/802 or ip6-with-extension-header` form, kept over v2's broader `or ip6`). Aggregate `do_routing_selftest` 56 suites, all green.
 - **Live-validated** in a sealed netns: cleartext Modbus/TCP reads replayed with `tcpreplay` in two bursts spanning the learn window fire **MBW-042** through the real `do_modbus_watch` tcpdump capture path, verdict `exposure`.
-- **Docs:** [nettools.md › Modbus Watch](nettools.md#modbus-watch) (MBW-042 row + cadence).
+- **Docs:** [nettools.md › Modbus Watch](nettools.md#modbus--lorawan-watch) (MBW-042 row + cadence).
 
 ### 2026-10-14
 

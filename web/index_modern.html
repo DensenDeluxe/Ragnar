@@ -1886,8 +1886,8 @@
                         <!-- Visibility matrix reference (overview) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Module visibility matrix <span class="text-xs font-normal text-gray-500">— reference guide · every module by OSI layer × vantage tier</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">A clean verdict is only as wide as the tap: check a module's vantage tier before reading silence as safety. Each layer button above shows its own band of this matrix. Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image to open it full-size.</p>
                         </details>
@@ -2019,8 +2019,8 @@
                         <!-- Visibility matrix reference (l7) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L7 Application <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261024-ssdp" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2110,9 +2110,9 @@
                             </div>
                             <div id="radius-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
-                        <!-- Modbus Watch (Modbus/TCP posture: PLC writes / listen-only / UMAS) -->
+                        <!-- Modbus & LoRaWAN Watch (Modbus/TCP posture + LoRaWAN gateway backhaul) -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
-                            <h3 class="text-lg font-semibold mb-1">Modbus Watch <span class="text-xs font-normal text-gray-500">(passive · tcp/502 · PLC / OT segment)</span></h3>
+                            <h3 class="text-lg font-semibold mb-1">Modbus &amp; LoRaWAN Watch <span class="text-xs font-normal text-gray-500">(passive · Modbus tcp/502 · LoRaWAN backhaul udp/1700)</span></h3>
                             <p class="text-xs text-amber-300/90 mb-2">Modbus/TCP has <strong>no authentication and no encryption</strong>: any host that can reach a PLC on <span class="font-mono">tcp/502</span> can write its coils and registers. So the question is <strong>who is talking to the PLCs and what are they telling them to do</strong>. <strong>Detection-only</strong> — it never sends a Modbus request.</p>
                             <p class="text-sm text-gray-400 mb-3">Learns which masters talk to each PLC (per slave and unit ID; a one-hour window from the first Modbus seen, kept in <span class="font-mono">data/modbus_watch.json</span>), then flags a <strong>write from an unlearned master</strong> (or any function code from one), <strong>FC8 Force Listen Only</strong> — which silently drops a slave off the bus — and FC8 restart / clear-counters, Schneider <strong>UMAS</strong> (FC90) activity and the <strong>ModiPwn</strong> read-then-reconfigure sequence (<code>CVE-2021-22779</code>), Read-Device-ID <strong>enumeration</strong> bursts and <strong>unit-ID sweeps</strong>. <strong>Malformed MBAP/PDU framing</strong> — the libmodbus over-read / over-reply shape (<code>CVE-2019-14462</code>, <code>CVE-2019-14463</code>, <code>CVE-2024-10918</code>) — is flagged as a <em>trigger</em>: it shows the packet, not that the PLC runs libmodbus. Optional: declare the OT subnet(s) to flag Modbus outside them; a PLC also seen on Modbus Security (<span class="font-mono">802</span>/TLS) is flagged when reached in plaintext. <strong>Dual-stack</strong>, including IPv6 behind extension headers. Modbus RTU/serial is out of scope.</p>
                             <div class="flex flex-wrap items-center gap-2">
@@ -2127,6 +2127,19 @@
                             </div>
                             <p id="modbus-baseline" class="text-xs text-gray-500 mt-2"></p>
                             <div id="modbus-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                            <div class="border-t border-slate-700/60 mt-5 pt-4">
+                                <h4 class="text-sm font-semibold mb-1">LoRaWAN gateway backhaul <span class="text-xs font-normal text-gray-500">(udp/1700 · Semtech GWMP · no arming timer)</span></h4>
+                                <p class="text-xs text-amber-300/90 mb-2">The Semtech <strong>packet-forwarder</strong> backhaul between a LoRa gateway and its network server (<span class="font-mono">udp/1700</span>) has <strong>no authentication and no encryption</strong> — an 8-byte gateway EUI is the only identity and every uplink / downlink PHYPayload crosses in the clear. This reads the <strong>wire side only</strong> (no radio): it decodes and IDs LoRaWAN the way DNS Doctor IDs Matter / Thread / Z-Wave, over wired or WiFi. <strong>Detection-only.</strong> There is <strong>no learning window</strong>, so this is a separate scan with <strong>no arming timer</strong> — and LoRa traffic never touches the Modbus baseline.</p>
+                                <p class="text-sm text-gray-400 mb-3">Censuses each gateway EUI and builds a <strong>fingerprint</strong> — gateway and DevEUI vendor (bundled IEEE OUI snapshot), JoinEUI, DevAddr→NetID→operator, regional band, and per-DevAddr datarate / cadence / FPort / ADR — then flags <strong>recoverable cleartext PHYPayloads</strong> (MBW-101), <strong>gateway impersonation</strong> — one EUI from two source addresses (MBW-102), <strong>downlink injection</strong> — a PULL_RESP from a non-server address (MBW-103), <strong>JoinRequest DevNonce replay</strong> (MBW-104), an <strong>uplink frame-counter reset</strong> (MBW-105) and a <strong>cleartext gateway location</strong> (MBW-106). LoRaWAN maps to <strong>no CVE</strong> — these are protocol properties, not implementation bugs — and there are <strong>no device names on the wire</strong>. LoRa Basics Station (TLS) and MQTT-forwarder backhauls are invisible to a passive tap. <strong>Dual-stack</strong>, including IPv6 behind extension headers.</p>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <select id="lorawan-iface" title="Interface carrying the LoRaWAN gateway backhaul (udp/1700), or a SPAN/mirror of it" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                                        <option value="">Auto (wired first)</option>
+                                    </select>
+                                    <input id="lorawan-secs" type="number" min="5" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                                    <button onclick="runLorawanWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan LoRaWAN</button>
+                                </div>
+                                <div id="lorawan-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                            </div>
                         </div>
                         <h3 class="md:col-span-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Passive · Windows &amp; directory</h3>
                         <!-- SMB Watch (SMBv1 + LLMNR/NBT-NS/mDNS poisoning) -->
@@ -2551,8 +2564,8 @@
                         <!-- Visibility matrix reference (l6) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L6 Presentation <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261024-ssdp" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2603,8 +2616,8 @@
                         <!-- Visibility matrix reference (l5) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L5 Session <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261024-ssdp" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2648,8 +2661,8 @@
                         <!-- Visibility matrix reference (l4) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L4 Transport <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261024-ssdp" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2695,8 +2708,8 @@
                         <!-- Visibility matrix reference (l3) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L3 Network <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261024-ssdp" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2939,8 +2952,8 @@
                         <!-- Visibility matrix reference (l2) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L2 Data Link <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261024-ssdp" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -3245,8 +3258,8 @@
                         <!-- Visibility matrix reference (l1) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L1 Physical <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20261024-ssdp" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261024-ssdp" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261025-modbus-lorawan" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261025-modbus-lorawan" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -9818,7 +9831,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261024-files-manager"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261025-modbus-lorawan"></script>
 
 
 

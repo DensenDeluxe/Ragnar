@@ -248,7 +248,13 @@ behind them is Solarflere's work.
   sequence (CVE-2021-22779) and flags the malformed MBAP/PDU framing that triggers the
   libmodbus out-of-bounds reads (CVE-2019-14462 / CVE-2019-14463) and over-length reply
   (CVE-2024-10918). The libmodbus findings are honestly labelled as triggers: the packet is
-  seen, but the PLC's code base is not confirmed.
+  seen, but the PLC's code base is not confirmed. **v3 renames it Modbus & LoRaWAN Watch** and
+  adds a **LoRaWAN gateway-backhaul** tier (Semtech GWMP, UDP/1700) — a cleartext gateway census
+  with a device/gateway fingerprint, plus gateway impersonation, downlink injection, DevNonce
+  replay, uplink frame-counter reset and a cleartext location leak. It **carries no CVE** (the
+  LoRaWAN backhaul weaknesses are protocol / spec-level properties, not implementation bugs), so
+  it adds nothing to the counts above — it is wire-side LoRaWAN ID without a radio, alongside the
+  Matter / Thread / Z-Wave census in DNS Doctor.
 - **The discovery plane, multi-vendor** — **LLDP Watch** brings 30 LLDP parser CVEs across
   thirteen families: lldpd and its Ruckus derivative (CVE-2015-8011 / CVE-2015-8012 /
   CVE-2020-27827), Cisco FXOS/NX-OS/IOS/ACI (CVE-2018-0395, CVE-2021-34703, CVE-2023-20089,

@@ -12,12 +12,9 @@ from __future__ import annotations
 
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-# Ragnar: relative imports inside the vendored package (a flat "findings"/"state"
-# would collide with python/dns_doctor_passive's modules of the same name); the
-# bare form keeps the files runnable as a flat standalone directory.
-try:
+try:  # Ragnar: relative inside the vendored package, bare for flat standalone.
     from .parser import (
         Adu, FC, WRITE_FCS,
         DIAG_RESTART_COMM, DIAG_FORCE_LISTEN_ONLY, DIAG_CLEAR_COUNTERS,
@@ -26,7 +23,11 @@ try:
     )
     from .state import (
         FlowKey, Baseline, SweepTracker, EnumTracker, UmasSession,
+        GatewayServerMap, GatewayCensus, DevNonceTracker, FCntTracker,
+        LORA_FCNT_LOW, LORA_FCNT_HIGH, LORA_GW_WINDOW_S,
     )
+    from . import lora as L
+    from . import fingerprint as FP
 except ImportError:
     from parser import (
         Adu, FC, WRITE_FCS,
@@ -36,7 +37,11 @@ except ImportError:
     )
     from state import (
         FlowKey, Baseline, SweepTracker, EnumTracker, UmasSession,
+        GatewayServerMap, GatewayCensus, DevNonceTracker, FCntTracker,
+        LORA_FCNT_LOW, LORA_FCNT_HIGH, LORA_GW_WINDOW_S,
     )
+    import lora as L
+    import fingerprint as FP
 
 # code -> (title, class, severity, confidence)
 REGISTRY = {
@@ -52,10 +57,23 @@ REGISTRY = {
     "MBW-040": ("Modbus/TCP cleartext on non-isolated segment", "exposure", "low", "low"),
     "MBW-041": ("Plain 502 where 802/TLS option exists", "exposure", "info", "low"),
     "MBW-042": ("Cleartext Modbus on 502, no secure Modbus seen for peer", "exposure", "info", "low"),
+    # --- LoRaWAN gateway backhaul (Semtech GWMP over UDP) ---
+    "MBW-100": ("LoRaWAN gateway backhaul present", "exposure", "info", "high"),
+    "MBW-101": ("LoRaWAN backhaul cleartext, PHYPayloads recoverable", "exposure", "medium", "high"),
+    "MBW-102": ("Gateway EUI claimed from two source addresses", "abuse", "high", "medium"),
+    "MBW-103": ("PULL_RESP downlink from a non-server address", "abuse", "high", "medium"),
+    "MBW-104": ("JoinRequest DevNonce reuse (join replay)", "abuse", "medium", "medium"),
+    "MBW-105": ("Uplink frame-counter reset", "abuse", "high", "medium"),
+    "MBW-106": ("Gateway location exposed in cleartext backhaul", "exposure", "medium", "high"),
 }
 
+# Findings on the LoRaWAN backhaul tier: no Modbus unit id applies, so the
+# rendered line names the gateway/server pair instead.
+LORA_CODES = frozenset({"MBW-100", "MBW-101", "MBW-102", "MBW-103",
+                        "MBW-104", "MBW-105", "MBW-106"})
+
 # Codes reported once per flow (family, master, slave, unit) rather than per request.
-ONCE_PER_FLOW = frozenset({"MBW-004", "MBW-040", "MBW-041"})
+ONCE_PER_FLOW = frozenset({"MBW-004", "MBW-040", "MBW-041", "MBW-103"})
 
 
 @dataclass
@@ -64,17 +82,65 @@ class Finding:
     key: FlowKey
     detail: str
     ts: float
+    # Live fingerprint record for the census codes. Held by reference, not
+    # copied, so a finding rendered later -- by the reporting layer, or replayed
+    # from the log -- shows the running counts the preflight asks for instead of
+    # a first-sight snapshot. None for every non-census code.
+    fp: object = None
 
     @property
-    def meta(self):
+    def spec(self):
         return REGISTRY[self.code]
 
+    @property
+    def meta(self) -> str:
+        """The fingerprint metadata as it stands now, or ''."""
+        if self.fp is None:
+            return ""
+        try:
+            return self.fp.census_summary()
+        except Exception:
+            return ""
+
     def __str__(self) -> str:
-        title, cls, sev, conf = self.meta
+        title, cls, sev, conf = self.spec
         fam = "v6" if self.key.family == socket.AF_INET6 else "v4"
-        return (f"[{self.code}] {sev.upper()} ({conf} conf) {title} "
-                f"| {fam} {self.key.src}->{self.key.dst} unit={self.key.unit_id} "
-                f"| {self.detail}")
+        head = (f"[{self.code}] {sev.upper()} ({conf} conf) {title} "
+                f"| {fam} {self.key.src}->{self.key.dst}")
+        if self.code not in LORA_CODES:
+            head += f" unit={self.key.unit_id}"
+        line = f"{head} | {self.detail}"
+        m = self.meta
+        return f"{line} | {m}" if m else line
+
+
+@dataclass
+class LoraConfig:
+    """
+    Operator configuration for the LoRaWAN backhaul tier.
+
+    ports     : UDP ports carrying Semtech GWMP (default 1700)
+    servers   : declared network-server addresses, for an anycast or
+                load-balanced server; empty = derive from the gateway's own
+                PULL_DATA destination
+    gw_allow  : per-EUI declared source addresses, {eui: {addr, ...}}; an EUI
+                with a list treats any other source as MBW-102 at once
+    fcnt_low / fcnt_high : the MBW-105 reset thresholds
+    gw_window : MBW-102 conflict window, seconds
+
+    There is no server-learning window: the server is the destination of the
+    gateway's PULL_DATA, which needs no learning (state.GatewayServerMap).
+    """
+    ports: tuple = (L.DEFAULT_LORA_PORT,)
+    servers: frozenset = frozenset()
+    gw_allow: dict = field(default_factory=dict)
+    fcnt_low: int = LORA_FCNT_LOW
+    fcnt_high: int = LORA_FCNT_HIGH
+    gw_window: float = LORA_GW_WINDOW_S
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.ports)
 
 
 class Engine:
@@ -84,7 +150,7 @@ class Engine:
     """
 
     def __init__(self, baseline: Baseline | None = None, ot_subnets=None,
-                 security_hosts=None):
+                 security_hosts=None, lora: "LoraConfig | None" = None):
         self.baseline = baseline or Baseline()
         self.sweeps = SweepTracker()
         self.enums = EnumTracker()
@@ -99,13 +165,37 @@ class Engine:
         # (family, slave) already reported for MBW-042
         self._mbw042_reported: set[tuple[int, str]] = set()
 
-    def _emit(self, code: str, key: FlowKey, detail: str, now: float) -> None:
+        # --- LoRaWAN backhaul tier ---
+        # No baseline and no learning window: every rule here is per-packet or
+        # per-exchange inside a bounded window, and server identity comes from
+        # the gateway's own PULL_DATA destination rather than from anything a
+        # sender claims. LoRa traffic therefore never touches the Modbus
+        # baseline, which would otherwise leave later Modbus masters unlearned.
+        self.lora = lora or LoraConfig()
+        self.lora_servers = GatewayServerMap(declared=self.lora.servers)
+        self.gw_census = GatewayCensus(window_s=self.lora.gw_window,
+                                       gw_allow=self.lora.gw_allow)
+        self.devnonces = DevNonceTracker()
+        self.fcnts = FCntTracker(low=self.lora.fcnt_low, high=self.lora.fcnt_high)
+        # (family, gw_eui) already reported for MBW-100 / MBW-101 / MBW-106
+        self._lora_census_reported: set[tuple[int, str]] = set()
+        self._lora_cleartext_reported: set[tuple[int, str]] = set()
+        self._lora_location_reported: set[tuple[int, str]] = set()
+        # fingerprints: (family, gw_eui) -> GatewayFingerprint
+        self.gw_fingerprints: dict[tuple[int, str], FP.GatewayFingerprint] = {}
+        self._lora_dport: int | None = None
+        self._pending_coords = None
+        # (family, dev_addr) -> DeviceProfile
+        self.device_profiles: dict[tuple[int, str], FP.DeviceProfile] = {}
+
+    def _emit(self, code: str, key: FlowKey, detail: str, now: float,
+              fp=None) -> None:
         if code in ONCE_PER_FLOW:
             tag = (code, key)
             if tag in self._flow_reported:
                 return
             self._flow_reported.add(tag)
-        self.findings.append(Finding(code, key, detail, now))
+        self.findings.append(Finding(code, key, detail, now, fp=fp))
 
     def note_security_host(self, family: int, host: str) -> None:
         """
@@ -189,6 +279,172 @@ class Engine:
                 self._mbw042_reported.add(slave)
                 self._emit("MBW-042", key,
                            "slave reached on 502, never seen on 802", now)
+
+    # ------------------------------------------------------------------
+    # LoRaWAN gateway backhaul (MBW-100..105)
+    # ------------------------------------------------------------------
+    def feed_lora(self, key: FlowKey, pkt: "L.Gwmp", now: float | None = None,
+                  dst_port: int | None = None) -> None:
+        """
+        Feed one well-formed GWMP packet. `key` is as observed on the wire
+        (src -> dst, unit_id unused); the sensor does not flip direction here
+        because for this tier the direction *is* the signal.
+        """
+        now = now if now is not None else time.time()
+        self._lora_dport = dst_port
+
+        fp = None
+        if pkt.gw_eui and pkt.from_gateway:
+            # The gateway's own address, and -- from a PULL_DATA -- the address
+            # it treats as its network server. Both are destinations or sources
+            # of gateway-originated packets, so neither can be claimed.
+            self.lora_servers.note_gateway_addr(key.family, key.src, pkt.gw_eui)
+            if pkt.identifier == L.PULL_DATA:
+                self.lora_servers.note_pull_data(key.family, pkt.gw_eui, key.dst)
+
+            fp = self._fingerprint(key, pkt, now)
+
+            # --- MBW-100 / MBW-102: census and source-address conflict ---
+            is_new, conflict = self.gw_census.record(key.family, pkt.gw_eui,
+                                                     key.src, now)
+            if is_new:
+                self._emit("MBW-100", key,
+                           f"gateway EUI {pkt.gw_eui} via {pkt.name} "
+                           f"(GWMP v{pkt.version}) on UDP backhaul", now, fp=fp)
+            self._emit_location(key, pkt, fp, now)
+            if conflict:
+                spans = self.gw_census.source_spans(key.family, pkt.gw_eui)
+                self._emit("MBW-102", key,
+                           f"gateway EUI {pkt.gw_eui}: {conflict} | {spans}", now)
+
+        # --- MBW-103: downlink from an address that is not this gateway's server ---
+        # PULL_RESP carries no EUI, so the gateway it is aimed at is identified
+        # by the datagram's destination address.
+        if pkt.identifier == L.PULL_RESP:
+            for eui in sorted(self.lora_servers.euis_at(key.family, key.dst)):
+                if not self.lora_servers.armed(key.family, eui):
+                    continue        # no PULL_DATA seen yet: map unknown, stay silent
+                if self.lora_servers.is_expected(key.family, eui, key.src):
+                    continue
+                expected = ", ".join(sorted(
+                    self.lora_servers.expected_for(key.family, eui))) or "none"
+                tx = self._txpk_summary(pkt)
+                self._emit("MBW-103", key,
+                           f"PULL_RESP token=0x{pkt.token:04x} to gateway {eui} "
+                           f"at {key.dst} from {key.src}; expected server "
+                           f"{expected}{tx}", now)
+
+        # --- MBW-101: PHYPayloads actually recovered from the cleartext link ---
+        if pkt.gw_eui and pkt.from_gateway and pkt.phy:
+            slot = (key.family, pkt.gw_eui)
+            if slot not in self._lora_cleartext_reported:
+                self._lora_cleartext_reported.add(slot)
+                kinds = sorted({p.mtype_name for p in pkt.phy})
+                self._emit("MBW-101", key,
+                           f"{len(pkt.phy)} PHYPayload(s) readable off the backhaul "
+                           f"({', '.join(kinds)}); GWMP has no authentication or "
+                           f"encryption", now)
+
+        # --- per-frame LoRaWAN checks ---
+        for phy in pkt.phy:
+            # fingerprint enrichment runs before the abuse checks so the census
+            # metadata is current even on the packet that trips a finding
+            if fp is not None:
+                self._fingerprint_phy(fp, key, phy, now)
+
+            # MBW-104: DevNonce reuse in a JoinRequest
+            if phy.mtype == L.MT_JOIN_REQUEST and phy.dev_eui is not None:
+                repeats = self.devnonces.record(key.family, phy.dev_eui,
+                                                phy.dev_nonce)
+                if repeats:
+                    self._emit("MBW-104", key,
+                               f"DevEUI {phy.dev_eui} re-used DevNonce "
+                               f"0x{phy.dev_nonce:04x} (seen {repeats}x) "
+                               f"- join replay or a non-compliant device", now)
+
+            # MBW-105: uplink frame-counter reset (uplinks only; downlinks carry
+            # an independent counter under the same DevAddr)
+            if phy.uplink and phy.mtype in L.DATA_UP and phy.dev_addr is not None:
+                prev = self.fcnts.record(key.family, phy.dev_addr, phy.fcnt)
+                if prev is not None:
+                    self._emit("MBW-105", key,
+                               f"DevAddr {phy.dev_addr} FCnt {prev} -> {phy.fcnt} "
+                               f"(high-water {prev} > {self.lora.fcnt_high}, "
+                               f"now <= {self.lora.fcnt_low})", now)
+
+    @staticmethod
+    def _txpk_summary(pkt) -> str:
+        """txpk frequency and size, for the MBW-103 metadata."""
+        tx = (pkt.obj or {}).get("txpk")
+        if not isinstance(tx, dict):
+            return ""
+        freq, size = tx.get("freq"), tx.get("size")
+        bits = []
+        if freq is not None:
+            bits.append(f"freq={freq}")
+        if size is not None:
+            bits.append(f"size={size}")
+        return (" | txpk " + " ".join(bits)) if bits else ""
+
+    # --- fingerprinting (MBW-100 enrichment, MBW-106) ---
+    def _fingerprint(self, key: FlowKey, pkt, now: float):
+        """Get or create this gateway's fingerprint and fold in the packet."""
+        slot = (key.family, pkt.gw_eui)
+        fp = self.gw_fingerprints.get(slot)
+        if fp is None:
+            oui, vendor = FP.eui_vendor(pkt.gw_eui)
+            fp = FP.GatewayFingerprint(family=key.family, gw_eui=pkt.gw_eui,
+                                       first_seen=now)
+            self.gw_fingerprints[slot] = fp
+            fp.note_gateway(oui, vendor, pkt.version, key.src, key.dst,
+                            self._lora_dport)
+        else:
+            fp.note_gateway(fp.gw_oui, fp.gw_vendor, fp.proto_version, key.src,
+                            key.dst, self._lora_dport or fp.server_port)
+        fp.last_seen = now
+
+        # Coordinates are folded in here but reported by the caller, so the
+        # census line (MBW-100) precedes the location finding in the log.
+        stat = (pkt.obj or {}).get("stat")
+        self._pending_coords = fp.note_stat(stat) if isinstance(stat, dict) else None
+        return fp
+
+    def _emit_location(self, key: FlowKey, pkt, fp, now: float) -> None:
+        """MBW-106: gateway coordinates carried in the cleartext stat block."""
+        coords = self._pending_coords
+        self._pending_coords = None
+        if coords is None:
+            return
+        slot = (key.family, pkt.gw_eui)
+        if slot in self._lora_location_reported:
+            return
+        self._lora_location_reported.add(slot)
+        lat, lon, alt = coords
+        alt_s = f" alt={alt}m" if alt is not None else ""
+        self._emit("MBW-106", key,
+                   f"gateway {pkt.gw_eui} reports lat={lat} lon={lon}{alt_s} "
+                   f"in cleartext stat (rounded to {FP.COORD_DECIMALS} dp)",
+                   now, fp=fp)
+
+    def _fingerprint_phy(self, fp, key: FlowKey, phy, now: float) -> None:
+        """Fold one PHYPayload into the gateway fingerprint and device profile."""
+        if phy.mtype == L.MT_JOIN_REQUEST and phy.dev_eui:
+            fp.note_join(phy.dev_eui, phy.join_eui)
+            return
+        if phy.uplink and phy.mtype in L.DATA_UP and phy.dev_addr:
+            fp.note_uplink(phy.dev_addr)
+            slot = (key.family, phy.dev_addr)
+            prof = self.device_profiles.get(slot)
+            if prof is None:
+                if len(self.device_profiles) >= FP.MAX_DEVADDRS_PER_GW:
+                    return
+                prof = FP.DeviceProfile()
+                self.device_profiles[slot] = prof
+            prof.observe(phy, now)
+
+    def device_profile(self, family: int, dev_addr: str):
+        """The behavioural profile for one device, or None."""
+        return self.device_profiles.get((family, dev_addr))
 
     def _in_declared_ot(self, key: FlowKey) -> bool:
         import ipaddress

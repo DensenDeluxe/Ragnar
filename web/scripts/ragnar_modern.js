@@ -1550,6 +1550,7 @@ function showNetworkSubtab(name, layer) {
         _snmpFillIfaces();
         _fillIfaceSel('modbus-iface');
         _modbusLoadBaseline();
+        _fillIfaceSel('lorawan-iface');
         _fillIfaceSel('lldpw-iface');
         _fillIfaceSel('oam-iface');
         _fillIfaceSel('cfm-iface');
@@ -10578,6 +10579,70 @@ async function runModbusWatch() {
     }
 }
 
+// ---- LoRaWAN gateway backhaul (Semtech GWMP over udp/1700; part of Modbus & LoRaWAN Watch) ----
+// A separate scan from Modbus: no learning window, no baseline, no arming timer.
+const _LORAWAN_VERDICT_STYLE = {
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ No LoRaWAN gateway backhaul seen on udp/1700'],
+    backhaul:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Cleartext LoRaWAN backhaul present — gateway census + fingerprint, recoverable PHYPayloads, or a gateway location leaking in the clear'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — a JoinRequest DevNonce replay (join replay or a non-compliant device)'],
+    'lora-abuse': ['bg-red-950/60 border-red-800 text-red-300', '🛑 LoRaWAN ABUSE — gateway impersonation (one EUI, two source addresses), a downlink injected from a non-server address, or an uplink frame-counter reset'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+async function runLorawanWatch() {
+    const out = document.getElementById('lorawan-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('lorawan-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('lorawan-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing LoRaWAN backhaul (Semtech GWMP, udp/1700)…</p>';
+    try {
+        _fillIfaceSel('lorawan-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/lorawan-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runLorawanWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _LORAWAN_VERDICT_STYLE[d.verdict] || _LORAWAN_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · gateways: ${(d.gateways || []).length} · DevAddrs: ${d.devaddrs || 0} · DevEUIs: ${d.deveuis || 0}</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Src → Dst</th><th class="px-2 py-1">#</th><th class="px-2 py-1">Fingerprint</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _MODBUS_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:14rem">${escapeHtml(f.name || '')}<span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.af)} ${escapeHtml(f.src)} → ${escapeHtml(f.dst)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                    <td class="px-2 py-1 font-mono text-gray-500 whitespace-normal" style="min-width:16rem">${escapeHtml(f.meta || '')}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- BLE Watch (Bluetooth Low Energy attack monitor, external sniffer) -----
 const _BLE_VERDICT_STYLE = {
     clean:               ['bg-green-950/40 border-green-900 text-green-400', '✓ No clone, spoof, flood or connection abuse seen'],
@@ -12288,7 +12353,7 @@ async function runRoutingSelftest() {
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
                         bfd: 'BFD Watch (failover manipulation)', ptp: 'PTP Watch (IEEE-1588 grandmaster takeover)', srmpls: 'SR-MPLS Watch (MPLS segment injection)', ipsec: 'IPsec/IKE Watch (D(HE)at / weak-DH / SWEET32)',
                         dns_passive: 'DNS Watch (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS / SAD DNS)',
-                        modbus: 'Modbus Watch (PLC write / listen-only / UMAS / libmodbus framing)',
+                        modbus: 'Modbus + LoRaWAN Watch (PLC write / listen-only / UMAS / libmodbus framing; LoRaWAN GWMP census / impersonation / replay)',
                         cisco_guard: 'Cisco Guard (IOS/IOS-XE/NX-OS CVEs)', juniper_guard: 'Juniper Guard (J-Web/SSR/Space CVEs)', arista_guard: 'Arista Guard (EOS CVEs)', comware_guard: 'Comware Guard (VRF-hop / MPLS CVEs)',
                         mikrotik_guard: 'MikroTik Guard (RouterOS CVEs)', aruba_guard: 'Aruba Guard (ArubaOS PAPI CVEs)', apc_guard: 'APC Guard (NMC Ripple20)', liebert_guard: 'Liebert Guard (RomPager / RDU101)', dell_guard: 'Dell Guard (OS10 SmartFabric CVE)',
                         bgp_speaker: 'BGP Speaker (codec/FSM/RIB)', path_asymmetry: 'Path Asymmetry (OWD)' };
