@@ -78,6 +78,61 @@ jobs:
     # Two ~75–90 min builds run back-to-back on the single Pi runner, plus queue.
     timeout-minutes: 350
     steps:
+      - name: Compute versions
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Highest X.Y.Z among THIS repo's releases for an exact tag prefix.
+          latest() { # $1 = prefix, e.g. 'os-v' or 'os-ulfberht-v'
+            gh api "repos/$REPO/releases" --paginate --jq '.[].tag_name' 2>/dev/null \
+              | grep -E "^$1[0-9]+\.[0-9]+\.[0-9]+$" \
+              | sed "s/^$1//" | sort -V | tail -1
+          }
+          bump() { # $1 = X.Y.Z  $2 = level
+            local X Y Z; IFS=. read -r X Y Z <<<"$1"
+            case "$2" in
+              major) X=$((X+1)); Y=0; Z=0;;
+              minor) Y=$((Y+1)); Z=0;;
+              patch) Z=$((Z+1));;
+            esac
+            echo "$X.$Y.$Z"
+          }
+          norm() { echo "$1" | sed -E 's/^os-ulfberht-v//; s/^os-v//; s/^v//'; }
+
+          WHICH='${{ inputs.which }}'; LEVEL='${{ inputs.bump }}'
+          STD_TAG=''; ULF_TAG=''
+
+          if [ "$WHICH" = both ] || [ "$WHICH" = standard ]; then
+            IN='${{ inputs.std_version }}'
+            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-v')" "$LEVEL")"; fi
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed standard version '$V' is not X.Y.Z"; exit 1; }
+            STD_TAG="os-v$V"
+          fi
+          if [ "$WHICH" = both ] || [ "$WHICH" = ulfberht ]; then
+            IN='${{ inputs.ulf_version }}'
+            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-ulfberht-v')" "$LEVEL")"; fi
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed ulfberht version '$V' is not X.Y.Z"; exit 1; }
+            ULF_TAG="os-ulfberht-v$V"
+          fi
+
+          echo "std_tag=$STD_TAG" >> "$GITHUB_OUTPUT"
+          echo "ulf_tag=$ULF_TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release plan"
+            echo ""
+            echo "| Edition | New tag |"
+            echo "|---|---|"
+            [ -n "$STD_TAG" ] && echo "| Standard | \`$STD_TAG\` |"
+            [ -n "$ULF_TAG" ] && echo "| Ulfberht | \`$ULF_TAG\` |"
+            echo ""
+            [ "${{ inputs.dry_run }}" = "true" ] && echo "_Dry run — no tags created._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Planned: STANDARD='$STD_TAG'  ULFBERHT='$ULF_TAG'"
+
       - name: Validate cross-repo token (RAGNAROS_DISPATCH_TOKEN)
         # Runs on every run, dry_run included, so a dry run is a real health check
         # of the PAT before you commit to a ~3-hour release: is it present, not
@@ -163,13 +218,14 @@ jobs:
           [ -n "$scopes" ] && kind="classic PAT (scopes: $scopes)" || kind="fine-grained PAT"
 
           {
+            echo "---"
             echo "### Token validation — RAGNAROS_DISPATCH_TOKEN"
             echo ""
             echo "| Check | Result |"
             echo "|---|---|"
             echo "| Token owner | \`$login\` |"
             echo "| Kind | $kind |"
-            echo "| Reaches \`$PRIV\` | yes |"
+            echo "| Reaches Build | yes |"
             echo "| Contents: write (create tags) | $([ "$push" = true ] || [ "$admin" = true ] && echo yes || echo '**NO**') |"
             echo "| Actions: read (follow builds) | $([ "$actions_note" = yes ] && echo yes || echo '**NO**') |"
             echo "| Expiry | $exp_note |"
@@ -183,61 +239,6 @@ jobs:
             exit 1
           fi
           echo "Token OK — present, unexpired, and holds Contents:write + Actions:read on $PRIV."
-
-      - name: Compute versions
-        id: ver
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          # Highest X.Y.Z among THIS repo's releases for an exact tag prefix.
-          latest() { # $1 = prefix, e.g. 'os-v' or 'os-ulfberht-v'
-            gh api "repos/$REPO/releases" --paginate --jq '.[].tag_name' 2>/dev/null \
-              | grep -E "^$1[0-9]+\.[0-9]+\.[0-9]+$" \
-              | sed "s/^$1//" | sort -V | tail -1
-          }
-          bump() { # $1 = X.Y.Z  $2 = level
-            local X Y Z; IFS=. read -r X Y Z <<<"$1"
-            case "$2" in
-              major) X=$((X+1)); Y=0; Z=0;;
-              minor) Y=$((Y+1)); Z=0;;
-              patch) Z=$((Z+1));;
-            esac
-            echo "$X.$Y.$Z"
-          }
-          norm() { echo "$1" | sed -E 's/^os-ulfberht-v//; s/^os-v//; s/^v//'; }
-
-          WHICH='${{ inputs.which }}'; LEVEL='${{ inputs.bump }}'
-          STD_TAG=''; ULF_TAG=''
-
-          if [ "$WHICH" = both ] || [ "$WHICH" = standard ]; then
-            IN='${{ inputs.std_version }}'
-            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-v')" "$LEVEL")"; fi
-            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed standard version '$V' is not X.Y.Z"; exit 1; }
-            STD_TAG="os-v$V"
-          fi
-          if [ "$WHICH" = both ] || [ "$WHICH" = ulfberht ]; then
-            IN='${{ inputs.ulf_version }}'
-            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-ulfberht-v')" "$LEVEL")"; fi
-            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed ulfberht version '$V' is not X.Y.Z"; exit 1; }
-            ULF_TAG="os-ulfberht-v$V"
-          fi
-
-          echo "std_tag=$STD_TAG" >> "$GITHUB_OUTPUT"
-          echo "ulf_tag=$ULF_TAG" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Release plan"
-            echo ""
-            echo "| Edition | New tag |"
-            echo "|---|---|"
-            [ -n "$STD_TAG" ] && echo "| Standard | \`$STD_TAG\` |"
-            [ -n "$ULF_TAG" ] && echo "| Ulfberht | \`$ULF_TAG\` |"
-            echo ""
-            [ "${{ inputs.dry_run }}" = "true" ] && echo "_Dry run — no tags created._"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "Planned: STANDARD='$STD_TAG'  ULFBERHT='$ULF_TAG'"
 
       - name: Create release tags in RagnarOS
         if: ${{ inputs.dry_run == false }}
