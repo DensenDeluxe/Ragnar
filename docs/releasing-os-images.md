@@ -20,10 +20,16 @@ tab without needing direct access to the private build repo.
    | `bump` | `minor` | How to bump each edition's version: `minor` (1.7.0 → 1.8.0), `patch` (→ 1.7.1) or `major` (→ 2.0.0). Ignored for an edition where you type an explicit version. |
    | `std_version` | *(blank)* | Explicit standard version, e.g. `1.8.0`. Blank = auto-bump from the latest `os-v*` release. |
    | `ulf_version` | *(blank)* | Explicit Ulfberht version, e.g. `1.5.0`. Blank = auto-bump from the latest `os-ulfberht-v*` release. |
-   | `dry_run` | `false` | Only print the versions it *would* release, create no tags. Handy to double-check the numbers. |
+   | `dry_run` | `false` | Only print the versions it *would* release, create no tags. Handy to double-check the numbers **and to confirm the cross-repo token is healthy** before committing to a ~3-hour release. |
 
 3. Click **Run workflow** and watch it. The run page (and its summary) shows the
    planned tags, links to each build on the private runner, and the final result.
+
+> **Tip:** run it once with `dry_run` ticked first. The very first step validates
+> `RAGNAROS_DISPATCH_TOKEN` and prints a table showing the token owner, that it can
+> reach RagnarOS, that it holds **Contents: write** + **Actions: read**, and **when
+> it expires** — so you catch an expired or under-scoped token in seconds instead of
+> part-way through a real release.
 
 ## What happens under the hood
 
@@ -32,6 +38,7 @@ Actions tab (this repo)
    │  workflow_dispatch
    ▼
 Release OS images
+   │  0. validate RAGNAROS_DISPATCH_TOKEN (present, unexpired, Contents:write + Actions:read)
    │  1. compute next versions (or use your overrides)
    │  2. create tags  os-v<X.Y.Z>  and  os-ulfberht-v<X.Y.Z>  in PierreGode/RagnarOS
    ▼
@@ -63,6 +70,12 @@ needs a Personal Access Token stored as a repo secret named
 
 Add it under **Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret**.
 Until it exists, the pipeline stops on its first step with a clear error.
+
+The pipeline's first step **validates this token on every run** (dry runs included)
+and fails fast with a specific message if it is missing, **expired**, cannot reach
+RagnarOS, or is missing **Contents: write** or **Actions: read** — so a stale or
+under-scoped PAT is caught up front rather than mid-release. A near-expiry token
+(≤ 7 days left) passes with a warning so you have time to rotate it.
 
 ## Prerequisites for a build to actually run
 

@@ -4,6 +4,14 @@
 
 ### 2026-10-25
 
+#### [#1017](https://github.com/PierreGode/Ragnar/pull/1017) — ci: validate the cross-repo release token (expiry + permissions)
+*branch `ci/release-token-validate`*
+
+- The **Release OS images** pipeline's first step is now a real **token health check** of `RAGNAROS_DISPATCH_TOKEN` instead of a bare reachability probe. It runs on **every run, dry runs included**, so ticking `dry_run` is now a fast way to confirm the PAT is good *before* committing to a ~3-hour release.
+- It verifies, with clear fail-fast errors and a summary table (owner, kind, reachability, each permission, expiry): the token is **present**, is **not expired** (reads the `github-authentication-token-expiration` header — expired is fatal, ≤ 7 days left warns), can **reach** `PierreGode/RagnarOS`, holds **Contents: write** (needed to create the release tags — checked via the repo's computed `permissions.push`/`admin`), and holds **Actions: read** (needed to follow the builds — checked by listing the private repo's workflows). Classic-PAT scopes are surfaced too.
+- No change to what the pipeline *does* on a real release — only earlier, clearer failure when the token is stale or under-scoped.
+- **Docs:** [Releasing OS images](releasing-os-images.md) updated (dry-run tip + setup note).
+
 #### [#1016](https://github.com/PierreGode/Ragnar/pull/1016) — ci: one-click release pipeline for both OS images
 *branch `ci/release-os-images`*
 
