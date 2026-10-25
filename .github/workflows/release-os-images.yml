@@ -164,10 +164,9 @@ jobs:
             exit 1
           fi
 
-          # Split the raw HTTP response into headers (before the first blank line)
-          # and JSON body (after it).
+          # Keep just the response headers (before the first blank line) — the
+          # token's expiry and any classic-PAT scopes live there.
           awk 'BEGIN{h=1} /^\r?$/{h=0;next} h{print}' "$resp" > "$RUNNER_TEMP/priv.hdr"
-          awk 'f; /^\r?$/{f=1}'                       "$resp" > "$RUNNER_TEMP/priv.body"
           # A missing header (e.g. x-oauth-scopes on a fine-grained PAT) is normal —
           # grep returns empty, never an error.
           hdr() { grep -i "^$1:" "$RUNNER_TEMP/priv.hdr" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//; s/ *$//' || true; }
@@ -175,8 +174,6 @@ jobs:
           login="$(GH_TOKEN="$PRIV_TOKEN" gh api user --jq .login 2>/dev/null || echo '?')"
           exp="$(hdr github-authentication-token-expiration)"
           scopes="$(hdr x-oauth-scopes)"
-          push="$(jq -r '.permissions.push    // false' "$RUNNER_TEMP/priv.body" 2>/dev/null || echo false)"
-          admin="$(jq -r '.permissions.admin  // false' "$RUNNER_TEMP/priv.body" 2>/dev/null || echo false)"
 
           # 2) Expiry — expired is fatal, close-to-expiry is a warning.
           exp_note="no expiry reported (non-expiring token, or a fine-grained PAT that does not expose one)"
@@ -198,10 +195,23 @@ jobs:
             fi
           fi
 
-          # 3) Contents: write — the pipeline creates tags in RagnarOS. The repo's
-          #    computed permission set tells us whether this token can push.
-          if [ "$push" != true ] && [ "$admin" != true ]; then
-            echo "::error title=No write permission::The token can READ $PRIV but has no write access (needs Contents: write / the classic 'repo' scope). Tag creation would fail — fix the PAT's permissions."
+          # 3) Contents: write — the pipeline creates tags in RagnarOS. NOTE: the
+          #    "permissions" object from GET /repos reflects the ACCOUNT's role on
+          #    the repo, NOT what a fine-grained PAT was granted, so it falsely
+          #    reports write for a repo owner whose token is read-only. The only
+          #    reliable test is to attempt a write: creating a git *blob* needs
+          #    Contents: write but produces only a dangling object — no ref, tag,
+          #    commit, event or notification, and git GCs it — so it safely
+          #    reproduces the exact 403 tag creation would otherwise hit mid-release.
+          wperr="$RUNNER_TEMP/wprobe.err"
+          if GH_TOKEN="$PRIV_TOKEN" gh api -X POST "repos/$PRIV/git/blobs" \
+               -f content="ragnar release-token write probe" -f encoding=utf-8 \
+               >/dev/null 2>"$wperr"; then
+            write_ok=1
+          else
+            write_ok=0
+            echo "::error title=No write permission::The token cannot WRITE to $PRIV (needs Contents: write — Read-only is not enough). This is the same 403 that tag creation fails on. Fix: edit the fine-grained PAT ▸ Repository permissions ▸ Contents ▸ Read and write (or use a classic PAT with the 'repo' scope)."
+            sed 's/^/  /' "$wperr" 2>/dev/null || true
             fail=1
           fi
 
@@ -226,14 +236,14 @@ jobs:
             echo "| Token owner | \`$login\` |"
             echo "| Kind | $kind |"
             echo "| Reaches Build | yes |"
-            echo "| Contents: write (create tags) | $([ "$push" = true ] || [ "$admin" = true ] && echo yes || echo '**NO**') |"
+            echo "| Contents: write (create tags) | $([ "$write_ok" = 1 ] && echo yes || echo '**NO**') |"
             echo "| Actions: read (follow builds) | $([ "$actions_note" = yes ] && echo yes || echo '**NO**') |"
             echo "| Expiry | $exp_note |"
             echo ""
             [ "$fail" = 0 ] && echo "_Token is valid for a release._" || echo "_Token is NOT usable — see the errors above._"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "Token owner=$login kind='$kind' push=$push admin=$admin actions=$actions_note expiry='$exp_note'"
+          echo "Token owner=$login kind='$kind' write=$write_ok actions=$actions_note expiry='$exp_note'"
           if [ "$fail" != 0 ]; then
             echo "::error title=Token invalid::RAGNAROS_DISPATCH_TOKEN failed validation — fix it before releasing (details above)."
             exit 1
@@ -257,7 +267,15 @@ jobs:
               echo "::error title=Tag exists::$TAG already exists in $PRIV — that version was already released. Pick a higher version."
               exit 1
             fi
-            gh api -X POST "repos/$PRIV/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
+            if ! gh api -X POST "repos/$PRIV/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null 2>"$RUNNER_TEMP/mktag.err"; then
+              sed 's/^/  /' "$RUNNER_TEMP/mktag.err" 2>/dev/null || true
+              if grep -qi 'not accessible by personal access token\|403' "$RUNNER_TEMP/mktag.err" 2>/dev/null; then
+                echo "::error title=No write permission::Could not create tag $TAG in $PRIV — the RAGNAROS_DISPATCH_TOKEN lacks Contents: write. Edit the fine-grained PAT ▸ Repository permissions ▸ Contents ▸ Read and write (or use a classic PAT with the 'repo' scope), then re-run."
+              else
+                echo "::error title=Tag creation failed::Could not create tag $TAG in $PRIV (see above)."
+              fi
+              exit 1
+            fi
             echo "Created tag $TAG -> $SHA"
           }
           mktag "$STD_TAG"

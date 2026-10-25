@@ -79,6 +79,13 @@ or is missing **Contents: write** or **Actions: read** — so a stale or under-s
 PAT is caught up front rather than mid-release. A near-expiry token (≤ 7 days left)
 passes with a warning so you have time to rotate it.
 
+> The **Contents: write** check genuinely attempts a write — it creates a git
+> *blob* in the build repo, which needs write access but leaves only a dangling
+> object (no tag, commit, ref, event or notification, and git garbage-collects it).
+> A repo's reported `permissions` reflect your *account* role, not what a
+> fine-grained PAT was actually granted, so a real write is the only way to tell a
+> read-only token from a read/write one.
+
 ## Prerequisites for a build to actually run
 
 - The self-hosted **`ragnar-os-builder`** runner (the Pi) must be powered on with
