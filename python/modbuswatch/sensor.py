@@ -17,7 +17,7 @@ from __future__ import annotations
 import socket
 import time
 
-from scapy.all import TCP, IP, IPv6, rdpcap
+from scapy.all import TCP, UDP, IP, IPv6, rdpcap
 from scapy.layers.inet6 import (
     IPv6ExtHdrHopByHop, IPv6ExtHdrDestOpt, IPv6ExtHdrRouting,
     IPv6ExtHdrFragment,
@@ -27,10 +27,12 @@ try:  # Ragnar: relative inside the vendored package, bare for flat standalone.
     from .parser import parse, MODBUS_TCP_PORT, MODBUS_SECURITY_PORT
     from .state import FlowKey
     from .findings import Engine
+    from .lora import parse_gwmp
 except ImportError:
     from parser import parse, MODBUS_TCP_PORT, MODBUS_SECURITY_PORT
     from state import FlowKey
     from findings import Engine
+    from lora import parse_gwmp
 
 _V6_EXT = (IPv6ExtHdrHopByHop, IPv6ExtHdrDestOpt, IPv6ExtHdrRouting,
            IPv6ExtHdrFragment)
@@ -45,20 +47,28 @@ def _l3(pkt):
     return None
 
 
-def _tcp_from_v6(pkt):
+def _l4_from_v6(pkt, cls):
     """
-    Walk the IPv6 extension-header chain to the TCP layer. scapy exposes TCP via
-    pkt[TCP] only if it parsed the chain; this guards the case where an
-    extension header sits between IPv6 and TCP so we never miss a Modbus segment
-    hidden behind one.
+    Walk the IPv6 extension-header chain to the requested L4 layer. scapy
+    exposes pkt[TCP] / pkt[UDP] only if it parsed the chain; this guards the
+    case where an extension header sits between IPv6 and L4, so we never miss a
+    Modbus segment or a LoRaWAN backhaul datagram hidden behind one.
     """
-    if TCP in pkt:
-        return pkt[TCP]
+    if cls in pkt:
+        return pkt[cls]
     layer = pkt[IPv6]
     while isinstance(layer.payload, _V6_EXT):
         layer = layer.payload
     nxt = layer.payload
-    return nxt if isinstance(nxt, TCP) else None
+    return nxt if isinstance(nxt, cls) else None
+
+
+def _tcp_from_v6(pkt):
+    return _l4_from_v6(pkt, TCP)
+
+
+def _udp_from_v6(pkt):
+    return _l4_from_v6(pkt, UDP)
 
 
 def process_packet(pkt, engine: Engine) -> None:
@@ -69,9 +79,37 @@ def process_packet(pkt, engine: Engine) -> None:
 
     tcp = pkt[TCP] if (family == socket.AF_INET and TCP in pkt) else (
         _tcp_from_v6(pkt) if family == socket.AF_INET6 else None)
-    if tcp is None:
-        return
+    if tcp is not None:
+        return _process_tcp(pkt, engine, family, src, dst, tcp)
 
+    udp = pkt[UDP] if (family == socket.AF_INET and UDP in pkt) else (
+        _udp_from_v6(pkt) if family == socket.AF_INET6 else None)
+    if udp is not None:
+        return _process_udp(pkt, engine, family, src, dst, udp)
+
+
+def _process_udp(pkt, engine: Engine, family, src, dst, udp) -> None:
+    """LoRaWAN gateway backhaul: Semtech GWMP over UDP (default 1700)."""
+    ports = getattr(engine, "lora", None)
+    ports = ports.ports if ports is not None else ()
+    if not ports:
+        return
+    sport, dport = int(udp.sport), int(udp.dport)
+    if sport not in ports and dport not in ports:
+        return
+    payload = bytes(udp.payload)
+    if not payload:
+        return
+    gwmp = parse_gwmp(payload)
+    if gwmp is None:
+        return      # strict: not well-formed GWMP, nothing is reported
+    ts = float(pkt.time) if hasattr(pkt, "time") else time.time()
+    # Direction is the signal on this tier, so the key is left as observed.
+    engine.feed_lora(FlowKey(family, src, dst, 0), gwmp, now=ts,
+                     dst_port=(dport if dport in ports else sport))
+
+
+def _process_tcp(pkt, engine: Engine, family, src, dst, tcp) -> None:
     sport, dport = int(tcp.sport), int(tcp.dport)
     if MODBUS_TCP_PORT not in (sport, dport) and MODBUS_SECURITY_PORT not in (sport, dport):
         return

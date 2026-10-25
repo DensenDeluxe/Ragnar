@@ -51,7 +51,7 @@ matrix to zoom (`/web/images/osi/`).
 | [NTP Watch](#ntp-watch) | Diagnostics · L7 | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
 | [SNMP Watch](#snmp-watch) | Diagnostics · L7 | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
 | [RADIUS Watch](#radius-watch) | Diagnostics · L7 | `GET /api/net/radius-watch` |
-| [Modbus Watch](#modbus-watch) | Diagnostics · L7 | `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline` |
+| [Modbus & LoRaWAN Watch](#modbus--lorawan-watch) | Diagnostics · L7 | `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline`, `GET /api/net/lorawan-watch` |
 | [SMB Watch](#smb-watch) | Diagnostics · L7 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
 | [LDAP Watch](#ldap-watch) | Diagnostics · L7 | `GET /api/net/ldap-watch` |
 | [RPC / NetLogon Watch](#rpc--netlogon-watch) | Diagnostics · L7 | `GET /api/net/rpc-watch` |
@@ -152,7 +152,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **RIP** (RIP/RIPng injection/hijack/malformation), **PIM / MSDP** (multicast RP-hijack / Register & SA injection / DR hijack / flood), **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus & LoRaWAN Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing; LoRaWAN GWMP backhaul census / impersonation / downlink injection / replay), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **RIP** (RIP/RIPng injection/hijack/malformation), **PIM / MSDP** (multicast RP-hijack / Register & SA injection / DR hijack / flood), **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1246,8 +1246,9 @@ is retired in a follow-up; Arista Guard keeps its EOS-specific CVEs.)*
 
 - Endpoint: `GET /api/net/radius-watch` `{interface, seconds}` · binary: `tcpdump`
 
-### Modbus Watch
-A **passive** Modbus/TCP posture monitor for OT / PLC segments. It is **detection-only** and
+### Modbus & LoRaWAN Watch
+A **passive** Modbus/TCP posture monitor for OT / PLC segments, plus a **LoRaWAN gateway-backhaul
+tier** (its own scan, below). It is **detection-only** and
 never sends a Modbus request. Modbus/TCP (`tcp/502`) has no authentication and no
 encryption, so any host that can reach a PLC can write its coils and registers. Most of
 what matters is therefore posture: **who is talking to the PLCs and what are they telling
@@ -1260,7 +1261,8 @@ master alert. The baseline is kept in `data/modbus_watch.json`, so the window sp
 manual scans and the background rotation. **Arm now** ends learning early and keeps what
 was learned. **Re-learn** forgets the baseline after a legitimate SCADA/HMI change.
 
-Eleven finding codes (`MBW-nnn`):
+Nineteen finding codes (`MBW-nnn`) — the twelve Modbus codes below, plus seven LoRaWAN backhaul
+codes (`MBW-100..106`) under the **LoRaWAN gateway backhaul** tier further down:
 
 | Code | Finding | Severity |
 |------|---------|----------|
@@ -1309,15 +1311,60 @@ IPv6 leg runs over `::1`, so the "attacker" and the learned master share one add
 `MBW-001` cannot fire. The Detector Self-Test covers that case instead by replaying IPv4,
 IPv6 and IPv6-with-extension-header pcaps with distinct master and attacker addresses.
 
-- Endpoint: `GET /api/net/modbus-watch` `{interface, seconds, ot}` (`ot` = comma-separated
+#### LoRaWAN gateway backhaul (v3)
+
+A **second, separate scan** (`do_lorawan_watch`, its own button with **no arming timer**) reads the
+**Semtech GWMP packet-forwarder** backhaul between a LoRa gateway and its network server
+(`udp/1700`). GWMP has no authentication and no encryption, so an 8-byte gateway EUI is the only
+identity and every uplink / downlink PHYPayload crosses in the clear. This is the **wire side only**
+— the radio link belongs to the SDR suite, and LoRa Basics Station (TLS) and MQTT-forwarder
+backhauls are opaque to a passive tap. It **maps to no CVE** (protocol / spec-level properties, not
+implementation bugs) and has **no learning window and no baseline**: the server identity is the
+destination of the gateway's own `PULL_DATA`, so nothing an attacker sends can nominate itself, and
+LoRa traffic never touches the Modbus baseline (which would otherwise leave later Modbus masters
+unlearned). This is how Ragnar now decodes and IDs **LoRaWAN** on the wire / WiFi without a radio,
+alongside Matter / Thread / Z-Wave in [DNS Doctor](#dns-watch) (Zigbee still needs a radio).
+
+| Code | Finding | Severity |
+|------|---------|----------|
+| `MBW-100` | LoRaWAN gateway backhaul present (census; carries the fingerprint by reference) | info |
+| `MBW-101` | Backhaul cleartext — PHYPayloads recoverable off the link | medium |
+| `MBW-102` | One gateway EUI claimed from two source addresses (impersonation) | high |
+| `MBW-103` | `PULL_RESP` downlink from an address that is not this gateway's server (injection) | high |
+| `MBW-104` | JoinRequest **DevNonce** reuse (join replay or a non-compliant device) | medium |
+| `MBW-105` | Uplink **frame-counter reset** (high-water > 1024, next ≤ 16; a 16-bit wrap is not a reset) | high |
+| `MBW-106` | Gateway **location** in the cleartext `stat` block (rounded to ~100 m) | medium |
+
+**Fingerprinting (MBW-100 metadata, no device names).** LoRaWAN carries no user-set names, so this
+IDs by identifiers and behaviour, the same treatment Matter / Thread / Z-Wave get in DNS Doctor:
+the **gateway and DevEUI vendor** (first-three-byte OUI against the bundled IEEE registry snapshot
+`oui_snapshot.dat` — 35k entries, searched by `seek`, not loaded into RAM), the **JoinEUI**, the
+**DevAddr → NetID → operator** (bundled list: the two spec-reserved private NetIDs and TTN; anything
+else reported as its type/value, never guessed), the **regional band** (a frequency inside
+overlapping plans reports every candidate), and a per-DevAddr behavioural profile (datarate,
+channel / sub-band, RSSI/SNR range, uplink cadence once ≥ 8 are seen, FPort set and the ADR bit).
+The fingerprint is held **by reference**, so a finding rendered later shows the running counts.
+Application payloads stay encrypted under AppSKey.
+
+Verdicts (LoRaWAN scan): `clean` < `backhaul` (a cleartext gateway link is present — MBW-100/101, or
+the MBW-106 location leak) < `suspicious` (a DevNonce replay) < **`lora-abuse`** (impersonation,
+downlink injection or an FCnt reset). HIGH and MEDIUM LoRaWAN findings ride the same
+[Watchtower](watchtower.md) `modbus_watch` source. **Dual-stack**, including IPv6 behind extension
+headers; the capture filter is `udp port 1700 or (ip6 and not tcp/udp/icmp6)` so a GWMP datagram
+behind an extension header is not missed.
+
+- Endpoints: `GET /api/net/modbus-watch` `{interface, seconds, ot}` (`ot` = comma-separated
   CIDRs; when present, even empty, it replaces the saved list) ·
-  `GET/POST /api/net/modbus-baseline` `{action: arm|reset|config, ot: [...]}` · binary:
-  `tcpdump` · Python: `scapy`
+  `GET/POST /api/net/modbus-baseline` `{action: arm|reset|config, ot: [...]}` ·
+  `GET /api/net/lorawan-watch` `{interface, seconds}` (the LoRaWAN scan — no baseline, no arming) ·
+  binary: `tcpdump` · Python: `scapy`
 - CLI: `python3 network_diagnostics.py modbus-watch [--iface I] [--seconds N]
   [--ot-subnet CIDR ...] [--pcap FILE [--learn S]] [--json]` (`--pcap` replays a file
   against a fresh baseline and does not save it)
 - Vendored engine: `python/modbuswatch/` (Solarflere): `parser`, `state`, `findings`,
-  `sensor`, plus the standalone `modbuswatch.py` entrypoint
+  `sensor`, `lora` (hand-rolled Semtech GWMP + LoRaWAN PHYPayload decoder), `fingerprint`
+  (with the bundled `oui_snapshot.dat` IEEE OUI registry), plus the standalone `modbuswatch.py`
+  entrypoint
 
 ### Cert Watch
 Internal networks are full of TLS services — router/switch admin UIs, NAS boxes,
@@ -1738,7 +1785,7 @@ from the 5-tuple (shown as a badge in the session table). Ports outside the tabl
 carry no label rather than a guessed one. Both RadSec and Modbus/TCP Security
 mandate mutual TLS and TLS 1.2+, so a legacy version on those ports raises the
 existing `*_legacy_version` findings; cleartext Modbus posture stays
-[Modbus Watch](#modbus-watch)'s job (MBW-041/042) and is not duplicated here.
+[Modbus & LoRaWAN Watch](#modbus--lorawan-watch)'s job (MBW-041/042) and is not duplicated here.
 
 The verdict escalates to **compromised** on an `sni_cert_mismatch` or JA4 denylist
 hit, **suspicious** on any other high/warn finding (weak/RC4 cipher, SWEET32, an

@@ -27143,7 +27143,7 @@ def _smtp_selftest():
 
 
 # ==========================================================================
-# Modbus Watch — passive Modbus/TCP posture monitor (vendored python/modbuswatch/)
+# Modbus & LoRaWAN Watch — passive Modbus/TCP + LoRaWAN-backhaul monitor (python/modbuswatch/)
 # ==========================================================================
 # Adapts the vendored modbuswatch package: a passive reader of Modbus/TCP (tcp/502)
 # that answers the question that matters on an OT segment — who is talking to the
@@ -27160,6 +27160,22 @@ def _smtp_selftest():
 # cannot confirm the server runs libmodbus. Dual-stack, including the IPv6
 # extension-header walk to the TCP header. Modbus RTU/serial is out of scope (no
 # passive wire tap); 802 is TLS and only its presence is recorded.
+#
+# v3 adds a LoRaWAN gateway-backhaul tier (do_lorawan_watch, a SEPARATE scan): the
+# Semtech GWMP "packet forwarder" protocol (UDP/1700) between a LoRa gateway and its
+# network server. GWMP has no authentication or encryption, so an 8-byte gateway EUI
+# is the only identity and every uplink/downlink PHYPayload crosses in the clear.
+# This is the IP/wire side only — the radio link belongs to the SDR suite, and LoRa
+# Basics Station (TLS) / MQTT backhauls are opaque. MBW-100 censuses a gateway EUI and
+# carries a by-reference fingerprint (OUI→vendor for gateway + DevEUIs via the bundled
+# IEEE snapshot, JoinEUI, DevAddr→NetID→operator, regional band, per-DevAddr datarate/
+# cadence/FPort/ADR), MBW-101 flags recoverable cleartext PHYPayloads, MBW-102 a gateway
+# EUI from two sources (impersonation), MBW-103 a PULL_RESP downlink from a non-server
+# address (injection), MBW-104 JoinRequest DevNonce reuse, MBW-105 an uplink FCnt reset,
+# MBW-106 a cleartext gateway location. The LoRa tier maps to NO CVE (spec-level/protocol
+# properties) and, unlike Modbus, has NO learning window — so it is its own button with
+# no arming timer, and LoRa traffic never touches the Modbus baseline. This lets us ID
+# Matter/Thread/Z-Wave (DNS Doctor) and now LoRaWAN on the wire/WiFi without any radio.
 #
 # The master baseline is learn-then-arm: the first Modbus ADU seen starts a learning
 # window (default one hour, across scans and the background rotation); masters seen
@@ -27335,7 +27351,11 @@ def _modbus_analyze(pcap, ot_subnets=None, learn_seconds=None, persist=True):
     sec_hosts = set()
     for af, host in d.get('security_hosts') or []:
         sec_hosts.add((_modbus_family(af), str(host)))
-    eng = F.Engine(baseline=bl, ot_subnets=ot_nets, security_hosts=sec_hosts)
+    # The Modbus button is Modbus-only: disable the LoRaWAN tier (its own button,
+    # do_lorawan_watch) so a stray UDP/1700 datagram can never raise a LoRa finding
+    # here and the Modbus capture BPF stays TCP-scoped.
+    eng = F.Engine(baseline=bl, ot_subnets=ot_nets, security_hosts=sec_hosts,
+                   lora=F.LoraConfig(ports=()))
     counts = {'frames': 0, 'adus': 0}
     _feed = eng.feed
 
@@ -27489,6 +27509,185 @@ def do_modbus_baseline(action='get', ot_subnets=None):
                 'ot_subnets': d.get('ot_subnets') or []}
 
 
+# --------------------------------------------------------------------------
+# LoRaWAN gateway-backhaul tier (do_lorawan_watch) — the v3 SECOND button.
+# Semtech GWMP over UDP/1700. No baseline, no learning window, no arming timer.
+# --------------------------------------------------------------------------
+_LORAWAN_PORTS = (1700,)
+# Capture filter: UDP/1700 (v4 and v6-direct), plus IPv6 whose first next-header is
+# not TCP/UDP/ICMPv6 — an extension-header chain a plain `udp port 1700` can't match.
+# The sensor walks the chain and its own port gate drops anything that is not 1700.
+_LORAWAN_BPF = ('udp port 1700 or '
+                '(ip6 and not ip6 proto 6 and not ip6 proto 17 and not ip6 proto 58)')
+
+
+def _lorawan_verdict(findings):
+    """clean < backhaul < suspicious < lora-abuse. 'backhaul' = a cleartext gateway
+    link is present (MBW-100/101, or the MBW-106 location leak); 'suspicious' = a
+    DevNonce replay (MBW-104); 'lora-abuse' = gateway impersonation, downlink
+    injection or an uplink frame-counter reset (MBW-102/103/105)."""
+    codes = {f['code'] for f in findings}
+    if codes & {'MBW-102', 'MBW-103', 'MBW-105'}:
+        return 'lora-abuse'
+    if 'MBW-104' in codes:
+        return 'suspicious'
+    if codes:
+        return 'backhaul'
+    return 'clean'
+
+
+def _lorawan_summarize(engine, findings_mod):
+    """One row per (code, family, src, dst) with a count and the live gateway
+    fingerprint (held by reference, so the running DevAddr/DevEUI/NetID/vendor
+    counts are current). Only LoRaWAN codes (MBW-100..106) are surfaced here."""
+    rows = {}
+    for f in engine.findings:
+        if f.code not in findings_mod.LORA_CODES:
+            continue
+        title, klass, sev, conf = findings_mod.REGISTRY[f.code]
+        k = (f.code, f.key.family, f.key.src, f.key.dst)
+        r = rows.get(k)
+        if r is None:
+            rows[k] = {'code': f.code, 'name': title, 'klass': klass,
+                       'severity': sev, 'confidence': conf,
+                       'af': 'v%d' % _modbus_af(f.key.family),
+                       'src': f.key.src, 'dst': f.key.dst, 'detail': f.detail,
+                       'meta': f.meta, 'cves': [], 'count': 1, 'first_ts': f.ts}
+        else:
+            r['count'] += 1
+            if f.meta:
+                r['meta'] = f.meta
+    return sorted(rows.values(),
+                  key=lambda r: (-_MODBUS_SEV_RANK.get(r['severity'], 0),
+                                 r['code'], r['src'], r['dst']))
+
+
+def _lorawan_normalize(f):
+    """LoRaWAN summary row -> the guard finding shape _guard_emit_jsonl expects.
+    Rides the existing 'modbus_watch' Watchtower source (one module)."""
+    return {'code': f['code'], 'name': f['name'],
+            'severity': _MODBUS_SEV_TO_GUARD.get(f['severity'], 'MEDIUM'),
+            'klass': 'ATTACK' if f['klass'] == 'abuse' else 'EXPOSURE',
+            'src': f['src'], 'cves': [],
+            'detail': {'dst': f['dst'], 'af': f['af'], 'confidence': f['confidence'],
+                       'count': f['count'], 'text': f['detail'],
+                       'fingerprint': f['meta']}}
+
+
+def _lorawan_analyze(pcap):
+    """Replay a pcap through the vendored sensor + engine with the LoRaWAN tier armed
+    and NO Modbus baseline (the backhaul tier has no learning window). Returns
+    (summary rows, stats). Fresh engine every call — nothing is persisted."""
+    F, S, _P = _modbus_import()
+    from modbuswatch import sensor as _sensor
+    from modbuswatch import fingerprint as _fp
+    from scapy.utils import PcapReader
+    eng = F.Engine(baseline=S.Baseline(window_s=0.0),
+                   lora=F.LoraConfig(ports=_LORAWAN_PORTS))
+    frames = 0
+    with PcapReader(pcap) as rd:
+        for pkt in rd:
+            frames += 1
+            try:
+                _sensor.process_packet(pkt, eng)
+            except Exception:
+                continue          # one malformed frame must never kill the scan
+    rows = _lorawan_summarize(eng, F)
+    gateways = sorted({g.gw_eui for g in eng.gw_fingerprints.values() if g.gw_eui})
+    deveuis = sorted({e for g in eng.gw_fingerprints.values() for e in g.dev_euis})
+    stats = {'frames': frames, 'gateways': gateways,
+             'devaddrs': len(eng.device_profiles), 'deveuis': len(deveuis),
+             'oui_version': _fp.REGISTRY.version}
+    return rows, stats
+
+
+def do_lorawan_watch(interface=None, seconds=20, pcap=None, quick=False):
+    """Passive LoRaWAN gateway-backhaul scan (Semtech GWMP over UDP/1700, detection-
+    only, never transmits). A SEPARATE scan from Modbus with NO arming timer: the
+    backhaul tier is census + per-packet abuse, so there is no learning window and no
+    baseline. Flags the cleartext gateway census and device/gateway fingerprint
+    (MBW-100 — gateway/DevEUI OUI→vendor via the bundled IEEE snapshot, JoinEUI,
+    DevAddr→NetID→operator, regional band and per-DevAddr datarate/cadence/FPort/ADR),
+    recoverable PHYPayloads (MBW-101), gateway impersonation (MBW-102), downlink
+    injection (MBW-103), JoinRequest DevNonce replay (MBW-104), an uplink frame-counter
+    reset (MBW-105) and a cleartext gateway location (MBW-106). Maps to no CVE.
+    Dual-stack. `pcap` replays a file instead of capturing."""
+    if not _have_scapy():
+        return {'success': False, 'error': 'LoRaWAN Watch needs the Python scapy module '
+                '(pip install scapy).'}
+    iface = None
+    tmp = None
+    if pcap:
+        if not os.path.isfile(pcap):
+            return {'success': False, 'error': 'pcap not found: %s' % pcap}
+        seconds = 0
+    else:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        seconds = _clamp_int(seconds, 20, 5, 60)
+        if not _have('tcpdump'):
+            return {'success': False, 'interface': iface,
+                    'error': 'tcpdump is not installed. Click Install to add it.',
+                    'missing_tool': 'tcpdump'}
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        # Full snaplen: a PUSH_DATA carrying several rxpk entries plus a stat block
+        # is large, and MBW-101 needs the whole PHYPayload to name the frame types.
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
+                    '-s', '65535', '-c', '20000', '-w', tmp, _LORAWAN_BPF],
+                   timeout=seconds + 8)
+        if (os.path.getsize(tmp) <= 24 and res['err'] and any(
+                k in res['err'].lower() for k in ('permission', "couldn't",
+                                                  'no such device', 'syntax error'))):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+        pcap = tmp
+    try:
+        rows, st = _lorawan_analyze(pcap)
+    except Exception as e:
+        return {'success': False, 'interface': iface,
+                'error': 'lorawan analysis failed: %s: %s' % (type(e).__name__, e)}
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    verdict = _lorawan_verdict(rows)
+    reasons = []
+    for f in rows:
+        line = '%s: %s — %s %s → %s (%s×)' % (
+            f['code'], f['name'], f['af'], f['src'], f['dst'], f['count'])
+        if f.get('meta'):
+            line += ' | ' + f['meta']
+        reasons.append(line)
+        if len(reasons) >= 8:
+            break
+    if not reasons:
+        reasons = ['No LoRaWAN gateway backhaul seen (Semtech GWMP, UDP/1700). A LoRa '
+                   'Basics Station (TLS) or MQTT-forwarder backhaul is invisible to a '
+                   'passive tap.']
+    by_sev = {}
+    for f in rows:
+        by_sev[f['severity']] = by_sev.get(f['severity'], 0) + 1
+    result = {'success': True, 'module': 'lorawan_watch', 'interface': iface,
+              'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
+              'findings': rows, 'by_severity': by_sev, 'packet_count': st['frames'],
+              'gateways': st['gateways'], 'devaddrs': st['devaddrs'],
+              'deveuis': st['deveuis'], 'oui_version': st['oui_version']}
+    # HIGH + MEDIUM LoRaWAN findings ride the existing 'modbus_watch' Watchtower
+    # source (one module). Census/location info stays in the card.
+    alerts = [_lorawan_normalize(f) for f in rows if f['severity'] in ('high', 'medium')]
+    if not quick and alerts:
+        _guard_emit_jsonl('modbus_watch', {'interface': iface, 'findings': alerts})
+    return result
+
+
 def _modbus_selftest():
     """Offline scenarios over the vendored parser + engine (no scapy, no root), plus
     a Scapy end-to-end leg that writes IPv4, IPv6 and IPv6-behind-an-extension-header
@@ -27533,14 +27732,15 @@ def _modbus_selftest():
     read = _st.pack('>BHH', 3, 0, 5)
     coil = _st.pack('>BHH', 5, 0, 0xFF00)
 
-    # Registry + severity split (v2: 12 codes — 3 high / 4 medium / 3 low / 2 info;
-    # the new MBW-042 is the info/exposure "cleartext, no secure peer seen" code).
+    # Registry + severity split (v3: 19 codes — the 12 Modbus codes plus the 7
+    # LoRaWAN backhaul codes MBW-100..106. Split 6 high / 7 medium / 3 low / 3 info:
+    # LoRa adds MBW-102/103/105 (high), MBW-101/104/106 (medium) and MBW-100 (info).
     reg = F.REGISTRY
     split = {}
     for v in reg.values():
         split[v[2]] = split.get(v[2], 0) + 1
-    check('registry: 12 codes, 3 high / 4 medium / 3 low / 2 info',
-          len(reg) == 12 and split == {'high': 3, 'medium': 4, 'low': 3, 'info': 2})
+    check('registry: 19 codes, 6 high / 7 medium / 3 low / 3 info',
+          len(reg) == 19 and split == {'high': 6, 'medium': 7, 'low': 3, 'info': 3})
 
     # Parser: framing cross-checks (MBW-030 is load-bearing in parse()).
     a = P.parse(adu(1, read))
@@ -27735,8 +27935,187 @@ def _modbus_selftest():
         except Exception as ex:
             check('e2e pcap leg raised %s: %s' % (type(ex).__name__, ex), False)
             e2e = {'ran': True, 'pass': False}
+    # ---------------- LoRaWAN backhaul tier (MBW-100..106) ----------------
+    # GWMP + PHYPayload bytes hand-assembled (mirrors the module's craft.py, which
+    # is a test harness and not vendored) so the crafted shapes are exactly as
+    # intended. Fed through the real lora.parse_gwmp + Engine.feed_lora.
+    import base64 as _b64
+    import json as _json
+    try:
+        from modbuswatch import lora as L, fingerprint as FP
+    except Exception as e:
+        check('lorawan import failed: %s' % e, False)
+        L = None
+    if L is not None:
+        def _le(h):
+            return bytes.fromhex(h)[::-1]
+
+        def _phy_join(dev_eui="0004a30b001c0530", join_eui="70b3d57ed0000001", nonce=0x1234):
+            return (bytes([0 << 5]) + _le(join_eui) + _le(dev_eui)
+                    + _st.pack("<H", nonce) + b"\x11\x22\x33\x44")
+
+        def _phy_dataup(dev_addr="26011bda", fcnt=1, fport=1):
+            return (bytes([2 << 5]) + _le(dev_addr) + bytes([0]) + _st.pack("<H", fcnt)
+                    + bytes([fport]) + b"\x0a\x0b" + b"\x55\x66\x77\x88")
+
+        def _gwmp(ident, token=1, gw_eui="a840411e8c4c4150", obj=None):
+            hdr = bytes([0x02]) + _st.pack(">H", token) + bytes([ident])
+            if ident in (0x00, 0x02, 0x05):
+                hdr += bytes.fromhex(gw_eui)
+            if obj is not None:
+                hdr += _json.dumps(obj, separators=(",", ":")).encode()
+            return hdr
+
+        def _push(phys=(), gw_eui="a840411e8c4c4150", token=1, lati=None, long=None):
+            rxpk = [{"tmst": 1, "chan": 2, "rfch": 0, "freq": 866.349812, "stat": 1,
+                     "modu": "LORA", "datr": "SF7BW125", "codr": "4/5", "rssi": -35,
+                     "lsnr": 5.1, "size": len(p), "data": _b64.b64encode(p).decode()}
+                    for p in phys]
+            obj = {"rxpk": rxpk} if rxpk else {}
+            if lati is not None or long is not None:
+                st = {"rxnb": len(rxpk)}
+                if lati is not None:
+                    st["lati"] = lati
+                if long is not None:
+                    st["long"] = long
+                obj["stat"] = st
+            return _gwmp(0x00, token=token, gw_eui=gw_eui, obj=obj)
+
+        def _pull_data(gw_eui="a840411e8c4c4150", token=3):
+            return _gwmp(0x02, token=token, gw_eui=gw_eui)
+
+        def _pull_resp(phy, token=2):
+            obj = {"txpk": {"imme": False, "freq": 868.3, "modu": "LORA",
+                            "datr": "SF11BW125", "codr": "4/5", "size": len(phy),
+                            "data": _b64.b64encode(phy).decode()}}
+            return _gwmp(0x03, token=token, obj=obj)
+
+        GW4, NS4, ATT4 = '10.10.1.5', '10.10.1.9', '10.10.1.66'
+
+        def leng():
+            return F.Engine(baseline=S.Baseline(window_s=0.0),
+                            lora=F.LoraConfig(ports=(L.DEFAULT_LORA_PORT,)))
+
+        def lcodes(e):
+            return {f.code for f in e.findings}
+
+        # strict decode: non-v2 / malformed GWMP yields nothing
+        check('lora: non-GWMP bytes decode to nothing (strict v2 header)',
+              L.parse_gwmp(b'\x99\x00\x01\x00') is None)
+
+        # census + cleartext + fingerprint (OUI -> vendor via the bundled snapshot)
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0), L.parse_gwmp(_push([_phy_join()])),
+                    now=1.0, dst_port=1700)
+        check('lora: PUSH_DATA(join) -> MBW-100 census + MBW-101 cleartext',
+              {'MBW-100', 'MBW-101'} <= lcodes(e))
+        fp = list(e.gw_fingerprints.values())[0]
+        check('lora: fingerprint carries gateway EUI, vendor (OUI snapshot) and a DevEUI',
+              fp.gw_eui == 'a840411e8c4c4150' and fp.gw_vendor
+              and '0004a30b001c0530' in fp.dev_euis)
+        check('lora: census_summary() renders identity by reference (no device name)',
+              'eui=a840411e8c4c4150' in fp.census_summary()
+              and 'name' not in fp.census_summary().lower())
+
+        # DevNonce reuse -> MBW-104
+        e = leng()
+        for t in (1.0, 2.0):
+            e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                        L.parse_gwmp(_push([_phy_join(nonce=0x1111)])), now=t, dst_port=1700)
+        check('lora: repeated JoinRequest DevNonce -> MBW-104', 'MBW-104' in lcodes(e))
+
+        # uplink FCnt reset -> MBW-105 (high-water 2000 > 1024, next <= 16)
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                    L.parse_gwmp(_push([_phy_dataup(fcnt=2000)])), now=1.0, dst_port=1700)
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                    L.parse_gwmp(_push([_phy_dataup(fcnt=5)])), now=2.0, dst_port=1700)
+        check('lora: uplink FCnt 2000 -> 5 -> MBW-105', 'MBW-105' in lcodes(e))
+        # a 16-bit rollover near the wrap point is NOT a reset (FP guard)
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                    L.parse_gwmp(_push([_phy_dataup(fcnt=65535)])), now=1.0, dst_port=1700)
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                    L.parse_gwmp(_push([_phy_dataup(fcnt=0)])), now=2.0, dst_port=1700)
+        check('lora: 0xFFFF -> 0x0000 rollover is not a reset (no MBW-105)',
+              'MBW-105' not in lcodes(e))
+
+        # one gateway EUI from two source addresses -> MBW-102
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                    L.parse_gwmp(_push([_phy_dataup()])), now=1.0, dst_port=1700)
+        e.feed_lora(S.FlowKey(V4, ATT4, NS4, 0),
+                    L.parse_gwmp(_push([_phy_dataup(fcnt=2)])), now=2.0, dst_port=1700)
+        check('lora: one gateway EUI from two source addresses -> MBW-102',
+              'MBW-102' in lcodes(e))
+
+        # rogue downlink: server learned from PULL_DATA, PULL_RESP from elsewhere -> MBW-103
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0), L.parse_gwmp(_pull_data()),
+                    now=1.0, dst_port=1700)
+        e.feed_lora(S.FlowKey(V4, ATT4, GW4, 0),
+                    L.parse_gwmp(_pull_resp(_phy_dataup())), now=2.0, dst_port=1700)
+        check('lora: PULL_RESP from a non-server address -> MBW-103', 'MBW-103' in lcodes(e))
+        # a PULL_RESP before any PULL_DATA is seen stays silent (map unknown)
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, ATT4, GW4, 0),
+                    L.parse_gwmp(_pull_resp(_phy_dataup())), now=1.0, dst_port=1700)
+        check('lora: PULL_RESP with no server learned yet -> silent (no MBW-103)',
+              'MBW-103' not in lcodes(e))
+
+        # cleartext gateway location in the stat block -> MBW-106
+        e = leng()
+        e.feed_lora(S.FlowKey(V4, GW4, NS4, 0),
+                    L.parse_gwmp(_push([], lati=59.331, long=18.071)), now=1.0, dst_port=1700)
+        check('lora: cleartext gateway location in stat -> MBW-106', 'MBW-106' in lcodes(e))
+
+        # Scapy end-to-end: v4 + v6 GWMP over UDP/1700 -> do_lorawan_watch(pcap)
+        lora_e2e = {'ran': False, 'reason': 'scapy not installed'}
+        if _have_scapy():
+            import tempfile
+            try:
+                from scapy.all import Ether, IP, IPv6, UDP, wrpcap
+                legs = [('IPv4', lambda s, d_: IP(src=s, dst=d_), GW4, NS4),
+                        ('IPv6', lambda s, d_: IPv6(src=s, dst=d_),
+                         '2001:db8:ac::105', '2001:db8:ac::109')]
+                ok_all = True
+                for label, l3, gw, ns in legs:
+                    pkts = []
+
+                    def put(payload, t):
+                        p = Ether() / l3(gw, ns) / UDP(sport=45678, dport=1700) / payload
+                        p.time = t
+                        pkts.append(p)
+                    put(_push([_phy_join()]), 2000.0)
+                    put(_push([_phy_dataup(fcnt=10)]), 2001.0)
+                    fd, path = tempfile.mkstemp(suffix='.pcap')
+                    os.close(fd)
+                    try:
+                        wrpcap(path, pkts)
+                        r = do_lorawan_watch(pcap=path, quick=True)
+                    finally:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                    got = {f['code'] for f in r.get('findings') or []}
+                    fam_ok = all(f['af'] == ('v4' if label == 'IPv4' else 'v6')
+                                 for f in r.get('findings') or [])
+                    ok = (r.get('success') and r.get('verdict') == 'backhaul'
+                          and {'MBW-100', 'MBW-101'} <= got
+                          and r.get('gateways') == ['a840411e8c4c4150'] and fam_ok)
+                    check('e2e %s lora pcap: GWMP PUSH_DATA -> MBW-100 census + '
+                          'MBW-101 cleartext (backhaul verdict)' % label, ok)
+                    ok_all = ok_all and ok
+                lora_e2e = {'ran': True, 'pass': ok_all, 'scenarios_run': len(legs)}
+            except Exception as ex:
+                check('lora e2e leg raised %s: %s' % (type(ex).__name__, ex), False)
+                lora_e2e = {'ran': True, 'pass': False}
+    else:
+        lora_e2e = {'ran': False, 'reason': 'lora module import failed'}
+
     return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
-            'scapy': e2e}
+            'scapy': e2e, 'lora_scapy': lora_e2e}
 
 
 # ==========================================================================
@@ -31344,6 +31723,16 @@ def register_network_diagnostics(app, logger=None):
             ot = [str(s) for s in (data.get('ot') or [])][:16]
         _log(f"net/modbus-baseline {action}")
         return jsonify(do_modbus_baseline(action, ot_subnets=ot))
+
+    @app.route('/api/net/lorawan-watch', methods=['GET'])
+    def net_lorawan_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        iface = iface or _capture_iface()
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 60)
+        _log(f"net/lorawan-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_lorawan_watch(interface=iface, seconds=secs))
 
     @app.route('/api/net/radius-watch', methods=['GET'])
     def net_radius_watch():
