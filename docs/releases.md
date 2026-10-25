@@ -4,7 +4,7 @@
 
 ### 2026-10-25
 
-#### [#1011](https://github.com/PierreGode/Ragnar/pull/1011) — ci: one-click release pipeline for both OS images
+#### [#1016](https://github.com/PierreGode/Ragnar/pull/1016) — ci: one-click release pipeline for both OS images
 *branch `ci/release-os-images`*
 
 - Adds **`.github/workflows/release-os-images.yml`** — a manually-triggered (`workflow_dispatch`) pipeline so Pierre or a collaborator (e.g. `solarflere`) can cut a fresh release of **both** OS images from the Actions tab, with no direct access to the private build repo needed.
