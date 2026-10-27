@@ -104,7 +104,11 @@ behind them is Solarflere's work.
   (SSDP over UDP/1900 + IPv6 FF0X::C), GENA eventing and IGD port-mapping control — reflection /
   amplifier posture, advert spoofing and WAN-side or third-party IGD pinholes — full IPv4/IPv6
   parity, no learning period. Vendor / implementation bugs (libupnp, MiniUPnPd, the Windows SSDP
-  service) are deliberately out of scope — that is the vendor gate.
+  service) are deliberately out of scope — that is the vendor gate. **v2** adds a passive
+  **device census / fingerprint** — vendor / model / friendlyName from the `SERVER` token and the
+  UPnP device description where it crossed the wire (never fetched), plus MAC OUI when present. It
+  **carries no CVE** and adds nothing to the counts above — wire-side UPnP/DLNA device ID, alongside
+  the Matter / Thread / Z-Wave census and the LoRaWAN fingerprint.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

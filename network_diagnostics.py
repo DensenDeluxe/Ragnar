@@ -15488,6 +15488,13 @@ def _pim_selftest():
 # or per-exchange inside a bounded window (grab-and-go). Dual-stack: full
 # IPv4/IPv6 parity (SSDP-016 is IPv6-only by definition). CGNAT 100.64/10 is
 # deliberately treated as off-link (carrier shared space upstream of the CPE).
+# v2 adds a passive device census/fingerprint (on by default, no new code or CVE):
+# one record per device seen advertising or answering, enriched from the SERVER
+# token, the UPnP device description (friendlyName / manufacturer / modelName, read
+# only if the XML crossed the wire — never fetched) and MAC OUI when present. _wanted()
+# now also admits HTTP responses and description-XML continuations so descriptions
+# that span TCP segments are reassembled; the BPF is unchanged. This IDs UPnP/DLNA
+# devices on the wire/WiFi, alongside the Matter/Thread/Z-Wave and LoRaWAN census.
 _SSDP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
 
 
@@ -15533,6 +15540,32 @@ def _ssdp_analyze(packets, local_prefixes=()):
     st = eng.stats
     verdict = _ssdp_verdict(findings)
 
+    # v2 passive device census/fingerprint (on by default): one record per device
+    # seen advertising or answering, enriched from the SERVER token, the UPnP device
+    # description (friendlyName / manufacturer / modelName) and MAC OUI when present.
+    # No names are invented and nothing is fetched — description XML is only read if
+    # it crossed the wire. No OUI file is bundled, so an OUI vendor stays unresolved
+    # rather than guessed.
+    devices, named = [], 0
+    cen = getattr(eng, 'census', None)
+    if cen is not None:
+        try:
+            oui = cen.oui
+            for rec in cen.records()[:100]:
+                rd = rec.as_dict(oui)
+                if rd.get('named'):
+                    named += 1
+                devices.append(
+                    {'name': rd.get('name'), 'named': bool(rd.get('named')),
+                     'device_type': rd.get('device_type'), 'vendor': rd.get('vendor'),
+                     'vendor_source': rd.get('vendor_source'),
+                     'addresses': rd.get('addresses') or [],
+                     'macs': rd.get('macs') or [], 'uuid': rd.get('uuid'),
+                     'description_seen': bool(rd.get('description_seen')),
+                     'service_types': (rd.get('service_types') or [])[:6]})
+        except Exception:
+            devices, named = [], 0
+
     def _sev(s):
         return sum(1 for f in findings if f.get('severity') == s)
 
@@ -15540,12 +15573,14 @@ def _ssdp_analyze(packets, local_prefixes=()):
         reasons = ['%s (tier %s) %s: %s' % (f['severity'], f['tier'], f['code'],
                                             f['title']) for f in findings[:8]]
     elif st.get('ssdp_messages') or st.get('gena') or st.get('igd'):
-        reasons = ['SSDP/UPnP traffic observed — no CallStranger, reflection or '
-                   'IGD-abuse findings']
+        extra = (' — %d device(s) inventoried' % len(devices)) if devices else ''
+        reasons = ['SSDP/UPnP traffic observed%s; no CallStranger, reflection or '
+                   'IGD-abuse findings' % extra]
     else:
         reasons = ['No SSDP/UPnP traffic seen on this segment']
     return {'success': True, 'verdict': verdict, 'reasons': reasons,
-            'findings': findings,
+            'findings': findings, 'devices': devices,
+            'device_count': len(devices), 'named_devices': named,
             'packets': int(st.get('packets', 0)),
             'ssdp_messages': int(st.get('ssdp_messages', 0)),
             'm_search': int(st.get('m_search', 0)),
@@ -15589,7 +15624,10 @@ def do_ssdp_watch(interface=None, seconds=20, pcap=None):
     """Passive SSDP / UPnP protocol scanner (detection-only). Captures SSDP
     discovery (UDP/1900), GENA eventing and IGD control for a few seconds and
     flags CallStranger (CVE-2020-12695) off-link CALLBACKs, reflection / amplifier
-    posture, advert spoofing and IGD pinhole abuse. Dual-stack (IPv4 + IPv6)."""
+    posture, advert spoofing and IGD pinhole abuse. Dual-stack (IPv4 + IPv6). v2 also
+    returns a passive device census (`devices`): UPnP/DLNA devices seen, with vendor /
+    model / friendlyName from the SERVER token and device description where on the
+    wire — no CVE, nothing fetched."""
     if pcap is None:
         iface = interface if _valid_iface(interface or '') else _capture_iface()
         if not iface:
@@ -15616,9 +15654,10 @@ def do_ssdp_watch(interface=None, seconds=20, pcap=None):
 
 
 def _ssdp_selftest():
-    """Self-test the SSDP/UPnP detectors: the vendored engine's own 89-check suite,
+    """Self-test the SSDP/UPnP detectors: the vendored engine's own 136-check suite,
     focused CallStranger positive + clean-traffic + dual-stack + IGD scenarios, the
-    catalog shape, and a Scapy pcap end-to-end leg through do_ssdp_watch."""
+    catalog shape, the v2 device census, and a Scapy pcap end-to-end leg through
+    do_ssdp_watch."""
     sw = _ssdp_import()
     scenarios = []
 
@@ -15686,7 +15725,33 @@ def _ssdp_selftest():
        and cve_codes == {'SSDP-001', 'SSDP-002', 'SSDP-003'}
        and len({sw.REGISTRY[c].cve for c in cve_codes}) == 1)
 
-    # the vendored engine's own full suite (89 checks, incl. AST passivity guard);
+    # v2 passive census: a NOTIFY advert is inventoried once, with the SERVER-token
+    # vendor and its source address; an M-SEARCH is a control point, not a device,
+    # so it is never inventoried (noise guard).
+    notify = (b'NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n'
+              b'CACHE-CONTROL: max-age=1800\r\n'
+              b'LOCATION: http://192.168.1.50:8200/desc.xml\r\n'
+              b'NT: upnp:rootdevice\r\nNTS: ssdp:alive\r\n'
+              b'SERVER: Linux/4.9 UPnP/1.0 MiniDLNA/1.2\r\n'
+              b'USN: uuid:4d696e69-0011-322a-abcc-001132abc001::upnp:rootdevice\r\n\r\n')
+    eng_c = run([P(ts=1.0, proto='udp', src='192.168.1.50', dst='239.255.255.250',
+                   sport=1900, dport=1900, payload=notify)])
+    crecs = eng_c.census.records() if eng_c.census is not None else []
+    cd = crecs[0].as_dict(eng_c.census.oui) if crecs else {}
+    ck('census_inventories_advert',
+       len(crecs) == 1 and (cd.get('vendor') or '').startswith('MiniDLNA')
+       and '192.168.1.50' in (cd.get('addresses') or []))
+    ms_only = (b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n'
+               b'MAN: "ssdp:discover"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n')
+    eng_m = run([P(ts=1.0, proto='udp', src='192.168.1.77', dst='239.255.255.250',
+                   sport=50000, dport=1900, payload=ms_only)])
+    ck('census_skips_msearch',
+       eng_m.census is not None and len(eng_m.census.records()) == 0)
+    # the adapter surfaces the census as `devices` on the result.
+    res_c = _ssdp_analyze([], local_prefixes=())
+    ck('adapter_exposes_devices_key', 'devices' in res_c and 'device_count' in res_c)
+
+    # the vendored engine's own full suite (136 checks, incl. AST passivity guard);
     # it prints a report, so capture that so do_routing_selftest stays quiet.
     try:
         import io as _io

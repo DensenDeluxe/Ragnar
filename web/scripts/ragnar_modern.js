@@ -11902,7 +11902,7 @@ async function runSsdpWatch() {
         }
         const [cls, label] = _SSDP_VERDICT_STYLE[d.verdict] || _SSDP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.ssdp_messages || 0} SSDP / ${d.gena || 0} GENA / ${d.igd || 0} IGD msg(s) · ${d.high || 0} high, ${d.medium || 0} med, ${d.low || 0} low</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.ssdp_messages || 0} SSDP / ${d.gena || 0} GENA / ${d.igd || 0} IGD msg(s) · ${d.device_count || 0} device(s) · ${d.high || 0} high, ${d.medium || 0} med, ${d.low || 0} low</p>`;
         if ((d.findings || []).length) {
             html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Tier</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
@@ -11921,6 +11921,24 @@ async function runSsdpWatch() {
         } else if (d.reasons && d.reasons.length) {
             html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
                 d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        // v2 passive device census / fingerprint (UPnP/DLNA devices seen on the wire).
+        if ((d.devices || []).length) {
+            html += `<p class="text-xs text-gray-400 mt-3 mb-1 font-semibold">Device census — ${d.device_count} device(s)${d.named_devices ? ', ' + d.named_devices + ' named' : ''} <span class="font-normal text-gray-500">(passive UPnP/DLNA fingerprint — nothing fetched)</span></p>`;
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Name</th><th class="px-2 py-1">Type</th><th class="px-2 py-1">Vendor</th><th class="px-2 py-1">Address</th><th class="px-2 py-1">MAC</th><th class="px-2 py-1">Services</th></tr></thead><tbody>';
+            d.devices.slice(0, 60).forEach(v => {
+                const vendor = v.vendor ? escapeHtml(v.vendor) + (v.vendor_source ? ` <span class="text-gray-600">(${escapeHtml(v.vendor_source)})</span>` : '') : '<span class="text-gray-600">—</span>';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 ${v.named ? 'text-gray-200' : 'text-gray-500'}">${escapeHtml(v.name || '—')}${v.description_seen ? ' <span class="text-green-500" title="UPnP device description seen on the wire">✓desc</span>' : ''}</td>
+                    <td class="px-2 py-1 text-gray-400 whitespace-normal" style="min-width:9rem">${escapeHtml(v.device_type || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400">${vendor}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml((v.addresses || []).slice(0, 3).join(', '))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-500">${escapeHtml((v.macs || []).join(', ') || '—')}</td>
+                    <td class="px-2 py-1 text-gray-500 whitespace-normal" style="min-width:12rem">${escapeHtml((v.service_types || []).join(', ') || '—')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
         }
         out.innerHTML = html;
     } catch (e) {

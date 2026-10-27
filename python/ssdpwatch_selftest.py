@@ -454,6 +454,282 @@ def unit_checks():
     return out
 
 
+
+# ------------------------------------------------------------------ census
+
+CENSUS_MACS = {"router": "e4:3e:d7:00:11:22", "host": "aa:bb:cc:dd:ee:01",
+               "other": "00:17:88:1a:2b:3c"}
+
+
+def cpkt(payload, src, dst, mac=None, sport=49152, dport=1900, ttl=2,
+         ts=T0, proto="udp"):
+    if isinstance(payload, str):
+        payload = payload.replace("\n", "\r\n").encode()
+    return Packet(ts=ts, proto=proto, src=src, dst=dst, sport=sport,
+                  dport=dport, payload=payload, ttl=ttl, src_mac=mac)
+
+
+def _advert(A, uuid, dtype, server=None, loc=None, extra="", mac=None, ts=T0):
+    lit_ = lit(A["router"])
+    loc = loc or f"http://{lit_}:49152/desc.xml"
+    hdr = (f"NOTIFY * HTTP/1.1\nHOST: {lit(A['mcast'])}:1900\n"
+           f"LOCATION: {loc}\nNT: {dtype}\nNTS: ssdp:alive\n"
+           f"USN: uuid:{uuid}::{dtype}\n")
+    if server:
+        hdr += f"SERVER: {server}\n"
+    hdr += extra + "\n"
+    return cpkt(hdr, A["router"], A["mcast"], mac=mac, ts=ts)
+
+
+def _description(A, uuid, fields, mac=None, ts=T0, split_at=None):
+    body = ('<?xml version="1.0"?>'
+            '<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+            + "".join(f"<{k}>{v}</{k}>" for k, v in fields.items())
+            + f"<UDN>uuid:{uuid}</UDN></device></root>")
+    whole = ("HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\n\r\n" + body).encode()
+    if split_at is None:
+        return [cpkt(whole, A["router"], A["host"], mac=mac, sport=49152,
+                     dport=51000, ts=ts, proto="tcp")]
+    return [cpkt(whole[:split_at], A["router"], A["host"], mac=mac, sport=49152,
+                 dport=51000, ts=ts, proto="tcp"),
+            cpkt(whole[split_at:], A["router"], A["host"], mac=mac, sport=49152,
+                 dport=51000, ts=ts + 0.1, proto="tcp")]
+
+
+def census_checks():
+    """The census is an inventory, not a detector. These assert it identifies
+    devices correctly AND that it never produces a finding."""
+    import ssdpwatch as M
+    out = []
+
+    def c(name, ok, msg=""):
+        out.append((name, bool(ok), msg))
+
+    for fam, A in ((4, V4), (6, V6)):
+        uuid = "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+        dtype = "urn:schemas-upnp-org:device:MediaServer:1"
+        pkts = [_advert(A, uuid, dtype, server="Linux/5.10 UPnP/1.1 MiniUPnPd/2.3.0",
+                        mac=CENSUS_MACS["router"], ts=T0)]
+        pkts += _description(A, uuid, {
+            "deviceType": dtype, "friendlyName": "Basement NAS",
+            "manufacturer": "Synology", "modelName": "DS920+",
+            "serialNumber": "2290ABC01"}, mac=CENSUS_MACS["router"], ts=T0 + 1)
+        e = M.SSDPWatch(M.Config())
+        for p in pkts:
+            e.observe(p)
+        recs = e.census.records()
+
+        # THE regression that matters: a USN is "uuid:<udn>::<type>". If the
+        # uuid is parsed across the '::' the SSDP record and the description
+        # record key differently and one device is reported as two.
+        c(f"ipv{fam}: advert and description merge into ONE device",
+          len(recs) == 1, f"{len(recs)} records: {[r.key for r in recs]}")
+        if recs:
+            r = recs[0]
+            c(f"ipv{fam}: uuid stops at '::'", r.uuid == uuid, str(r.uuid))
+            c(f"ipv{fam}: friendly name recovered", r.name == "Basement NAS", r.name)
+            c(f"ipv{fam}: name provenance is the description",
+              r.fields["friendlyName"].source == "description",
+              r.fields["friendlyName"].source)
+            c(f"ipv{fam}: manufacturer from description",
+              r.get("manufacturer") == "Synology", str(r.get("manufacturer")))
+            c(f"ipv{fam}: serial from description",
+              r.get("serialNumber") == "2290ABC01", str(r.get("serialNumber")))
+            c(f"ipv{fam}: device type recovered",
+              r.best_device_type() == "MediaServer", str(r.best_device_type()))
+            c(f"ipv{fam}: SSDP stack token kept alongside description",
+              r.get("serverProduct") == "MiniUPnPd/2.3.0", str(r.get("serverProduct")))
+            # The protocol token UPnP/x.y must land in upnpVersion, not be
+            # reported as the product. A substring test is wrong here:
+            # "MiniUPnPd" legitimately contains "UPnP".
+            c(f"ipv{fam}: UPnP protocol token is not mistaken for a product",
+              r.get("upnpVersion") == "1.1"
+              and not (r.get("serverProduct") or "").lower().startswith("upnp/"),
+              f"{r.get('upnpVersion')} / {r.get('serverProduct')}")
+            c(f"ipv{fam}: mac captured from the frame",
+              CENSUS_MACS["router"] in r.macs, str(r.macs))
+        c(f"ipv{fam}: census produced no findings", e.findings == [],
+          str([f.code for f in e.findings]))
+
+    # a description split across TCP segments must still yield the name
+    A = V4
+    uuid = "split-dev-0001"
+    pkts = [_advert(A, uuid, "urn:schemas-upnp-org:device:MediaRenderer:1",
+                    mac=CENSUS_MACS["host"])]
+    pkts += _description(A, uuid, {"friendlyName": "Living Room Speaker",
+                                   "manufacturer": "Acme"},
+                         mac=CENSUS_MACS["host"], ts=T0 + 1, split_at=180)
+    e = M.SSDPWatch(M.Config())
+    for p in pkts:
+        e.observe(p)
+    r = e.census.records()[0]
+    c("description split across segments is reassembled",
+      r.name == "Living Room Speaker", r.name)
+    c("split description still merges to one device",
+      len(e.census.records()) == 1, str(len(e.census.records())))
+
+    # no description at all -> no invented name, and it says why
+    e = M.SSDPWatch(M.Config())
+    e.observe(_advert(V4, "nameless-01",
+                      "urn:schemas-upnp-org:device:MediaRenderer:1",
+                      mac=CENSUS_MACS["host"]))
+    r = e.census.records()[0]
+    c("no description means no name is invented",
+      r.name == "<unnamed MediaRenderer>" and "friendlyName" not in r.fields,
+      r.name)
+
+    # a vendor extension header is recorded verbatim and mined for a MAC.
+    # hue-bridgeid carries an EUI-64-shaped, MAC-derived serial.
+    e = M.SSDPWatch(M.Config())
+    e.observe(cpkt("HTTP/1.1 200 OK\nHOST: 239.255.255.250:1900\nEXT:\n"
+                   "LOCATION: http://192.168.1.20:80/description.xml\n"
+                   "SERVER: Linux/3.14.0 UPnP/1.0 IpBridge/1.17.0\n"
+                   "hue-bridgeid: 001788FFFE1A2B3C\n"
+                   "ST: upnp:rootdevice\n"
+                   "USN: uuid:2f402f80-da50::upnp:rootdevice\n\n",
+                   "192.168.1.20", "192.168.1.50", sport=1900, dport=45000))
+    r = e.census.records()[0]
+    c("vendor extension header recorded verbatim",
+      r.vendor_headers.get("hue-bridgeid") == "001788FFFE1A2B3C",
+      str(r.vendor_headers))
+    c("MAC recovered from an EUI-64-shaped vendor header",
+      "00:17:88:1a:2b:3c" in r.macs, str(r.macs))
+    c("standard UDA headers are not logged as vendor extensions",
+      not ({"host", "location", "server", "st", "usn", "ext"}
+           & set(r.vendor_headers)), str(set(r.vendor_headers)))
+    c("upnp:rootdevice is never reported as a device type",
+      r.best_device_type() is None, str(r.best_device_type()))
+
+    # M-SEARCH must NOT create a device: a search proves a control point
+    # exists, not that any device does
+    e = M.SSDPWatch(M.Config())
+    e.observe(cpkt('M-SEARCH * HTTP/1.1\nHOST: 239.255.255.250:1900\n'
+                   'MAN: "ssdp:discover"\nMX: 2\nST: ssdp:all\n\n',
+                   "192.168.1.50", "239.255.255.250"))
+    c("M-SEARCH does not populate the census with a phantom device",
+      e.census.records() == [], str([r.key for r in e.census.records()]))
+
+    # byebye carries no identity and must not create a record either
+    e = M.SSDPWatch(M.Config())
+    e.observe(cpkt("NOTIFY * HTTP/1.1\nHOST: 239.255.255.250:1900\n"
+                   "NT: upnp:rootdevice\nNTS: ssdp:byebye\n"
+                   "USN: uuid:gone-01::upnp:rootdevice\n\n",
+                   "192.168.1.9", "239.255.255.250"))
+    c("ssdp:byebye does not create a device record",
+      e.census.records() == [], str([r.key for r in e.census.records()]))
+
+    # source ranking: a weaker source must never overwrite the description
+    e = M.SSDPWatch(M.Config())
+    uuid = "rank-01"
+    for p in _description(V4, uuid, {"friendlyName": "Real Name",
+                                     "manufacturer": "RealCo"}):
+        e.observe(p)
+    e.observe(_advert(V4, uuid, "urn:schemas-upnp-org:device:MediaServer:1",
+                      server="Linux/1.0 UPnP/1.0 Guess/9.9", ts=T0 + 5))
+    r = e.census.records()[0]
+    c("later SSDP cannot downgrade a description-sourced name",
+      r.name == "Real Name", r.name)
+    c("later SSDP cannot downgrade manufacturer",
+      r.get("manufacturer") == "RealCo", str(r.get("manufacturer")))
+
+    # oversized field must be truncated, not stored whole
+    e = M.SSDPWatch(M.Config())
+    for p in _description(V4, "big-01", {"friendlyName": "X" * 5000}):
+        e.observe(p)
+    r = e.census.records()[0]
+    c("an oversized friendlyName is truncated",
+      len(r.get("friendlyName")) <= M.DESC_CAP + 20, str(len(r.get("friendlyName") or "")))
+
+    # locally-administered MAC must not yield a vendor claim
+    tbl = M.OUITable()
+    tbl.map["02dead"] = "Should Not Appear"
+    rec = M.DeviceRecord(key="x")
+    rec.macs.add("02:de:ad:be:ef:01")
+    c("randomized (locally-administered) MAC yields no vendor",
+      rec.vendor(tbl) is None, str(rec.vendor(tbl)))
+
+    # --- mechanism-level contracts -----------------------------------
+    # These exercise the guards directly. Testing them only through whole
+    # exchanges leaves them untested whenever no exchange happens to make
+    # two sources compete, or to overflow a buffer.
+
+    # source ranking: a stronger source upgrades, a weaker one never wins,
+    # regardless of arrival order
+    rec = M.DeviceRecord(key="rank")
+    rec.learn("friendlyName", "From Server Token", "server-header", 1.0)
+    rec.learn("friendlyName", "From Description", "description", 2.0)
+    c("a stronger source upgrades a field",
+      rec.get("friendlyName") == "From Description", str(rec.get("friendlyName")))
+    rec.learn("friendlyName", "Late Weak Guess", "inferred", 3.0)
+    c("a weaker source never overwrites a stronger one",
+      rec.get("friendlyName") == "From Description", str(rec.get("friendlyName")))
+    rec.learn("friendlyName", "Second Description", "description", 4.0)
+    c("an equal source does not thrash the value",
+      rec.get("friendlyName") == "From Description", str(rec.get("friendlyName")))
+    c("provenance is retained alongside the value",
+      rec.fields["friendlyName"].source == "description",
+      rec.fields["friendlyName"].source)
+
+    # the field cap is enforced at the point of record, not only at parse:
+    # a value can reach learn() from a vendor header too
+    rec = M.DeviceRecord(key="cap")
+    rec.learn("friendlyName", "Z" * 10000, "description", 1.0)
+    c("learn() caps an oversized value at the record boundary",
+      len(rec.get("friendlyName")) <= M.DESC_CAP + 20,
+      str(len(rec.get("friendlyName"))))
+    c("a truncated value says so rather than pretending to be complete",
+      rec.get("friendlyName").endswith("(truncated)"),
+      rec.get("friendlyName")[-20:])
+
+    # stream reassembly is bounded. Without this a device that opens a
+    # description-shaped stream and never closes it pins memory on a Pi
+    # indefinitely, one buffer per stream.
+    cen = M.Census()
+    pkt_src, pkt_dst = "192.168.1.9", "192.168.1.50"
+    opener = (b"HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\n\r\n"
+              b'<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+              b"<friendlyName>Never Closes</friendlyName>")
+    cen.observe_http(cpkt(opener, pkt_src, pkt_dst, sport=49152, dport=51000,
+                          proto="tcp"))
+    buffered_before = sum(len(v) for v in cen._streams.values())
+    chunk = b"<padding>" + b"A" * 8000 + b"</padding>"
+    for i in range(12):
+        cen.observe_http(cpkt(chunk, pkt_src, pkt_dst, sport=49152,
+                              dport=51000, proto="tcp", ts=T0 + i))
+    buffered_after = sum(len(v) for v in cen._streams.values())
+    c("an unterminated description stream is bounded, not grown forever",
+      buffered_after <= M.MAX_STREAM_BUFFER,
+      f"{buffered_before} -> {buffered_after} bytes "
+      f"(cap {M.MAX_STREAM_BUFFER})")
+    c("hitting the bound is counted rather than silently ignored",
+      cen.stats.get("stream_overflow", 0) >= 1, str(dict(cen.stats)))
+
+    # baseline comparison
+    import tempfile, os
+    e = M.SSDPWatch(M.Config())
+    e.observe(_advert(V4, "known-01", "urn:schemas-upnp-org:device:MediaServer:1",
+                      mac=CENSUS_MACS["host"]))
+    e.observe(_advert(V4, "stranger-01", "urn:schemas-upnp-org:device:MediaServer:1",
+                      mac=CENSUS_MACS["other"], ts=T0 + 1))
+    fd, path = tempfile.mkstemp()
+    with os.fdopen(fd, "w") as fh:
+        fh.write("# expected\nknown-01\n")
+    e.census.mark_known(path)
+    os.unlink(path)
+    by = {r.uuid: e.census.is_new(r) for r in e.census.records()}
+    c("baseline marks an expected device known", by.get("known-01") is False, str(by))
+    c("baseline marks an unexpected device NEW", by.get("stranger-01") is True, str(by))
+    c("no baseline means no new/known verdict at all",
+      M.Census().is_new(M.DeviceRecord(key="x")) is None)
+
+    # passivity: the census must never emit a description request
+    src = open(__file__.replace("_selftest", "")).read()
+    c("census contains no HTTP request construction",
+      'b"GET ' not in src.split("def observe_http")[1].split("def ")[0]
+      if "def observe_http" in src else False)
+    return out
+
+
 # ------------------------------------------------------- capture layer
 
 def capture_layer_checks():
@@ -559,6 +835,13 @@ def run_selftest() -> int:
         passed, failed = (passed + 1, failed) if ok else (passed, failed + 1)
         if not ok:
             fails.append(f"capture:{name}: {msg}")
+        print(f"  {'PASS' if ok else 'FAIL':4}  {name}")
+
+    print("\n[census]")
+    for name, ok, msg in census_checks():
+        passed, failed = (passed + 1, failed) if ok else (passed, failed + 1)
+        if not ok:
+            fails.append(f"census:{name}: {msg}")
         print(f"  {'PASS' if ok else 'FAIL':4}  {name}")
 
     print("\n[positive vectors]")

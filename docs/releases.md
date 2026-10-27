@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-10-27
+
+#### [#1022](https://github.com/PierreGode/Ragnar/pull/1022) — feat(net): SSDP / UPnP Watch v2 — passive device census / fingerprint
+*branch `feature/ssdp-upnp-watch-v2`*
+
+- **SSDP / UPnP Watch** (`do_ssdp_watch`) gains a **passive device census / fingerprint** (engine `0.1→0.2`): alongside the findings, the scan now returns a `devices` inventory — one record per UPnP/DLNA device seen advertising (`NOTIFY`) or answering, with **vendor / model / friendlyName** from the `SERVER` token and the UPnP **device description** XML where it crossed the wire (**never fetched**), plus the **MAC OUI** vendor when a MAC is recoverable. This is wire-side UPnP/DLNA device ID — the same treatment as the Matter / Thread / Z-Wave census in DNS Doctor and the LoRaWAN fingerprint in Modbus & LoRaWAN Watch.
+- **Nothing invented, nothing fetched:** an M-SEARCH *query* is a control point, not a device, so it is not inventoried; no OUI registry file is bundled, so an OUI vendor is reported raw (unresolved) rather than guessed; names come only from what's on the wire. The engine's `_wanted()` filter now also admits HTTP responses and description-XML continuations so a description spanning TCP segments is reassembled — the **BPF is unchanged** (`(udp port 1900) or tcp`), and the AST no-transmit guard still holds.
+- **No new codes, no new CVE — still 25 codes and CVE-2020-12695 (CallStranger).** CVE index unchanged (**418 named / 355 detected**); CREDITS.md / README counts untouched.
+- **Diagnostics UI:** the SSDP/UPnP Watch card (L7) now renders a **Device census** table (Name / Type / Vendor / Address / MAC / Services; a ✓desc marks a device whose description was seen). `ragnar_modern.js` cache-bust bumped.
+- **Self-test:** the `ssdp` suite now runs the vendored engine's **136-check** suite (was 89) plus new census scenarios (an advert is inventoried with its SERVER-token vendor; an M-SEARCH is not; the adapter exposes the `devices` key) — all green; aggregate `do_routing_selftest` stays **60 suites**.
+- **Docs:** [nettools.md › SSDP / UPnP Watch](nettools.md#ssdp--upnp-watch) (v2 census paragraph).
+
 ### 2026-10-25
 
 #### [#1021](https://github.com/PierreGode/Ragnar/pull/1021) — fix(auth): recover from a hardware-fingerprint change without reinstalling (#1002)
