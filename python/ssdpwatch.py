@@ -25,7 +25,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
-__version__ = "0.1.0-dev"
+__version__ = "0.2.0-dev"
 MODULE = "ssdpwatch"
 
 SSDP_PORT = 1900
@@ -151,6 +151,8 @@ class Packet:
     payload: bytes
     ttl: int = 64           # IPv4 TTL or IPv6 hop limit
     iface: str = "-"
+    src_mac: Optional[str] = None   # link layer; present on a local tap
+    dst_mac: Optional[str] = None
 
     @property
     def family(self) -> int:
@@ -196,6 +198,90 @@ class Finding:
         return (f"{time.strftime('%H:%M:%S', time.localtime(self.ts))} "
                 f"{self.severity.upper():<6} {self.code} ipv{self.family} "
                 f"{self.src} -> {self.dst}{cve} :: {self.title}{det}")
+
+
+# --------------------------------------------------------------------------
+# link-layer identity
+# --------------------------------------------------------------------------
+
+def norm_mac(mac: Optional[str]) -> Optional[str]:
+    """Lower-case colon-separated form, or None if it is not a MAC."""
+    if not mac:
+        return None
+    hexs = re.sub(r"[^0-9a-fA-F]", "", mac)
+    if len(hexs) != 12:
+        return None
+    hexs = hexs.lower()
+    return ":".join(hexs[i:i + 2] for i in range(0, 12, 2))
+
+
+def oui_of(mac: Optional[str]) -> Optional[str]:
+    """The 24-bit OUI as six hex digits, or None."""
+    m = norm_mac(mac)
+    return None if m is None else m[:8].replace(":", "")
+
+
+def is_local_mac(mac: Optional[str]) -> bool:
+    """True when the locally-administered bit is set, i.e. the address is
+    randomized or hand-assigned and its OUI means nothing."""
+    m = norm_mac(mac)
+    if m is None:
+        return False
+    return bool(int(m[:2], 16) & 0x02)
+
+
+def mac_from_eui64ish(value: str) -> Optional[str]:
+    """Recover a MAC from an identifier that embeds one.
+
+    Several vendors publish a MAC-derived serial in an SSDP header, in the
+    EUI-64 shape where FFFE is stuffed into the middle of the OUI/NIC split
+    (a Philips Hue bridge's hue-bridgeid is 001788FFFExxxxxx). Both the
+    16-digit EUI-64 form and the plain 12-digit form are accepted.
+    """
+    hexs = re.sub(r"[^0-9a-fA-F]", "", value or "")
+    if len(hexs) == 16 and hexs[6:10].lower() == "fffe":
+        hexs = hexs[:6] + hexs[10:]
+    if len(hexs) != 12:
+        return None
+    return norm_mac(hexs)
+
+
+class OUITable:
+    """Optional vendor lookup. Deliberately NOT bundled: shipping a vendor
+    table would be a maintenance treadmill and would go stale silently, so
+    the default is to report the raw OUI and say so. Point --oui at a
+    Wireshark `manuf` or IEEE `oui.txt` and names get resolved."""
+
+    def __init__(self, path: Optional[str] = None):
+        self.map: Dict[str, str] = {}
+        self.path = path
+        if path:
+            self.load(path)
+
+    def load(self, path: str) -> int:
+        n = 0
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Wireshark manuf: "00:17:88<TAB>Philips  Philips Lighting BV"
+                # IEEE oui.txt:    "00-17-88   (hex)\t\tPhilips Lighting BV"
+                m = re.match(r"^([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-]"
+                             r"[0-9A-Fa-f]{2})(?:/\d+)?\s+(?:\(hex\)\s+)?(.+)$",
+                             line)
+                if not m:
+                    continue
+                oui = m.group(1).replace("-", "").replace(":", "").lower()
+                name = m.group(2).strip().split("\t")[-1].strip()
+                if oui and name:
+                    self.map.setdefault(oui, name)
+                    n += 1
+        return n
+
+    def vendor(self, mac: Optional[str]) -> Optional[str]:
+        o = oui_of(mac)
+        return self.map.get(o) if o else None
 
 
 # --------------------------------------------------------------------------
@@ -398,6 +484,491 @@ def split_callbacks(value: str) -> List[str]:
 
 
 # --------------------------------------------------------------------------
+# census / fingerprinting
+# --------------------------------------------------------------------------
+#
+# This is an INVENTORY, not a detector. Earlier in the build, device-visibility
+# disclosure was deliberately rejected as a finding code: SSDP advertises
+# identity by design, so seeing it is not an anomaly. Nothing here emits a
+# finding. The census answers "what is on this network and what is it" for
+# troubleshooting and for spotting gear that does not belong.
+#
+# Every field records WHERE it came from, because the sources differ wildly in
+# trustworthiness: a friendlyName read out of a description document is the
+# device's own answer, while a vendor inferred from a SERVER token is a guess.
+# A census that hid that distinction would be worse than useless for the
+# "device that shouldn't be here" question.
+
+# The UDA header set. Anything outside it is a vendor extension, and vendor
+# extensions are where identity leaks (hue-bridgeid carries a Hue bridge's
+# MAC-derived serial; GWID.phoscon.de marks a deCONZ gateway). The module
+# does NOT carry a signature table for these -- it records them verbatim and
+# mines any MAC-shaped value. That keeps the census vendor-agnostic instead of
+# turning it into a signature treadmill that rots.
+UDA_HEADERS = frozenset("""
+host cache-control location nt nts server usn st man mx ext date opt
+bootid.upnp.org configid.upnp.org nextbootid.upnp.org searchport.upnp.org
+securelocation.upnp.org cpfn.upnp.org cpuuid.upnp.org tcpport.upnp.org
+user-agent content-length content-type connection al 01-nls
+""".split())
+
+# Description-document fields worth keeping, with the UDA's own byte limits.
+# Vendors routinely exceed them, so the cap here is generous but finite: a
+# device is not allowed to put a megabyte of text in its own name.
+DESC_FIELDS = {
+    "friendlyName": 64, "manufacturer": 64, "modelName": 32,
+    "modelNumber": 32, "modelDescription": 128, "serialNumber": 64,
+    "UDN": 128, "deviceType": 64, "UPC": 12, "manufacturerURL": 128,
+    "modelURL": 128, "presentationURL": 128,
+}
+DESC_CAP = 256                      # hard truncation, whatever the field
+UPNP_DESC_NS = "urn:schemas-upnp-org:device-1-0"
+MAX_STREAM_BUFFER = 64 * 1024       # per TCP stream, then give up
+
+# A description may use a namespace PREFIX (<u:root xmlns:u="...">), so the
+# document-complete check and the content gate must both tolerate one. A
+# literal "</root>" test leaves a prefixed document buffered forever and the
+# device silently never gets a name.
+_DESC_CLOSE_RE = re.compile(rb"</(?:[A-Za-z0-9_.-]+:)?(?:root|device)\s*>")
+_DESC_HINT_RE = re.compile(rb"<(?:[A-Za-z0-9_.-]+:)?friendlyName[\s>]")
+
+
+@dataclass
+class Provenanced:
+    """A value plus how it was learned. `source` is the wire evidence."""
+    value: str
+    source: str
+    ts: float = 0.0
+
+    def __str__(self):
+        return self.value
+
+
+@dataclass
+class DeviceRecord:
+    """One physical/logical device, merged across every message seen."""
+    key: str                                    # uuid when known, else address
+    uuid: Optional[str] = None
+    addresses: set = field(default_factory=set)
+    macs: set = field(default_factory=set)
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+    messages: int = 0
+    fields: Dict[str, Provenanced] = field(default_factory=dict)
+    device_types: set = field(default_factory=set)
+    service_types: set = field(default_factory=set)
+    vendor_headers: Dict[str, str] = field(default_factory=dict)
+    locations: set = field(default_factory=set)
+    description_seen: bool = False
+
+    # -- field merge ------------------------------------------------------
+    # Sources are ranked: the device's own description document outranks a
+    # token scraped from SERVER, which outranks anything inferred. A weaker
+    # source never overwrites a stronger one, so an opportunistic description
+    # harvest upgrades a record and later SSDP chatter cannot downgrade it.
+    SOURCE_RANK = {
+        "description": 40,          # the device's own description document
+        "vendor-header": 30,        # a vendor's own SSDP extension header
+        "oui": 25,                  # IEEE assignment for the frame's MAC
+        "server-header": 20,        # SERVER product token
+        "device-type": 15,          # the URN the device claims
+        "location-path": 10,        # description URL path shape
+        "inferred": 5,
+    }
+
+    def learn(self, name: str, value: str, source: str, ts: float):
+        value = (value or "").strip()
+        if not value:
+            return
+        if len(value) > DESC_CAP:
+            value = value[:DESC_CAP] + "...(truncated)"
+        cur = self.fields.get(name)
+        if cur is not None:
+            if self.SOURCE_RANK.get(source, 0) <= self.SOURCE_RANK.get(cur.source, 0):
+                return
+        self.fields[name] = Provenanced(value, source, ts)
+
+    def get(self, name: str, default=None):
+        p = self.fields.get(name)
+        return p.value if p else default
+
+    # -- presentation -----------------------------------------------------
+    @property
+    def name(self) -> str:
+        """Best available human label, never invented. Falls back through
+        progressively weaker identity until only the address is left."""
+        for k in ("friendlyName", "modelName", "modelDescription"):
+            v = self.get(k)
+            if v:
+                return v
+        dt = self.best_device_type()
+        if dt:
+            return f"<unnamed {dt}>"
+        return f"<unnamed {sorted(self.addresses)[0]}>" if self.addresses else "<unknown>"
+
+    def best_device_type(self) -> Optional[str]:
+        """Shortest specific device type, with the URN boilerplate stripped.
+        `upnp:rootdevice` is not a type -- every root device advertises it,
+        so it identifies nothing and is never reported as the type."""
+        cands = [t for t in self.device_types if "rootdevice" not in t.lower()]
+        if not cands:
+            return None
+        def short(t):
+            m = re.match(r"urn:[^:]+:device:([^:]+):?(\d*)", t)
+            return m.group(1) if m else t
+        return sorted({short(t) for t in cands}, key=len)[0]
+
+    def vendor(self, oui_table: "OUITable") -> Optional[Provenanced]:
+        """Vendor, preferring the description document's own claim, then an
+        OUI assignment, then a SERVER token."""
+        p = self.fields.get("manufacturer")
+        if p:
+            return p
+        for mac in sorted(self.macs):
+            if is_local_mac(mac):
+                continue            # randomized/assigned: the OUI means nothing
+            v = oui_table.vendor(mac)
+            if v:
+                return Provenanced(v, f"oui:{oui_of(mac)}", self.last_seen)
+            o = oui_of(mac)
+            if o:
+                return Provenanced(f"OUI {o[:2]}:{o[2:4]}:{o[4:6]} (unresolved)",
+                                   "oui", self.last_seen)
+        return self.fields.get("serverProduct")
+
+    def as_dict(self, oui_table: "OUITable"):
+        ven = self.vendor(oui_table)
+        return {
+            "key": self.key,
+            "uuid": self.uuid,
+            "name": self.name,
+            "named": "friendlyName" in self.fields,
+            "device_type": self.best_device_type(),
+            "vendor": ven.value if ven else None,
+            "vendor_source": ven.source if ven else None,
+            "addresses": sorted(self.addresses),
+            "macs": sorted(self.macs),
+            "locations": sorted(self.locations),
+            "device_types": sorted(self.device_types),
+            "service_types": sorted(self.service_types),
+            "vendor_headers": dict(sorted(self.vendor_headers.items())),
+            "description_seen": self.description_seen,
+            "messages": self.messages,
+            "first_seen": round(self.first_seen, 3),
+            "last_seen": round(self.last_seen, 3),
+            "fields": {k: {"value": v.value, "source": v.source}
+                       for k, v in sorted(self.fields.items())},
+        }
+
+
+class Census:
+    """Passive device census. Observes only; never fetches anything."""
+
+    _UUID_RE = re.compile(r"uuid:((?:(?!::)[0-9A-Za-z._:-])+)", re.I)
+    # SERVER is "OS/ver UPnP/ver product/ver" per UDA, but vendors use commas,
+    # omit fields and reorder, so parse tolerantly rather than by position.
+    _TOKEN_RE = re.compile(r"([A-Za-z][A-Za-z0-9 ._+-]*?)/([0-9][0-9A-Za-z._-]*)")
+
+    def __init__(self, oui_table: Optional["OUITable"] = None):
+        self.oui = oui_table or OUITable()
+        self.devices: Dict[str, DeviceRecord] = {}
+        self._by_addr: Dict[str, str] = {}          # address -> key
+        self._by_location: Dict[Tuple[str, int], str] = {}
+        self._streams: Dict[Tuple, bytes] = {}
+        self.stats = defaultdict(int)
+
+    # -- record lookup ----------------------------------------------------
+    def _record(self, uuid: Optional[str], addr: str, ts: float) -> DeviceRecord:
+        key = f"uuid:{uuid}" if uuid else f"addr:{canon(addr)}"
+        rec = self.devices.get(key)
+        if rec is None and uuid:
+            # the device was first seen without a USN: adopt the address record
+            old = self._by_addr.get(canon(addr))
+            if old and old.startswith("addr:") and old in self.devices:
+                rec = self.devices.pop(old)
+                rec.key, rec.uuid = key, uuid
+                self.devices[key] = rec
+                for a in rec.addresses:
+                    self._by_addr[a] = key
+        if rec is None:
+            rec = DeviceRecord(key=key, uuid=uuid, first_seen=ts)
+            self.devices[key] = rec
+        rec.last_seen = max(rec.last_seen, ts)
+        rec.first_seen = min(rec.first_seen or ts, ts)
+        rec.addresses.add(canon(addr))
+        self._by_addr[canon(addr)] = key
+        return rec
+
+    @staticmethod
+    def _uuid_from(usn: str) -> Optional[str]:
+        m = Census._UUID_RE.search(usn or "")
+        return m.group(1) if m else None
+
+    # -- SSDP side --------------------------------------------------------
+    def observe_ssdp(self, pkt: Packet, msg: "HTTPUMessage"):
+        """Census every advert and search RESPONSE. M-SEARCH is skipped: a
+        search tells you a control point exists, not what any device is, and
+        counting searches as devices would populate the census with phantoms."""
+        if msg.kind == "request" and msg.method != "NOTIFY":
+            return
+        nts = (msg.get("nts") or "").strip().lower()
+        if nts == "ssdp:byebye":
+            self.stats["byebye"] += 1           # departure, carries no identity
+            return
+
+        usn = msg.get("usn") or ""
+        uuid = self._uuid_from(usn)
+        rec = self._record(uuid, pkt.src, pkt.ts)
+        rec.messages += 1
+        self.stats["ssdp_observed"] += 1
+
+        if pkt.src_mac and not pkt.src_mac.startswith("01:00:5e") \
+                and not pkt.src_mac.startswith("33:33"):
+            rec.macs.add(pkt.src_mac)
+
+        # what the device says it is
+        target = (msg.get("nt") if msg.kind == "request" else msg.get("st")) or ""
+        for t in (target.strip(), usn.split("::", 1)[1] if "::" in usn else ""):
+            t = t.strip()
+            if not t or t.lower() in ("upnp:rootdevice", "ssdp:all"):
+                if t:
+                    rec.device_types.add(t)
+                continue
+            if ":service:" in t:
+                rec.service_types.add(t)
+            else:
+                rec.device_types.add(t)
+            if ":device:" in t:
+                rec.learn("deviceTypeClaimed", t, "device-type", pkt.ts)
+
+        loc = msg.get("location")
+        if loc:
+            rec.locations.add(loc)
+            host, port, _ = url_host_port(loc)
+            if host and port:
+                self._by_location[(canon(host), port)] = rec.key
+            path = loc.split("/", 3)[-1] if loc.count("/") >= 3 else ""
+            if path:
+                rec.learn("descriptionPath", "/" + path, "location-path", pkt.ts)
+
+        server = msg.get("server")
+        if server:
+            rec.learn("serverHeader", server, "server-header", pkt.ts)
+            self._parse_server(rec, server, pkt.ts)
+
+        # vendor extension headers: recorded verbatim, then mined for a MAC
+        for name, values in msg.headers.items():
+            if name in UDA_HEADERS:
+                continue
+            val = values[0]
+            rec.vendor_headers[name] = val[:DESC_CAP]
+            self.stats["vendor_headers"] += 1
+            mac = mac_from_eui64ish(val)
+            if mac and not is_local_mac(mac):
+                rec.macs.add(mac)
+                rec.learn("macFromHeader", mac, "vendor-header", pkt.ts)
+
+    def _parse_server(self, rec: DeviceRecord, server: str, ts: float):
+        """Pull OS and product tokens out of SERVER. UPnP/x.y is the protocol
+        version, not a product, so it is recorded separately and never
+        mistaken for the device's identity."""
+        toks = self._TOKEN_RE.findall(server)
+        products = []
+        for name, ver in toks:
+            name = name.strip()
+            if name.lower() == "upnp":
+                rec.learn("upnpVersion", ver, "server-header", ts)
+                continue
+            products.append((name, ver))
+        if products:
+            # UDA order is OS first, product last; the product is the
+            # interesting one for identification.
+            rec.learn("osToken", "/".join(products[0]), "server-header", ts)
+            rec.learn("serverProduct", "/".join(products[-1]), "server-header", ts)
+
+    # -- description side (opportunistic, strictly passive) ---------------
+    def observe_http(self, pkt: Packet):
+        """Harvest a UPnP description document that happens to cross the tap.
+
+        This NEVER fetches anything. A control point in the house fetches the
+        description as a matter of course, and when that response passes the
+        tap the device's own friendlyName is in it, in cleartext. That is the
+        only passive route to a real device name: SSDP itself has no name
+        field, so a module that refuses to read this has no names at all.
+
+        Because a description can span TCP segments, payloads are buffered
+        per stream until the document closes.
+        """
+        data = pkt.payload
+        if not data:
+            return
+        skey = (canon(pkt.src), pkt.sport, canon(pkt.dst), pkt.dport)
+        buf = self._streams.get(skey, b"") + data
+        if len(buf) > MAX_STREAM_BUFFER:
+            self._streams.pop(skey, None)
+            self.stats["stream_overflow"] += 1
+            return
+
+        if UPNP_DESC_NS.encode() not in buf and not _DESC_HINT_RE.search(buf):
+            # not a description document: only keep a buffer that still could be
+            if buf.lstrip()[:5].upper().startswith(b"HTTP/") and len(buf) < MAX_STREAM_BUFFER:
+                self._streams[skey] = buf
+            else:
+                self._streams.pop(skey, None)
+            return
+
+        if not _DESC_CLOSE_RE.search(buf):
+            self._streams[skey] = buf           # still arriving
+            return
+        self._streams.pop(skey, None)
+
+        text = buf.decode("utf-8", "replace")
+        fields = self._parse_description(text)
+        if not fields:
+            return
+        self.stats["descriptions"] += 1
+
+        udn = fields.get("UDN", "")
+        uuid = self._uuid_from(udn)
+        # the description comes FROM the device, so the packet source is it
+        rec = self._record(uuid, pkt.src, pkt.ts)
+        if not rec.uuid and uuid:
+            rec.uuid = uuid
+        rec.description_seen = True
+        rec.messages += 1
+        if pkt.src_mac:
+            rec.macs.add(pkt.src_mac)
+        for k, v in fields.items():
+            rec.learn(k, v, "description", pkt.ts)
+        if "deviceType" in fields:
+            rec.device_types.add(fields["deviceType"])
+
+    @staticmethod
+    def _parse_description(text: str) -> Dict[str, str]:
+        """Pull the identity fields out of a description document.
+
+        Uses a real XML parser when the document is well formed, and falls
+        back to element-wise extraction when it is not -- embedded devices
+        ship malformed XML routinely, and a truncated capture is malformed by
+        definition. Namespaces are stripped because vendors vary the prefix.
+        """
+        out: Dict[str, str] = {}
+        body = text
+        i = body.find("<?xml")
+        if i == -1:
+            i = body.find("<root")
+        if i > 0:
+            body = body[i:]
+
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(body)
+            dev = None
+            for el in root.iter():
+                if el.tag.split("}")[-1] == "device":
+                    dev = el
+                    break
+            scope = dev if dev is not None else root
+            for el in scope.iter():
+                tag = el.tag.split("}")[-1]
+                if tag in DESC_FIELDS and el.text and tag not in out:
+                    out[tag] = el.text.strip()[:DESC_CAP]
+            if out:
+                return out
+        except Exception:
+            pass
+
+        for tag in DESC_FIELDS:
+            m = re.search(rf"<(?:\w+:)?{tag}\s*>(.*?)</(?:\w+:)?{tag}\s*>",
+                          body, re.S | re.I)
+            if m:
+                v = re.sub(r"\s+", " ", m.group(1)).strip()
+                if v:
+                    out[tag] = v[:DESC_CAP]
+        return out
+
+    # -- reporting --------------------------------------------------------
+    def records(self) -> List[DeviceRecord]:
+        return sorted(self.devices.values(),
+                      key=lambda r: (not r.description_seen, r.name.lower()))
+
+    def mark_known(self, path: str) -> int:
+        """Load a baseline of expected devices. One identifier per line --
+        a uuid, a MAC or an IP; '#' comments allowed. Devices outside it are
+        reported as NEW, which is the whole point of a census run against a
+        network you are auditing."""
+        self.known: set = getattr(self, "known", set())
+        with open(path) as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    self.known.add(line.lower())
+        return len(self.known)
+
+    def is_new(self, rec: DeviceRecord) -> Optional[bool]:
+        known = getattr(self, "known", None)
+        if known is None:
+            return None                     # no baseline supplied
+        ids = {(rec.uuid or "").lower()} | {m.lower() for m in rec.macs} \
+            | {a.lower() for a in rec.addresses}
+        ids.discard("")
+        return not (ids & known)
+
+    def report(self, as_json=False) -> str:
+        recs = self.records()
+        if as_json:
+            return json.dumps({
+                "module": MODULE, "version": __version__,
+                "census": {"devices": len(recs), "stats": dict(self.stats),
+                           "oui_table": self.oui.path or None},
+                "devices": [dict(r.as_dict(self.oui),
+                                 **({"new": self.is_new(r)}
+                                    if self.is_new(r) is not None else {}))
+                            for r in recs],
+            }, indent=2)
+
+        if not recs:
+            return "no devices observed"
+        lines = [f"{len(recs)} device(s) observed"
+                 f"{'' if self.oui.path else '   (no OUI table: --oui resolves vendor names)'}",
+                 ""]
+        for r in recs:
+            ven = r.vendor(self.oui)
+            new = self.is_new(r)
+            tag = "" if new is None else ("  [NEW]" if new else "  [known]")
+            lines.append(f"{r.name}{tag}")
+            nm = r.fields.get("friendlyName")
+            lines.append(f"    name       {nm.value} ({nm.source})" if nm else
+                         "    name       -- (no description document seen; "
+                         "SSDP carries no name field)")
+            if ven:
+                lines.append(f"    vendor     {ven.value} ({ven.source})")
+            dt = r.best_device_type()
+            if dt:
+                lines.append(f"    type       {dt}")
+            for k in ("modelName", "modelNumber", "serialNumber"):
+                p = r.fields.get(k)
+                if p:
+                    lines.append(f"    {k:<10} {p.value} ({p.source})")
+            if r.addresses:
+                lines.append(f"    address    {', '.join(sorted(r.addresses))}")
+            if r.macs:
+                lines.append(f"    mac        {', '.join(sorted(r.macs))}")
+            sp = r.fields.get("serverProduct")
+            if sp:
+                lines.append(f"    stack      {sp.value} ({sp.source})")
+            if r.uuid:
+                lines.append(f"    uuid       {r.uuid}")
+            if r.service_types:
+                lines.append(f"    services   {len(r.service_types)}")
+            for h, v in sorted(r.vendor_headers.items()):
+                lines.append(f"    +{h}  {v}")
+            lines.append(f"    seen       {r.messages} message(s)")
+            lines.append("")
+        return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
 # detection engine
 # --------------------------------------------------------------------------
 
@@ -416,6 +987,8 @@ class Config:
     max_timeout_seconds: int = 1800   # GENA TIMEOUT ceiling
     max_message_bytes: int = MAX_SANE
     emit_low: bool = True
+    census: bool = True              # inventory is always cheap to maintain
+    oui_path: Optional[str] = None
 
 
 class SSDPWatch:
@@ -424,6 +997,8 @@ class SSDPWatch:
         self.scope = Scope(self.cfg.local_prefixes)
         self.findings: List[Finding] = []
         self._seen: set = set()
+        self.census = (Census(OUITable(self.cfg.oui_path))
+                       if self.cfg.census else None)
 
         # per-exchange state (no baseline learning anywhere)
         self._msearch: Dict[Tuple[str, int], Deque[float]] = defaultdict(deque)
@@ -476,6 +1051,8 @@ class SSDPWatch:
                            head=pkt.payload[:24].decode("latin-1", "replace"))
             return
         self.stats["ssdp_messages"] += 1
+        if self.census is not None:
+            self.census.observe_ssdp(pkt, msg)
         if msg.errors:
             self._emit(pkt, SSDP_022, reason=",".join(sorted(set(msg.errors))))
 
@@ -623,6 +1200,11 @@ class SSDPWatch:
             if msg and (msg.has("soapaction") or b"urn:schemas-upnp-org:service"
                         in data[:2048]):
                 self._igd_rules(pkt, msg)
+        elif self.census is not None:
+            # An HTTP response, or the continuation of one, may be a device
+            # description crossing the tap. The census decides; nothing here
+            # ever requests it. No finding is produced from this path.
+            self.census.observe_http(pkt)
 
     def _gena_rules(self, pkt, msg):
         self.stats["gena"] += 1
@@ -739,6 +1321,11 @@ class SSDPWatch:
             q.popleft()
 
     # -- reporting --------------------------------------------------------
+    def census_report(self, as_json=False) -> str:
+        if self.census is None:
+            return "census disabled"
+        return self.census.report(as_json=as_json)
+
     def report(self, as_json=False) -> str:
         if as_json:
             return json.dumps({
@@ -773,25 +1360,48 @@ class SSDPWatch:
 # A home link carries little enough TCP for this to be the cheap trade.
 BPF = "(udp port 1900) or tcp"
 
-# GENA and SOAP control requests; the only TCP ssdpwatch has any use for.
+# GENA and SOAP control requests, plus the description fetch. The HTTP
+# RESPONSE token is here because a device description crossing the tap is the
+# only passive source of a real device name -- SSDP has no name field at all.
 UPNP_TCP_METHODS = (b"SUBSCRIBE ", b"UNSUBSCRIBE ", b"POST ", b"M-POST ")
+HTTP_RESPONSE_TOKEN = b"HTTP/"
 
 
 def _wanted(p) -> bool:
     """Precise second-stage filter. Dual-stack by construction: it reads the
-    decoded payload, never a hard-coded header offset."""
+    decoded payload, never a hard-coded header offset.
+
+    TCP is admitted on a method token, an HTTP response token, or -- for a
+    description that spans segments -- a continuation carrying description
+    XML. Ordinary TLS fails all three, because a TLS record starts with 0x16
+    and never with an HTTP token.
+    """
     from scapy.layers.inet import TCP, UDP
     if UDP in p:
         return p[UDP].sport == SSDP_PORT or p[UDP].dport == SSDP_PORT
     if TCP in p:
-        head = bytes(p[TCP].payload)[:16].upper()
-        return any(head.startswith(m) for m in UPNP_TCP_METHODS)
+        pay = bytes(p[TCP].payload)
+        if not pay:
+            return False
+        head = pay[:16].upper()
+        if any(head.startswith(m) for m in UPNP_TCP_METHODS):
+            return True
+        if head.startswith(HTTP_RESPONSE_TOKEN) or head.startswith(b"GET "):
+            return True
+        # mid-document continuation of a description already in flight
+        return bool(UPNP_DESC_NS.encode() in pay[:2048]
+                    or _DESC_HINT_RE.search(pay[:2048])
+                    or _DESC_CLOSE_RE.search(pay[-512:]))
     return False
 
 
 def _scapy_to_packet(p) -> Optional[Packet]:
     from scapy.layers.inet import IP, TCP, UDP
     from scapy.layers.inet6 import IPv6
+    from scapy.layers.l2 import Ether
+    smac = dmac = None
+    if Ether in p:
+        smac, dmac = norm_mac(p[Ether].src), norm_mac(p[Ether].dst)
     if IP in p:
         src, dst, ttl = p[IP].src, p[IP].dst, p[IP].ttl
     elif IPv6 in p:
@@ -809,7 +1419,8 @@ def _scapy_to_packet(p) -> Optional[Packet]:
         return None
     return Packet(ts=float(p.time), proto=proto, src=src, dst=dst,
                   sport=int(l4.sport), dport=int(l4.dport),
-                  payload=payload, ttl=int(ttl))
+                  payload=payload, ttl=int(ttl),
+                  src_mac=smac, dst_mac=dmac)
 
 
 def run_live(iface: str, engine: SSDPWatch, count: int = 0, timeout=None,
@@ -872,6 +1483,16 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--count", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=None)
+    ap.add_argument("--census", action="store_true",
+                    help="report the device inventory instead of findings")
+    ap.add_argument("--both", action="store_true",
+                    help="report findings and then the inventory")
+    ap.add_argument("--oui", metavar="FILE",
+                    help="IEEE oui.txt or Wireshark manuf, to resolve vendor names")
+    ap.add_argument("--known", metavar="FILE",
+                    help="baseline of expected uuids/MACs/IPs; others report as NEW")
+    ap.add_argument("--no-census", action="store_true",
+                    help="disable inventory collection entirely")
     ap.add_argument("--bpf", help="override the capture filter")
     ap.add_argument("--no-low", action="store_true", help="suppress low severity")
     ap.add_argument("--codes", action="store_true", help="print finding registry")
@@ -890,8 +1511,13 @@ def main(argv=None):
         from ssdpwatch_selftest import run_selftest
         return run_selftest()
 
-    cfg = Config(local_prefixes=tuple(args.local), emit_low=not args.no_low)
+    cfg = Config(local_prefixes=tuple(args.local), emit_low=not args.no_low,
+                 census=not args.no_census, oui_path=args.oui)
     engine = SSDPWatch(cfg)
+    if args.known:
+        if engine.census is None:
+            ap.error("--known needs the census enabled")
+        engine.census.mark_known(args.known)
 
     if args.pcap:
         run_pcap(args.pcap, engine)
@@ -901,7 +1527,14 @@ def main(argv=None):
     else:
         ap.error("need -i/--iface or -r/--pcap")
 
-    print(engine.report(as_json=args.json))
+    if args.census and not args.both:
+        print(engine.census_report(as_json=args.json))
+    elif args.both:
+        print(engine.report(as_json=args.json))
+        print()
+        print(engine.census_report(as_json=args.json))
+    else:
+        print(engine.report(as_json=args.json))
     return 0
 
 

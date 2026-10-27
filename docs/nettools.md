@@ -658,7 +658,21 @@ RFC1918 / ULA / link-local / loopback plus the capture interface's own subnets; 
 (`100.64.0.0/10`) is deliberately treated as off-link (carrier space upstream of the CPE). Engine
 vendored at `python/ssdpwatch.py`.
 
-- Endpoint: `GET /api/net/ssdp-watch` (`?interface=<nic>&seconds=5..50`)
+**v2 — passive device census / fingerprint (no new code, no CVE).** Alongside the findings, v2
+returns a `devices` inventory: one record per UPnP/DLNA device seen advertising (`NOTIFY`) or
+answering (an M-SEARCH **response**; an M-SEARCH *query* is a control point, not a device, so it is
+not inventoried). Each record carries the device's **vendor / model / friendlyName** parsed from the
+`SERVER` token and, where the UPnP **device description** XML crossed the wire, from its
+`friendlyName` / `manufacturer` / `modelName` — read only if seen, **never fetched** — plus the
+**MAC OUI** vendor when a MAC is recoverable. No OUI registry file is bundled, so an OUI vendor is
+reported raw (unresolved) rather than guessed, and no names are invented. The engine's `_wanted()`
+packet filter now also admits HTTP responses and description-XML continuations so a description that
+spans TCP segments is reassembled (the BPF is unchanged). This is wire-side UPnP/DLNA device ID,
+the same treatment as the Matter / Thread / Z-Wave census in DNS Doctor and the LoRaWAN gateway /
+device fingerprint in Modbus & LoRaWAN Watch. The card renders it as a Device census table.
+
+- Endpoint: `GET /api/net/ssdp-watch` (`?interface=<nic>&seconds=5..50`) — returns `findings` and
+  the v2 `devices` census
 
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or
