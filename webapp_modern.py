@@ -18079,6 +18079,56 @@ def scan_single_host():
         logger.error(f"Error scanning single host: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/scan/range', methods=['POST'])
+def scan_range():
+    """Fast host-discovery sweep over an IP range (Hosts tab "IP Range Scan").
+
+    A ping/ARP sweep (``nmap -sn``) that lists the live hosts with DNS hostname,
+    MAC + vendor (on the local segment), optional NetBIOS name and response
+    time. No port scanning -- the per-host "Scan ports" action reuses
+    ``/api/scan/deep``. The range is CIDR (``192.168.1.0/24``) or start-end
+    (``192.168.1.1-192.168.1.254``) and is bounded server-side.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        if not data:
+            data = {**(request.args.to_dict() or {}), **(request.form.to_dict() or {})}
+
+        target = (data.get('range') or data.get('target') or '').strip()
+        do_netbios = str(data.get('netbios', '')).lower() in ('1', 'true', 'yes', 'on')
+        if not target:
+            return jsonify({'status': 'error', 'message': 'IP range is required'}), 400
+
+        logger.info(f"🧭 Range scan request: range={target!r} netbios={do_netbios}")
+
+        from actions.scanning import NetworkScanner
+        scanner = NetworkScanner(shared_data)
+        result = scanner.discover_range(target, do_netbios=do_netbios)
+
+        if not result.get('success'):
+            return jsonify({'status': 'error',
+                            'message': result.get('message', 'Range scan failed'),
+                            'hosts': [], 'count': 0}), 400
+
+        # New hosts were folded into the DB; nudge the Discovered Hosts table.
+        try:
+            socketio.emit('network_update', {'refresh': True})
+        except Exception:
+            pass
+
+        return jsonify({
+            'status': 'success',
+            'hosts': result.get('hosts', []),
+            'count': result.get('count', 0),
+            'scanned': result.get('scanned', 0),
+            'privileged': result.get('privileged', False),
+            'netbios': do_netbios,
+            'message': result.get('message', ''),
+        })
+    except Exception as e:
+        logger.error(f"Error in range scan: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/scan/deep', methods=['POST'])
 def deep_scan_host():
     """Perform a deep scan on a single host using TCP connect scan (-sT).
