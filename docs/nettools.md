@@ -744,6 +744,37 @@ verdict:
      use are **inventoried (INFO), never flagged**.
    This is posture detection, not a CVE probe — MAC Watch carries no CVEs. Off by
    default so the background / e-Paper path stays fast; enable it per scan.
+7. **Wi-Fi HaLow (802.11ah) radio-presence census** — a **capture-free** census
+   of **bridged HaLow radios**, folded into every scan (it reasons over the same
+   neighbour-table / NDP data as the rest of the watcher). HaLow has no backhaul
+   protocol of its own — it is native 802.11 bridged or routed onto Ethernet — so
+   the only wire signal is *radio identity*, and this is a **presence census, not
+   HaLow traffic visibility** (a radio in router/NAT mode is invisible and its
+   absence is never treated as evidence). Five codes, all INFO except the posture
+   note (**no CVEs**):
+   - **HALOW-01** — the **Morse Micro OUI `0C:BF:74`** (the one HaLow silicon with
+     a dedicated OUI) seen as an on-segment L2 binding — a bridged HaLow radio.
+   - **HALOW-02** — the same radio recovered from an **EUI-64 IPv6 identifier**
+     (`0ebf:74ff:fe…`, the U/L-bit-flipped OUI), which survives routing and so is
+     off-segment-capable where IPv4 NAT would hide the client entirely.
+   - **HALOW-03** — **host pairing**: a Morse MAC whose NIC suffix equals a
+     non-Morse vendor MAC's suffix — the MM6108 blank-OTP fallback where the radio
+     MAC is `0C:BF:74` + the host `eth0`'s last three octets, i.e. radio and host
+     are one box.
+   - **HALOW-04** — a **derived VIF** (locally-administered first octet + Morse
+     `BF:74`), only ever reported when an exact-OUI sibling on the same NIC suffix
+     corroborates it (it never fires alone — and this same gate is why a
+     legitimate MM6108 VIF is not mis-reported as a disguised vendor OUI).
+   - **HALOW-05** — **posture (LOW):** a HaLow radio not covered by the HaLow
+     allowlist (`halow_allow` in the store — accepts full MACs or bare 3-octet NIC
+     suffixes; **empty by default**, so every radio flags until an operator lists
+     it — nothing trusted implicitly). A visibility note, not an alarm.
+
+   This is the on-the-wire, **radio-free** device-ID sibling of the Thread /
+   Matter / Z-Wave census ([DNS Doctor](#dns-doctor)) and the LoRaWAN fingerprint
+   ([Modbus & LoRaWAN Watch](#modbus--lorawan-watch)). The result groups the raw
+   per-code findings into one device per NIC suffix, showing the legs it was seen
+   through (`v4-L2`, `v6-L2`, `v6-routed`).
 
 Every MAC is classified as **Vendor** (universal/burned-in), **FHRP virtual**
 (HSRP/VRRP/GLBP redundancy), **Spoofed**

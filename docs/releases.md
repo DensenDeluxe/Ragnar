@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-10-28
+
+#### [#1025](https://github.com/PierreGode/Ragnar/pull/1025) — feat(net): MAC Watch v5 — Wi-Fi HaLow (802.11ah) radio-presence census
+*branch `feature/mac-watch-v5`*
+
+- **MAC Watch** (`do_mac_watch`, L2) gains a **capture-free Wi-Fi HaLow (802.11ah) radio-presence census**, folded into every scan. HaLow has no backhaul of its own — it is native 802.11 bridged or routed onto Ethernet — so the only wire signal is *radio identity*, and MAC Watch reads it off the neighbour-table / NDP data it already collects. This is the on-the-wire, **radio-free** device-ID sibling of the Thread / Matter / Z-Wave census in DNS Doctor and the LoRaWAN fingerprint in Modbus & LoRaWAN Watch.
+- **Five codes, all INFO except a LOW posture note — no CVEs** (MAC Watch carries none): **HALOW-01** a Morse Micro OUI `0C:BF:74` radio on-segment; **HALOW-02** the same radio recovered from an **EUI-64 IPv6 identifier** (`0ebf:74ff:fe…`) that survives routing; **HALOW-03** a radio paired to its host NIC by shared suffix (the MM6108 blank-OTP fallback MAC); **HALOW-04** a corroborated derived VIF (never fires alone); **HALOW-05** a radio not in the HaLow allowlist (`halow_allow`, empty by default — nothing trusted implicitly).
+- **Presence census of bridged clients only:** a router/NAT-mode radio is invisible and its absence is never inferred. Morse is deliberately *not* added to the vendor-OUI seed, so a legitimate derived VIF is never mis-reported as a disguised vendor OUI. The verdict ladder is unchanged — the census is visibility, not an alarm.
+- **Diagnostics UI:** the MAC Watch card renders a **HaLow radios** table (Radio · Seen via · Paired host · IP(s) · Allowed) with per-radio legs (`v4-L2` / `v6-L2` / `v6-routed`), plus summary chips; `ragnar_modern.js` cache-bust bumped.
+- **Self-test:** the `mac` suite adds **8 HaLow scenarios** (each code, the allowlist suppression, the uncorroborated-VIF guard and a no-radio false-positive guard) — 25 → **33 scenarios**, all green; aggregate `do_routing_selftest` stays **60 suites**. CVE index unchanged (**418 named / 355 detected**).
+- **Docs:** [nettools.md › MAC Watch](nettools.md#mac-watch) (HaLow census subsection).
+
 ### 2026-10-27
 
 #### [#1022](https://github.com/PierreGode/Ragnar/pull/1022) — feat(net): SSDP / UPnP Watch v2 — passive device census / fingerprint

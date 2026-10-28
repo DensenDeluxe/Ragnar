@@ -1728,6 +1728,103 @@ def _fmt_ago(seconds):
     return f'{seconds // 86400}d ago'
 
 
+# --------------------------------------------------------------------------
+# Wi-Fi HaLow (802.11ah) wire-presence census (MAC Watch v5).
+#
+# HaLow has no backhaul protocol of its own — it is native 802.11 bridged or
+# routed onto Ethernet — so the only thing a wired tap can see is *radio
+# identity* carried in MAC addresses and IPv6 EUI-64 interface identifiers. This
+# is a PRESENCE CENSUS of BRIDGED HaLow clients only, not HaLow traffic
+# visibility: a radio in router/NAT mode leaks nothing and its absence is never
+# treated as evidence. It is capture-free — it reads the same neighbour-table /
+# arp-scan / NDP data the rest of this watcher already collects — the on-wire
+# radio-ID-without-a-radio sibling of the Thread/Matter/Z-Wave census (DNS
+# Doctor) and the LoRaWAN fingerprint (Modbus & LoRaWAN Watch).
+#
+# Morse Micro holds MA-L OUI 0C:BF:74 (the only HaLow silicon with a dedicated
+# OUI); MM6108 modules with blank OTP fall back to 0C:BF:74 + their host eth0's
+# last three octets, so a radio pairs to its host's wired MAC. The EUI-64 form
+# flips the U/L bit (0x0C ^ 0x02 = 0x0E), giving the IID 0ebf:74ff:fe + suffix.
+# Five codes HALOW-01..05 (INFO census/fingerprint, HALOW-05 LOW posture); no
+# CVEs. Deliberately NOT added to the vendor-OUI seed: seeding Morse would make a
+# legitimate derived VIF read as a spoofed_vendor_oui, the exact false positive
+# this tier is careful to avoid.
+_HALOW_MORSE_OUI = '0cbf74'          # Morse Micro MA-L OUI, 6 lowercase hex
+_HALOW_MORSE_MID = (0xbf, 0x74)      # OUI bytes 1-2 — survive a VIF first-octet rewrite
+_HALOW_VENDOR = 'Morse Micro'
+
+
+def _mac_suffix(mac):
+    """Last three octets (the NIC-specific half) as 6 lowercase hex chars, or None."""
+    m = _mac_norm(mac)
+    return m.replace(':', '')[6:] if m else None
+
+
+def _is_halow_morse(mac):
+    """Exact Morse Micro OUI 0C:BF:74 — the HaLow radio signal. Strict by design
+    (HALOW-01..03 require the real OUI, not a lookalike)."""
+    m = _mac_norm(mac)
+    return bool(m) and m.replace(':', '')[:6] == _HALOW_MORSE_OUI
+
+
+def _is_halow_vif_shape(mac):
+    """The MM6108 derived-VIF shape: locally-administered first octet + BF:74 in
+    bytes 1-2. SHAPE ONLY — a random LAA address carries BF:74 there about once in
+    65536, so HALOW-04 additionally requires a corroborating exact-OUI sibling on
+    the same NIC suffix and never fires on this alone."""
+    m = _mac_norm(mac)
+    if not m:
+        return False
+    h = m.replace(':', '')
+    b0 = int(h[0:2], 16)
+    if not (b0 & 0x02):              # universally administered -> not a VIF
+        return False
+    if h[:6] == _HALOW_MORSE_OUI:    # that is the real OUI (HALOW-01), not a VIF
+        return False
+    return (int(h[2:4], 16), int(h[4:6], 16)) == _HALOW_MORSE_MID
+
+
+def _halow_mac_from_ipv6(ip6):
+    """Recover a Morse MAC from an EUI-64 IPv6 interface identifier (0ebf:74ff:fe…),
+    or None. Reuses the shared EUI-64 decoder, which checks the ff:fe marker and
+    flips the U/L bit back. Privacy / RFC 7217 addresses simply don't decode — that
+    is expected and never reported as a missing signal."""
+    emb = _eui64_embedded_mac(ip6)
+    return emb if emb and _is_halow_morse(emb) else None
+
+
+def _halow_parse_allow(spec):
+    """Normalise the HaLow allowlist (a list, or a comma/semicolon string, of full
+    MACs or bare 3-octet NIC suffixes) to a set of lowercase-hex tokens of length
+    12 or 6. An empty/absent value yields an empty set — a valid, meaningful state
+    (every radio then raises HALOW-05 until an operator lists it)."""
+    if spec is None:
+        items = ()
+    elif isinstance(spec, str):
+        items = spec.replace(';', ',').split(',')
+    else:
+        items = spec
+    out = set()
+    for raw in items:
+        if raw is None:
+            continue
+        h = re.sub(r'[^0-9a-fA-F]', '', str(raw)).lower()
+        if len(h) in (6, 12):
+            out.add(h)
+    return out
+
+
+def _halow_allow_covers(allow, mac):
+    """Is this radio approved? A full-MAC entry matches exactly; a 3-octet NIC-suffix
+    entry matches any MAC sharing those last three octets — which is what lets one
+    entry cover a radio's base MAC, its EUI-64 identity and its LA-bit VIFs at once."""
+    m = _mac_norm(mac)
+    if not m:
+        return False
+    h = m.replace(':', '')
+    return h in allow or h[6:] in allow
+
+
 def do_mac_watch_reset():
     """Clear the MAC-watch history (first/last-seen, per-IP history, events)."""
     with _mac_watch_lock:
@@ -1747,7 +1844,12 @@ def do_mac_watch(scan=True, interface=None, l2sec=False, l2sec_seconds=_L2SEC_CA
     l2sec=True adds a short passive sniff of MACsec (802.1AE), 802.1X-EAPOL and
     MKA — the one L2 identity plane the neighbour table never sees — folding
     replay / spoofed-secure-channel / cipher-downgrade / 802.1X-DoS signals into
-    the verdict. Off by default so the background/e-Paper path stays fast."""
+    the verdict. Off by default so the background/e-Paper path stays fast.
+
+    A capture-free Wi-Fi HaLow (802.11ah) radio-presence census (v5) rides the
+    same neighbour-table / NDP data: Morse Micro OUI 0C:BF:74 on the wire and its
+    EUI-64 IPv6 identifier identify bridged HaLow radios with no radio of our own
+    (HALOW-01..05, INFO census except an allowlist posture at LOW)."""
     now = time.time()
     gw = _default_gateway()
     gw_mac = _neigh_mac(gw) if gw else None
@@ -2011,6 +2113,138 @@ def do_mac_watch(scan=True, interface=None, l2sec=False, l2sec_seconds=_L2SEC_CA
         'mka': len([f for f in l2sec_findings if f['code'].startswith('MKA-')]),
     }
 
+    # (9) Wi-Fi HaLow (802.11ah) radio-presence census. Capture-free: it reasons
+    # over the MACs and IPv6 addresses already collected above (neighbour table +
+    # arp-scan + NDP cache), so it sees bridged HaLow clients that reached the
+    # cache — a router/NAT-mode radio leaks nothing and is never inferred. Morse
+    # Micro OUI 0C:BF:74 on the wire (HALOW-01), its EUI-64 IPv6 identifier which
+    # survives routing (HALOW-02), host pairing by shared NIC suffix (HALOW-03),
+    # corroborated derived VIFs (HALOW-04) and an allowlist posture (HALOW-05).
+    with _mac_watch_lock:
+        halow_allow = _halow_parse_allow(_mac_watch_load().get('halow_allow') or [])
+    halow_findings, _halow_seen = [], set()
+
+    def _halow_add(code, severity, mac, detail):
+        key = (code, mac)
+        if key in _halow_seen:
+            return
+        _halow_seen.add(key)
+        halow_findings.append({'code': code, 'severity': severity,
+                               'mac': mac, 'detail': detail})
+
+    # On-segment MACs (v4 neighbour/arp-scan) and v6-L2 bindings, with their IPs.
+    halow_ips = {}
+    for c in current:
+        halow_ips.setdefault(c['mac'], set()).update(c['ips'])
+    halow_v4 = {c['mac'] for c in current}
+    halow_v6l2 = set()
+    for b in v6_bindings:
+        halow_v6l2.add(b['mac'])
+        halow_ips.setdefault(b['mac'], set()).update(b['ips'])
+    # Radios recovered from an EUI-64 IPv6 IID — survive routing (off-segment-capable).
+    halow_routed = set()
+    for mac6, ips6 in seen6.items():
+        for ip6 in ips6:
+            hm = _halow_mac_from_ipv6(ip6)
+            if hm:
+                halow_routed.add(hm)
+                halow_ips.setdefault(hm, set()).add(ip6)
+    halow_all = halow_v4 | halow_v6l2
+
+    # HALOW-01 — exact Morse OUI seen as an on-segment L2 binding.
+    halow_on_seg = sorted(m for m in halow_all if _is_halow_morse(m))
+    for m in halow_on_seg:
+        legs = [l for l, present in (('v4-L2', m in halow_v4),
+                                     ('v6-L2', m in halow_v6l2)) if present]
+        _halow_add('HALOW-01', 'info', m,
+                   f"Wi-Fi HaLow (802.11ah) radio {m} present on-segment "
+                   f"({', '.join(legs) or 'L2'}; {_HALOW_VENDOR} OUI) — bridged HaLow client")
+    # HALOW-02 — Morse radio recovered from an EUI-64 IPv6 identifier.
+    for m in sorted(halow_routed):
+        on_seg = m in halow_all
+        _halow_add('HALOW-02', 'info', m,
+                   f"Wi-Fi HaLow radio {m} identified from an EUI-64 IPv6 address "
+                   f"({_HALOW_VENDOR}; {'also on-segment' if on_seg else 'routed — off-segment'})")
+    # HALOW-03 — radio paired to its host: a Morse MAC whose NIC suffix equals a
+    # non-Morse *universal* MAC's suffix (the MM6108 blank-OTP fallback: the radio
+    # MAC is 0C:BF:74 + the host eth0's last three octets).
+    halow_morse_all = set(halow_on_seg) | halow_routed
+    host_by_suffix = {}
+    for c in current:
+        if c['klass'] == 'universal' and not _is_halow_morse(c['mac']):
+            sfx = _mac_suffix(c['mac'])
+            if sfx:
+                host_by_suffix.setdefault(sfx, c['mac'])
+    halow_paired = {}
+    for m in sorted(halow_morse_all):
+        host = host_by_suffix.get(_mac_suffix(m))
+        if host:
+            halow_paired[m] = host
+            _halow_add('HALOW-03', 'info', m,
+                       f"HaLow radio {m} shares NIC suffix …{_mac_suffix(m)} with host "
+                       f"MAC {host} — radio and host are one box (MM6108 fallback MAC)")
+    # HALOW-04 — derived VIF: LA-bit + Morse BF:74, corroborated by an exact-OUI
+    # sibling on the same NIC suffix (never fires alone). This same gate is why a
+    # legitimate MM6108 VIF is not reported as a spoofed_vendor_oui.
+    halow_morse_suffixes = {_mac_suffix(m) for m in halow_morse_all if _mac_suffix(m)}
+    halow_vifs = set()
+    for m in sorted(halow_all):
+        if _is_halow_vif_shape(m) and _mac_suffix(m) in halow_morse_suffixes:
+            halow_vifs.add(m)
+            _halow_add('HALOW-04', 'info', m,
+                       f"HaLow derived VIF {m} (locally-administered + {_HALOW_VENDOR} "
+                       f"BF:74) corroborated by an exact-OUI sibling on NIC suffix "
+                       f"…{_mac_suffix(m)}")
+    # HALOW-05 — posture: a radio not covered by the allowlist (empty by default,
+    # so every HaLow radio flags until an operator lists it — nothing implicitly
+    # trusted). LOW, a visibility signal, not an alarm.
+    halow_unexpected = []
+    for m in sorted(halow_morse_all):
+        if not _halow_allow_covers(halow_allow, m):
+            halow_unexpected.append(m)
+            _halow_add('HALOW-05', 'low', m,
+                       f"HaLow radio {m} is not in the MAC Watch HaLow allowlist — "
+                       f"unexpected 802.11ah radio on the segment (posture)")
+    for f in halow_findings:
+        if f['severity'] != 'info':
+            reasons.append(f"{f['detail']} [{f['code']}]")
+    # Presentation dedupe: one device per NIC suffix with the legs it was seen on.
+    _halow_devs = {}
+    _leg_order = {'v4-L2': 0, 'v6-L2': 1, 'v6-routed': 2}
+    for m in sorted(halow_morse_all | halow_vifs):
+        sfx = _mac_suffix(m) or '?'
+        d = _halow_devs.setdefault(sfx, {'macs': [], 'legs': set(), 'ips': set(),
+                                         'paired_host': None, 'approved': False})
+        d['macs'].append(m)
+        if m in halow_v4:
+            d['legs'].add('v4-L2')
+        if m in halow_v6l2:
+            d['legs'].add('v6-L2')
+        if m in halow_routed and m not in halow_all:
+            d['legs'].add('v6-routed')
+        d['ips'].update(halow_ips.get(m, ()))
+        if m in halow_paired:
+            d['paired_host'] = halow_paired[m]
+        if _halow_allow_covers(halow_allow, m):
+            d['approved'] = True
+    halow_devices = [{
+        'suffix': sfx, 'macs': sorted(d['macs']),
+        'legs': sorted(d['legs'], key=lambda l: _leg_order.get(l, 9)),
+        'ips': sorted(d['ips']), 'routed_only': d['legs'] == {'v6-routed'},
+        'paired_host': d['paired_host'], 'approved': d['approved'],
+    } for sfx, d in sorted(_halow_devs.items())]
+    halow = {
+        'radios': len(halow_morse_all),
+        'on_segment': len(halow_on_seg),
+        'routed': len([m for m in halow_routed if m not in halow_all]),
+        'paired': len(halow_paired),
+        'vifs': len(halow_vifs),
+        'unexpected': len(halow_unexpected),
+        'allowlisted': bool(halow_allow),
+        'findings': halow_findings,
+        'devices': halow_devices,
+    }
+
     if spoofed or clones or hi_events or fhrp_hijacks or l2sec_hi:
         verdict = 'spoofed'
     elif tracks or randomized or fhrp_virtuals or l2sec_med:
@@ -2035,11 +2269,14 @@ def do_mac_watch(scan=True, interface=None, l2sec=False, l2sec_seconds=_L2SEC_CA
             'eui64_mismatch': len(eui64_mismatches),
             'l2sec_high': l2sec['high'],
             'l2sec_medium': l2sec['medium'],
+            'halow_radios': halow['radios'],
+            'halow_unexpected': halow['unexpected'],
         },
         'spoofed': spoofed,
         'clones': clones,
         'fhrp': fhrp,
         'l2sec': l2sec,
+        'halow': halow,
         'ipv6': {'bindings': v6_bindings, 'eui64_mismatches': eui64_mismatches},
         # Every MAC seen this pass, worst class first, so the UI can list them.
         'observed_macs': sorted(
@@ -4787,6 +5024,65 @@ def _mac_selftest():
         scenarios.append({'name': 'mac-eui64-clean', 'expect': 'no mismatch',
                           'got': str(ok6.get('summary', {}).get('eui64_mismatch')),
                           'pass': ok6.get('summary', {}).get('eui64_mismatch') == 0})
+
+        # Wi-Fi HaLow (802.11ah) radio-presence census (MAC Watch v5). Capture-free:
+        # drive it through the neighbour-table seams. Morse Micro OUI 0C:BF:74; the
+        # EUI-64 IID 0ebf:74ff:fe… recovers the same radio off a routed IPv6 address.
+        def _halow_run(neigh4, neigh6=(), store=None):
+            g['_mac_watch_load'] = (lambda s=(store or {}): s)
+            g['_mac_watch_save'] = lambda d: None
+            g['_neigh_entries'] = (lambda iface=None, n=tuple(neigh4): list(n))
+            g['_neigh6_entries'] = (lambda iface=None, n=tuple(neigh6): list(n))
+            return do_mac_watch(scan=False).get('halow', {})
+
+        def _hck(name, cond, got=''):
+            scenarios.append({'name': name, 'expect': 'pass', 'got': str(got),
+                              'pass': bool(cond)})
+
+        MORSE = '0c:bf:74:11:22:33'
+        # HALOW-01 on-segment (v4 neighbour binding) + HALOW-05 posture (empty allow).
+        h = _halow_run([('192.168.9.50', MORSE, 'REACHABLE')])
+        hc = {f['code'] for f in h.get('findings', [])}
+        _hck('halow-01-radio-present',
+             h.get('on_segment') == 1 and 'HALOW-01' in hc, got=sorted(hc))
+        _hck('halow-05-unexpected-radio',
+             h.get('unexpected') == 1 and 'HALOW-05' in hc, got=h.get('unexpected'))
+        # HALOW-02 routed: a Morse EUI-64 IPv6 identifier bound to a non-Morse MAC —
+        # recovered off the address with no on-segment L2 presence of its own.
+        h = _halow_run([], [('2001:db8::ebf:74ff:fe11:2233', 'b8:27:eb:99:99:99', 'REACHABLE')])
+        hc = {f['code'] for f in h.get('findings', [])}
+        _hck('halow-02-eui64-routed',
+             'HALOW-02' in hc and h.get('routed') == 1, got=sorted(hc))
+        # HALOW-03 host-paired: a Morse MAC sharing its NIC suffix with a universal host.
+        h = _halow_run([('192.168.9.51', '0c:bf:74:ab:cd:ef', 'REACHABLE'),
+                        ('192.168.9.52', 'b8:27:eb:ab:cd:ef', 'REACHABLE')])
+        hc = {f['code'] for f in h.get('findings', [])}
+        _hck('halow-03-host-paired',
+             'HALOW-03' in hc and h.get('paired') == 1, got=sorted(hc))
+        # HALOW-04 derived VIF: LA-bit + Morse BF:74 corroborated by an exact-OUI
+        # sibling on the same NIC suffix.
+        h = _halow_run([('192.168.9.53', '0c:bf:74:77:88:99', 'REACHABLE'),
+                        ('192.168.9.54', '0e:bf:74:77:88:99', 'REACHABLE')])
+        hc = {f['code'] for f in h.get('findings', [])}
+        _hck('halow-04-derived-vif',
+             'HALOW-04' in hc and h.get('vifs') == 1, got=sorted(hc))
+        # … and an UNcorroborated VIF (no exact-OUI sibling) must NOT fire HALOW-04.
+        h = _halow_run([('192.168.9.55', '0e:bf:74:aa:aa:aa', 'REACHABLE')])
+        _hck('halow-04-vif-needs-sibling',
+             h.get('vifs') == 0 and not any(f['code'] == 'HALOW-04'
+                                            for f in h.get('findings', [])),
+             got=h.get('vifs'))
+        # Allowlist (by NIC suffix) approves a radio -> no HALOW-05.
+        h = _halow_run([('192.168.9.50', MORSE, 'REACHABLE')],
+                       store={'halow_allow': ['112233']})
+        _hck('halow-05-allowlist-suppresses',
+             h.get('on_segment') == 1 and h.get('unexpected') == 0
+             and not any(f['code'] == 'HALOW-05' for f in h.get('findings', [])),
+             got=h.get('unexpected'))
+        # FP guard: a segment with no Morse radio produces no HaLow findings at all.
+        h = _halow_run([('192.168.9.60', 'b8:27:eb:12:34:56', 'REACHABLE')])
+        _hck('halow-clean-no-radio',
+             h.get('radios') == 0 and not h.get('findings'), got=h.get('radios'))
     finally:
         g.update(saved)
 
