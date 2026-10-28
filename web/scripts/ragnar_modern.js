@@ -12584,6 +12584,8 @@ async function runMacWatch(scan) {
             chip(s.tracks || 0, ' tracked devices') +
             chip(s.fhrp_virtual || 0, ' FHRP virtual') +
             chip(s.fhrp_hijacks || 0, ' FHRP hijacks', true) +
+            ((d.halow && d.halow.radios) ? chip(s.halow_radios || 0, ' HaLow radios') : '') +
+            ((d.halow && d.halow.unexpected) ? chip(s.halow_unexpected || 0, ' HaLow unlisted') : '') +
             ((d.l2sec && d.l2sec.ran) ? chip(s.l2sec_high || 0, ' L2-sec high', true) : '') +
             '</div>';
 
@@ -12640,6 +12642,39 @@ async function runMacWatch(scan) {
                 '<ul class="text-xs text-gray-400 list-disc pl-5">' +
                 fhrp.virtual.map(v => `<li class="font-mono">${escapeHtml(v.mac)} <span class="text-gray-500">(${escapeHtml(v.note || v.proto || 'FHRP')})</span> → ${escapeHtml((v.ips || []).join(', ') || 'no IP')}</li>`).join('') +
                 '</ul>';
+        }
+        // Wi-Fi HaLow (802.11ah) radio-presence census — bridged HaLow radios
+        // identified on the wire by Morse Micro OUI 0C:BF:74 and EUI-64 IPv6 IIDs
+        // (no radio of our own). Census/fingerprint INFO; an unlisted radio is a
+        // LOW posture note, not an alarm.
+        const halow = d.halow || {};
+        if ((halow.devices && halow.devices.length) || (halow.findings && halow.findings.length)) {
+            html += '<p class="text-xs uppercase text-cyan-400 mt-3 mb-1">Wi-Fi HaLow (802.11ah) radios</p>';
+            if (halow.devices && halow.devices.length) {
+                html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                    '<tr class="text-left text-gray-500"><th class="px-2 py-1">Radio</th><th class="px-2 py-1">Seen via</th><th class="px-2 py-1">Paired host</th><th class="px-2 py-1">IP(s)</th><th class="px-2 py-1">Allowed</th></tr>' +
+                    '</thead><tbody>' +
+                    halow.devices.map(v => {
+                        const who = (v.macs && v.macs.length) ? v.macs[0] : ('…' + escapeHtml(v.suffix || '?'));
+                        const legs = v.routed_only ? 'routed-only' : (v.legs || []).join(', ');
+                        const ips = (v.ips || []);
+                        return `<tr class="border-t border-slate-800">
+                            <td class="px-2 py-1 font-mono text-cyan-300">${escapeHtml(who)}</td>
+                            <td class="px-2 py-1 text-gray-400">${escapeHtml(legs || 'L2')}</td>
+                            <td class="px-2 py-1 font-mono text-gray-400">${v.paired_host ? escapeHtml(v.paired_host) : '—'}</td>
+                            <td class="px-2 py-1 font-mono">${escapeHtml(ips.slice(0, 3).join(', ')) || '—'}${ips.length > 3 ? '…' : ''}</td>
+                            <td class="px-2 py-1 ${v.approved ? 'text-green-400' : 'text-amber-300'}">${v.approved ? '✓' : 'unlisted'}</td>
+                        </tr>`;
+                    }).join('') +
+                    '</tbody></table>';
+            }
+            const hp = (halow.findings || []).filter(f => f.severity !== 'info');
+            if (hp.length) {
+                html += '<ul class="text-xs text-amber-300 list-disc pl-5 mt-2">' +
+                    hp.map(f => `<li><span class="font-mono">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            html += '<p class="text-xs text-gray-600 mt-1">Presence census of bridged HaLow clients only (radio/NAT-mode radios are invisible and never inferred).</p>';
         }
         // Tracked devices (rotating randomized MACs)
         if (d.tracks && d.tracks.length) {

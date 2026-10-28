@@ -2968,6 +2968,7 @@
                                 </div>
                             </div>
                             <p class="text-sm text-gray-400 mb-3"><strong>L2 security (opt-in passive sniff):</strong> tick <em>L2 security</em> to add a short, harmless capture of the link-security control plane the neighbour table never sees — <strong>MACsec (802.1AE)</strong>, <strong>802.1X / EAPOL</strong> and <strong>MKA</strong>. It flags a MACsec packet-number that rolls backwards inside a secure association (replay), a secure-channel SCI whose system-identifier contradicts the frame's own source MAC (spoofed channel), a confidentiality downgrade (a once-encrypted association now integrity-only), and an EAPOL-Logoff burst that force-deauthenticates an 802.1X port (port-access DoS) — and inventories the MACsec / 802.1X / MKA that is legitimately in use.</p>
+                            <p class="text-sm text-gray-400 mb-3"><strong>Wi-Fi HaLow (802.11ah) census:</strong> every scan also runs a capture-free presence census of <strong>bridged HaLow radios</strong>. HaLow has no backhaul of its own, so the only wire signal is radio identity — a <strong>Morse Micro OUI (0C:BF:74)</strong> seen as an on-segment MAC, or its <strong>EUI-64 IPv6 identifier</strong> which survives routing — letting Ragnar identify HaLow hardware with no radio of its own (the on-the-wire sibling of the Thread / Matter / Z-Wave and LoRaWAN device-ID). It pairs a radio to its host NIC, recognizes MM6108 derived VIFs, and raises a low posture note for any radio not in the HaLow allowlist. A radio in router/NAT mode is invisible and never inferred.</p>
                             <div class="flex flex-wrap items-center gap-2">
                                 <select id="macwatch-iface" title="Interface for the arp-scan sweep — pick your WiFi or LAN NIC to scan that subnet" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
                                     <option value="">Auto (default route)</option>
@@ -9831,7 +9832,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261027-ssdp-v2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261028-mac-watch-v5"></script>
 
 
 
