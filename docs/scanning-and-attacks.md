@@ -23,6 +23,30 @@ still show up if [Traffic Analysis](traffic-analysis.md) sees them on the wire.
   ("Honor Scan Blacklists") lives in Settings.
 - Results and every nmap invocation are logged (see **Logging** below).
 
+### IP range scan (host discovery)
+
+On the **Networking → Hosts** tab, the **IP Range Scan** card sweeps a whole
+range and lists the live hosts — the Angry IP Scanner / Advanced IP Scanner
+pattern. It is *discovery only*: a single `nmap -sn` ping/ARP sweep with **no
+port scan**, so it is fast and safe to run against a big range.
+
+- **Input** — a CIDR (`192.168.1.0/24`) or a start-end range
+  (`192.168.1.1-192.168.1.254`, or the short `192.168.1.1-254`). The range is
+  bounded server-side to **1024 addresses**.
+- **Per live host** it shows IP, DNS hostname, NetBIOS name (optional — tick
+  *NetBIOS lookup* to add a UDP/137 `nbstat` probe), MAC address, MAC
+  vendor (OUI), status and response time. MAC and vendor resolve only for hosts
+  on your **local segment** (ARP does not cross a router) and need root — Ragnar
+  uses passwordless `sudo -n nmap` and falls back to an unprivileged sweep
+  (hostnames + response time, no MAC) otherwise.
+- **Per-host “Scan ports”** runs the existing deep scan (top 3000 ports) for
+  that IP, with live results in the console — no need to retype the address.
+- **Export CSV** downloads the current results.
+- Discovered hosts with a MAC are folded into the hosts database, so they also
+  appear in the persistent **Discovered Hosts** table below.
+
+Endpoint: `POST /api/scan/range` — body `{"range": "<cidr|start-end>", "netbios": <bool>}`.
+
 ## Vulnerability assessment
 
 Scans discovered hosts with **Nmap** and companion tools, mapping open services

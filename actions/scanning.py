@@ -386,6 +386,245 @@ class NetworkScanner:
         
         return all_hosts
 
+    # ------------------------------------------------------------------
+    # IP range host-discovery sweep (Hosts tab "IP Range Scan")
+    # ------------------------------------------------------------------
+    # A single ping/ARP round over a bounded range; no port scan. Bounded so a
+    # careless /16 never turns into a multi-hour sweep.
+    MAX_RANGE_HOSTS = 1024
+
+    def _expand_scan_range(self, target):
+        """Turn a user range into ``(nmap_targets, host_count)``.
+
+        Accepts CIDR (``192.168.1.0/24``), an explicit start-end
+        (``192.168.1.1-192.168.1.254`` or the short ``192.168.1.1-254``) or a
+        single IPv4. A CIDR is handed to nmap verbatim; a start-end is expanded
+        to an explicit address list so arbitrary (even cross-octet) ranges work.
+        Raises ``ValueError`` with a user-facing message on bad input or a range
+        larger than ``MAX_RANGE_HOSTS``.
+        """
+        if not target:
+            raise ValueError("No IP range given")
+        target = target.strip()
+        # Normalise the unicode dashes a phone keyboard likes to insert.
+        for dash in ('–', '—', '−'):
+            target = target.replace(dash, '-')
+
+        if '/' in target:
+            try:
+                net = ipaddress.ip_network(target, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid CIDR: {target}") from exc
+            if net.version != 4:
+                raise ValueError("Only IPv4 ranges are supported")
+            # /31 and /32 have no usable "hosts()"; count the addresses as-is.
+            count = (net.num_addresses - 2) if net.prefixlen <= 30 else net.num_addresses
+            count = max(count, 1)
+            if count > self.MAX_RANGE_HOSTS:
+                raise ValueError(
+                    f"Range too large ({count} hosts); the maximum is {self.MAX_RANGE_HOSTS}")
+            return [str(net)], count
+
+        if '-' in target:
+            start_s, end_s = (p.strip() for p in target.split('-', 1))
+            try:
+                start = ipaddress.IPv4Address(start_s)
+                if '.' in end_s:
+                    end = ipaddress.IPv4Address(end_s)
+                else:  # short form: 192.168.1.1-254 -> reuse the first three octets
+                    base = start_s.rsplit('.', 1)[0]
+                    end = ipaddress.IPv4Address(f"{base}.{end_s}")
+            except ValueError as exc:
+                raise ValueError(f"Invalid range: {target}") from exc
+            if int(end) < int(start):
+                raise ValueError("Range end is before its start")
+            count = int(end) - int(start) + 1
+            if count > self.MAX_RANGE_HOSTS:
+                raise ValueError(
+                    f"Range too large ({count} hosts); the maximum is {self.MAX_RANGE_HOSTS}")
+            ips = [str(ipaddress.IPv4Address(i)) for i in range(int(start), int(end) + 1)]
+            return ips, count
+
+        try:
+            ipaddress.IPv4Address(target)
+        except ValueError as exc:
+            raise ValueError(f"Invalid IP address: {target}") from exc
+        return [target], 1
+
+    def _run_nmap_xml(self, extra_args, targets, timeout):
+        """Run nmap with XML-to-stdout and return the parsed root, or ``None``.
+
+        Tries passwordless ``sudo -n`` first (needed for ARP MAC discovery and
+        the UDP NetBIOS probe), then falls back to an unprivileged run so
+        discovery still works off a non-root box -- just without MAC/vendor on
+        the local segment.
+        """
+        import shutil
+        import xml.etree.ElementTree as ET
+        nmap_bin = shutil.which('nmap') or '/usr/bin/nmap'
+        base = [nmap_bin, '-oX', '-'] + list(extra_args) + list(targets)
+        for prefix in (['sudo', '-n'], []):
+            cmd = prefix + base
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            except FileNotFoundError:
+                self.logger.error("nmap not found for range discovery")
+                return None
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"nmap range discovery timed out after {timeout}s")
+                return None
+            except Exception as exc:                                # noqa: BLE001
+                self.logger.error(f"nmap range discovery failed: {exc}")
+                return None
+            if result.stdout and result.stdout.lstrip().startswith('<?xml'):
+                try:
+                    return ET.fromstring(result.stdout)
+                except ET.ParseError as exc:
+                    self.logger.warning(f"nmap XML parse error: {exc}")
+                    return None
+            # sudo -n with no passwordless rule writes to stderr and exits
+            # non-zero; drop the sudo prefix and try again.
+            self.logger.debug(
+                f"nmap ({'sudo' if prefix else 'plain'}) produced no XML; "
+                f"stderr={result.stderr[:200] if result.stderr else ''!r}")
+        return None
+
+    def _parse_discovery_xml(self, root):
+        """Extract the up-hosts from an ``nmap -sn`` XML tree."""
+        out = []
+        for host in root.findall('host'):
+            status = host.find('status')
+            if status is None or status.get('state') != 'up':
+                continue
+            ip = mac = vendor = ''
+            for addr in host.findall('address'):
+                atype = addr.get('addrtype')
+                if atype == 'ipv4':
+                    ip = addr.get('addr', '')
+                elif atype == 'mac':
+                    mac = (addr.get('addr') or '').lower()
+                    vendor = addr.get('vendor', '') or ''
+            if not ip:
+                continue
+            hostname = ''
+            hn = host.find('hostnames')
+            if hn is not None:
+                el = hn.find('hostname')
+                if el is not None:
+                    hostname = el.get('name', '') or ''
+            response_ms = None
+            times = host.find('times')
+            if times is not None and times.get('srtt'):
+                try:  # nmap reports srtt in microseconds
+                    response_ms = round(int(times.get('srtt')) / 1000.0, 1)
+                except (TypeError, ValueError):
+                    response_ms = None
+            out.append({
+                'ip': ip, 'hostname': hostname, 'netbios': '',
+                'mac': mac, 'vendor': vendor, 'status': 'up',
+                'response_ms': response_ms,
+            })
+        return out
+
+    def _parse_nbstat_xml(self, root):
+        """Map ``ip -> NetBIOS name`` from an nbstat-script XML tree."""
+        names = {}
+        for host in root.findall('host'):
+            ip = ''
+            for addr in host.findall('address'):
+                if addr.get('addrtype') == 'ipv4':
+                    ip = addr.get('addr', '')
+                    break
+            if not ip:
+                continue
+            hs = host.find('hostscript')
+            if hs is None:
+                continue
+            for script in hs.findall('script'):
+                if script.get('id') != 'nbstat':
+                    continue
+                output = script.get('output', '') or ''
+                m = re.search(r'NetBIOS name:\s*([^,\n]+)', output)
+                if m:
+                    name = m.group(1).strip()
+                    if name and name != '<unknown>':
+                        names[ip] = name
+        return names
+
+    def discover_range(self, target, do_netbios=False, timeout=180):
+        """Fast host-discovery sweep over an IP range -- no port scan.
+
+        Returns a dict with ``success``, a ``hosts`` list (each carrying ``ip``,
+        ``hostname``, ``netbios``, ``mac``, ``vendor``, ``status`` and
+        ``response_ms``), ``count`` (hosts up), ``scanned`` (addresses probed),
+        ``privileged`` (whether MACs were resolved) and a ``message``.
+
+        Live hosts that resolve a MAC are upserted into the hosts database, so
+        the persistent Discovered Hosts table reflects the sweep too.
+        """
+        try:
+            targets, count = self._expand_scan_range(target)
+        except ValueError as exc:
+            return {'success': False, 'hosts': [], 'count': 0, 'scanned': 0,
+                    'message': str(exc), 'privileged': False}
+
+        self.logger.info(
+            f"🧭 Range discovery: target={target!r} ({count} addresses) netbios={do_netbios}")
+
+        # -sn: ping sweep only, no port scan. --host-timeout keeps one
+        # unresponsive host from stalling the whole sweep. Reverse DNS of the
+        # responsive hosts is nmap's default; gaps are filled below.
+        root = self._run_nmap_xml(['-sn', '--host-timeout', '30s'], targets, timeout)
+        if root is None:
+            return {'success': False, 'hosts': [], 'count': 0, 'scanned': count,
+                    'message': 'Host-discovery scan failed (nmap unavailable or timed out)',
+                    'privileged': False}
+
+        hosts = self._parse_discovery_xml(root)
+        privileged = any(h.get('mac') for h in hosts)
+
+        # Optional NetBIOS pass over just the live hosts (UDP/137 nbstat).
+        if do_netbios and hosts:
+            try:
+                live_ips = [h['ip'] for h in hosts]
+                nb_root = self._run_nmap_xml(
+                    ['-sU', '-p', '137', '--script', 'nbstat', '-Pn', '--host-timeout', '20s'],
+                    live_ips, timeout)
+                if nb_root is not None:
+                    nb_names = self._parse_nbstat_xml(nb_root)
+                    for h in hosts:
+                        if h['ip'] in nb_names:
+                            h['netbios'] = nb_names[h['ip']]
+            except Exception as exc:                                # noqa: BLE001
+                self.logger.debug(f"NetBIOS pass failed: {exc}")
+
+        # Fill DNS hostname gaps and persist discovered MACs to the host DB.
+        for h in hosts:
+            if not h.get('hostname'):
+                h['hostname'] = self.resolve_hostname(h['ip'])
+            mac = (h.get('mac') or '').lower().strip()
+            if mac and mac != '00:00:00:00:00:00':
+                if self.blacklistcheck and (
+                        mac in self.mac_scan_blacklist or h['ip'] in self.ip_scan_blacklist):
+                    continue
+                try:
+                    self.db.upsert_host(mac=mac, ip=h['ip'], vendor=h.get('vendor', ''))
+                    self.db.update_ping_status(mac, success=True)
+                    self.db.add_scan_history(mac, h['ip'], 'range_scan')
+                except Exception as exc:                            # noqa: BLE001
+                    self.logger.debug(f"Could not persist range host {h['ip']}: {exc}")
+
+        def _ip_key(host):
+            try:
+                return tuple(int(o) for o in host['ip'].split('.'))
+            except (ValueError, AttributeError):
+                return (0, 0, 0, 0)
+        hosts.sort(key=_ip_key)
+
+        return {'success': True, 'hosts': hosts, 'count': len(hosts), 'scanned': count,
+                'message': f"{len(hosts)} host(s) up of {count} scanned",
+                'privileged': privileged}
+
     def run_nmap_network_scan(self, network_cidr, portstart, portend, extra_ports):
 
         self.logger.info(f"🚀 Starting nmap network-wide scan: {network_cidr}")

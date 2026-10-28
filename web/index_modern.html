@@ -1518,6 +1518,58 @@
                 </div>
             </div>
 
+            <!-- IP Range Scan (Host Discovery) Card -->
+            <div class="glass rounded-xl p-4 sm:p-6 mb-6">
+                <div class="mb-4">
+                    <h2 class="text-lg sm:text-xl font-semibold mb-1">IP Range Scan</h2>
+                    <p class="text-sm text-gray-400">Sweep a whole range and list the live hosts — like Angry IP Scanner or Advanced IP Scanner. Discovery only (no port scan); MAC &amp; vendor show for hosts on your local segment.</p>
+                </div>
+
+                <div class="flex flex-col lg:flex-row lg:items-center gap-3">
+                    <div class="flex-1 min-w-0">
+                        <label for="range-scan-input" class="block text-xs text-gray-400 mb-1">IP range — CIDR or start–end</label>
+                        <input id="range-scan-input" type="text" inputmode="text" autocomplete="off"
+                               placeholder="192.168.1.0/24   or   192.168.1.1-192.168.1.254"
+                               class="w-full bg-slate-900/70 border border-slate-700 focus:border-Ragnar-500 rounded px-3 py-2 text-sm"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();runRangeScan();}" />
+                    </div>
+                    <label class="flex items-center gap-2 text-sm text-gray-300 whitespace-nowrap" title="Also probe UDP/137 for the Windows NetBIOS name (slower)">
+                        <input type="checkbox" id="range-scan-netbios" class="h-4 w-4 rounded border-slate-600 bg-slate-800" />
+                        NetBIOS lookup
+                    </label>
+                    <div class="flex items-center gap-2">
+                        <button id="range-scan-btn" onclick="runRangeScan()"
+                                class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+                            Scan Range
+                        </button>
+                        <button id="range-scan-csv-btn" onclick="exportRangeScanCsv()" disabled
+                                class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap opacity-40 cursor-not-allowed">
+                            Export CSV
+                        </button>
+                    </div>
+                </div>
+
+                <p id="range-scan-status" class="text-xs text-gray-400 mt-2">Enter a range and press Scan. Large ranges are capped at 1024 addresses.</p>
+
+                <div id="range-scan-results-wrap" class="hidden mt-4 overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-slate-600 text-left text-gray-400">
+                                <th class="py-2 px-3 font-medium">Status</th>
+                                <th class="py-2 px-3 font-medium">IP Address</th>
+                                <th class="py-2 px-3 font-medium">Hostname</th>
+                                <th class="py-2 px-3 font-medium">NetBIOS</th>
+                                <th class="py-2 px-3 font-medium">MAC</th>
+                                <th class="py-2 px-3 font-medium">Vendor</th>
+                                <th class="py-2 px-3 font-medium">Response</th>
+                                <th class="py-2 px-3 font-medium">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="range-scan-results"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- External Threat Detection Card -->
             <div class="glass rounded-xl p-4 sm:p-6 mb-6">
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
@@ -9832,7 +9884,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261028-mac-watch-v5"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261028-ip-range-scan"></script>
 
 
 

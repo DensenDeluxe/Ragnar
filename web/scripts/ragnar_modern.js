@@ -14228,6 +14228,179 @@ async function handleCustomDeepScanRequest() {
     }
 }
 
+// ============================================================================
+// IP RANGE SCAN (host discovery) — Hosts tab
+// ============================================================================
+
+// Last results, kept for the CSV export button.
+let _rangeScanResults = [];
+let _rangeScanLabel = '';
+
+// Lightweight client-side sanity check; the server is the real validator.
+function _looksLikeRange(value) {
+    const v = (value || '').trim().replace(/[–—−]/g, '-');
+    if (!v) return false;
+    const octet = '(25[0-5]|2[0-4]\\d|1?\\d?\\d)';
+    const ipv4 = `${octet}(\\.${octet}){3}`;
+    const cidr = new RegExp(`^${ipv4}/(\\d|[12]\\d|3[0-2])$`);
+    const startEnd = new RegExp(`^${ipv4}-(${ipv4}|${octet})$`);
+    const single = new RegExp(`^${ipv4}$`);
+    return cidr.test(v) || startEnd.test(v) || single.test(v);
+}
+
+async function runRangeScan() {
+    const inputEl = document.getElementById('range-scan-input');
+    const statusEl = document.getElementById('range-scan-status');
+    const buttonEl = document.getElementById('range-scan-btn');
+    const csvBtn = document.getElementById('range-scan-csv-btn');
+    const wrapEl = document.getElementById('range-scan-results-wrap');
+    const bodyEl = document.getElementById('range-scan-results');
+    if (!inputEl || !statusEl || !buttonEl || !bodyEl) return;
+
+    const range = inputEl.value.trim();
+    const netbios = !!(document.getElementById('range-scan-netbios') || {}).checked;
+
+    if (!range) {
+        statusEl.textContent = 'Enter an IP range before scanning.';
+        return;
+    }
+    if (!_looksLikeRange(range)) {
+        statusEl.textContent = 'That does not look like a CIDR (192.168.1.0/24) or start–end (192.168.1.1-192.168.1.254).';
+        return;
+    }
+
+    const originalText = buttonEl.dataset.defaultText || buttonEl.textContent;
+    buttonEl.dataset.defaultText = originalText;
+    buttonEl.disabled = true;
+    buttonEl.classList.add('cursor-wait', 'opacity-80');
+    buttonEl.textContent = 'Scanning…';
+    statusEl.textContent = `Discovering live hosts in ${range}${netbios ? ' (with NetBIOS)' : ''}… this can take a moment.`;
+    addConsoleMessage(`IP range scan started: ${range}${netbios ? ' + NetBIOS' : ''}`, 'info');
+
+    try {
+        const response = await networkAwareFetch('/api/scan/range', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ range: range, netbios: netbios })
+        });
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            _rangeScanResults = Array.isArray(data.hosts) ? data.hosts : [];
+            _rangeScanLabel = range;
+            renderRangeScanResults(_rangeScanResults, { privileged: data.privileged });
+            wrapEl.classList.remove('hidden');
+
+            const parts = [`${data.count} host(s) up of ${data.scanned} scanned`];
+            if (!data.privileged) parts.push('MAC/vendor need root or a local segment');
+            statusEl.textContent = parts.join(' — ') + '.';
+            addConsoleMessage(`IP range scan complete: ${data.count} host(s) up in ${range}`, 'success');
+
+            if (csvBtn) {
+                const enabled = _rangeScanResults.length > 0;
+                csvBtn.disabled = !enabled;
+                csvBtn.classList.toggle('opacity-40', !enabled);
+                csvBtn.classList.toggle('cursor-not-allowed', !enabled);
+            }
+        } else {
+            statusEl.textContent = `Scan failed: ${data.message || 'unknown error'}`;
+            addConsoleMessage(`IP range scan failed: ${data.message || 'unknown error'}`, 'error');
+        }
+    } catch (error) {
+        statusEl.textContent = `Unexpected error: ${error.message}`;
+        addConsoleMessage(`IP range scan error: ${error.message}`, 'error');
+    } finally {
+        buttonEl.disabled = false;
+        buttonEl.classList.remove('cursor-wait', 'opacity-80');
+        buttonEl.textContent = buttonEl.dataset.defaultText;
+    }
+}
+
+function renderRangeScanResults(hosts, opts = {}) {
+    const bodyEl = document.getElementById('range-scan-results');
+    if (!bodyEl) return;
+
+    if (!hosts || hosts.length === 0) {
+        bodyEl.innerHTML = `
+            <tr><td colspan="8" class="text-center py-6 text-gray-400">No live hosts found in this range.</td></tr>`;
+        return;
+    }
+
+    const dash = '<span class="text-gray-600">—</span>';
+    bodyEl.innerHTML = hosts.map(h => {
+        const ip = escapeHtml(h.ip || '');
+        const hostname = h.hostname ? escapeHtml(h.hostname) : dash;
+        const netbios = h.netbios ? escapeHtml(h.netbios) : dash;
+        const mac = h.mac ? `<span class="font-mono text-xs">${escapeHtml(h.mac)}</span>` : dash;
+        const vendor = h.vendor ? escapeHtml(h.vendor) : dash;
+        const resp = (h.response_ms !== null && h.response_ms !== undefined)
+            ? `${h.response_ms} ms` : dash;
+        const ipAttr = (h.ip || '').replace(/'/g, '');
+        return `
+            <tr class="border-b border-slate-800 hover:bg-slate-800/40">
+                <td class="py-2 px-3 whitespace-nowrap">
+                    <span class="inline-flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                        <span class="text-green-400">up</span>
+                    </span>
+                </td>
+                <td class="py-2 px-3 font-mono whitespace-nowrap">${ip}</td>
+                <td class="py-2 px-3">${hostname}</td>
+                <td class="py-2 px-3">${netbios}</td>
+                <td class="py-2 px-3 whitespace-nowrap">${mac}</td>
+                <td class="py-2 px-3">${vendor}</td>
+                <td class="py-2 px-3 whitespace-nowrap">${resp}</td>
+                <td class="py-2 px-3 whitespace-nowrap">
+                    <button onclick="rangeScanPortScan('${ipAttr}')"
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs font-medium transition-colors">
+                        Scan ports
+                    </button>
+                </td>
+            </tr>`;
+    }).join('');
+}
+
+// Per-host "Scan ports" — reuse the existing deep-scan pipeline (top 3000).
+async function rangeScanPortScan(ip) {
+    if (!ip) return;
+    const statusEl = document.getElementById('range-scan-status');
+    if (statusEl) statusEl.textContent = `Port scan queued for ${ip} — watch the console for live results.`;
+    addConsoleMessage(`Port scan requested for ${ip} from range results (top 3000 ports)`, 'info');
+    try {
+        await triggerDeepScan(ip, { mode: 'top3000', source: 'range' });
+    } catch (error) {
+        addConsoleMessage(`Failed to start port scan for ${ip}: ${error.message}`, 'error');
+    }
+}
+
+function exportRangeScanCsv() {
+    if (!_rangeScanResults || _rangeScanResults.length === 0) return;
+    const header = ['Status', 'IP Address', 'Hostname', 'NetBIOS', 'MAC', 'Vendor', 'Response (ms)'];
+    const esc = (val) => {
+        const s = (val === null || val === undefined) ? '' : String(val);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows = _rangeScanResults.map(h => [
+        h.status || 'up', h.ip || '', h.hostname || '', h.netbios || '',
+        h.mac || '', h.vendor || '',
+        (h.response_ms !== null && h.response_ms !== undefined) ? h.response_ms : ''
+    ].map(esc).join(','));
+    const csv = [header.join(','), ...rows].join('\r\n');
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const safeLabel = (_rangeScanLabel || 'range').replace(/[^0-9a-zA-Z._-]/g, '_');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ragnar-range-scan-${safeLabel}-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    addConsoleMessage(`Exported ${_rangeScanResults.length} host(s) to CSV`, 'success');
+}
+
 // TEST FUNCTION - Direct deep scan test
 function testDeepScan() {
     console.log('🧪 Testing deep scan with hardcoded IP...');

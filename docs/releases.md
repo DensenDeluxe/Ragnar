@@ -4,6 +4,15 @@
 
 ### 2026-10-28
 
+#### [#1026](https://github.com/PierreGode/Ragnar/pull/1026) — feat(net): IP Range Scan — host-discovery sweep on the Hosts tab
+*branch `feature/hosts-ip-range-scan`*
+
+- **Networking → Hosts** gains an **IP Range Scan** card — the Angry IP Scanner / Advanced IP Scanner pattern. Enter a **CIDR** (`192.168.1.0/24`) or a **start-end** range (`192.168.1.1-192.168.1.254`, or short `192.168.1.1-254`) and get the live hosts listed. Discovery only: a single `nmap -sn` ping/ARP sweep, **no port scan**, bounded server-side to **1024 addresses**.
+- **Per live host:** IP, DNS hostname, **NetBIOS** name (optional — tick *NetBIOS lookup* for a UDP/137 `nbstat` probe), MAC address, MAC **vendor** (OUI), status and **response time**. MAC/vendor resolve on the **local segment** only (ARP does not cross a router) and need root — Ragnar uses passwordless `sudo -n nmap` with an unprivileged fallback (hostnames + response time, no MAC).
+- **Per-host “Scan ports”** reuses the existing deep scan (`/api/scan/deep`, top 3000 ports) with live console output; **Export CSV** downloads the results. Live hosts with a MAC are folded into the hosts DB, so they also appear in the persistent **Discovered Hosts** table.
+- **Backend:** `NetworkScanner.discover_range()` + XML-parsing helpers in `actions/scanning.py`; new `POST /api/scan/range`. **Frontend:** the card + JS in `index_modern.html` / `ragnar_modern.js`, mobile-friendly (stacking controls, scrollable results table); JS cache-bust bumped.
+- **Tests:** `tests/test_range_discovery.py` — 14 cases (range-expansion guard rails, discovery + nbstat XML parsing), all green. **Docs:** [scanning-and-attacks.md › IP range scan](scanning-and-attacks.md#ip-range-scan-host-discovery) + README.
+
 #### [#1025](https://github.com/PierreGode/Ragnar/pull/1025) — feat(net): MAC Watch v5 — Wi-Fi HaLow (802.11ah) radio-presence census
 *branch `feature/mac-watch-v5`*
 
